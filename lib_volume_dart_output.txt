@@ -1,0 +1,528 @@
+\n\n// ====== lib/features/volume/domain/usecases/watch_volume.dart ======\n
+import 'dart:async';
+import '../../../../core/bridge/signal_bus.dart';
+import '../../../../core/config/app_config.dart';
+import '../entities/volume_item.dart';
+
+class WatchVolumeUseCase {
+  final SignalBus _signalBus;
+  
+  // 시간대별로 코인별 거래대금 추적
+  final Map<String, Map<String, _VolumeData>> _volumeByTimeFrame = {};
+  
+  // 마지막 리셋 시간 추적
+  final Map<String, DateTime> _lastResetTime = {};
+  
+  WatchVolumeUseCase(this._signalBus) {
+    _initializeContainers();
+  }
+  
+  // 컨테이너 초기화
+  void _initializeContainers() {
+    final now = DateTime.now();
+    
+    // 모든 시간대에 대해 컨테이너 초기화
+    for (var timeFrame in AppConfig.timeFrames) {
+      final key = '${timeFrame}m';
+      _volumeByTimeFrame[key] = {};
+      _lastResetTime[key] = now;
+    }
+  }
+  
+  // 특정 시간대의 모든 거래량 데이터 스트림 구독
+  Stream<List<VolumeItem>> execute(String timeFrame) {
+    // 스트림 컨트롤러 생성
+    final controller = StreamController<List<VolumeItem>>.broadcast();
+    
+    // 기존 데이터 바로 전송
+    _emitCurrentVolumes(controller, timeFrame);
+    
+    // SignalBus 구독하여 거래 정보 처리
+    final subscription = _signalBus.eventsOfType(SignalEventType.trade).listen(
+      (trade) {
+        _processTradeData(trade);
+        
+        // 업데이트된 데이터 전송
+        _emitCurrentVolumes(controller, timeFrame);
+        
+        // 필요 시 데이터 리셋
+        _checkAndResetData();
+      }
+    );
+    
+    // 10초마다 타이머 설정하여 업데이트
+    final timer = Timer.periodic(
+      const Duration(seconds: 10), 
+      (_) {
+        _checkAndResetData();
+        _emitCurrentVolumes(controller, timeFrame);
+      }
+    );
+    
+    // 컨트롤러 종료 시 리소스 정리
+    controller.onCancel = () {
+      subscription.cancel();
+      timer.cancel();
+    };
+    
+    return controller.stream;
+  }
+  
+  // 거래 데이터 처리
+  void _processTradeData(Map<String, dynamic> trade) {
+    try {
+      final market = trade['code'] as String? ?? trade['market'] as String?;
+      if (market == null) return;
+      
+      final priceRaw = trade['trade_price'] ?? trade['price'];
+      final volumeRaw = trade['trade_volume'] ?? trade['volume'];
+      
+      // 데이터 변환
+      final price = priceRaw is num ? priceRaw.toDouble() : 
+                  double.tryParse(priceRaw.toString()) ?? 0.0;
+      final volume = volumeRaw is num ? volumeRaw.toDouble() : 
+                   double.tryParse(volumeRaw.toString()) ?? 0.0;
+      
+      // 거래대금 계산
+      final total = price * volume;
+      if (total <= 0) return;
+      
+      // 모든 시간대에 대해 업데이트
+      for (var timeFrameEntry in _volumeByTimeFrame.entries) {
+        final timeKey = timeFrameEntry.key;
+        final volumeData = timeFrameEntry.value;
+        
+        // 마켓별 거래대금 누적
+        if (!volumeData.containsKey(market)) {
+          volumeData[market] = _VolumeData(price: price, volume: 0);
+        }
+        
+        volumeData[market]!.volume += total;
+        volumeData[market]!.price = price; // 최신 가격으로 업데이트
+        volumeData[market]!.lastUpdated = DateTime.now();
+      }
+    } catch (e) {
+      // 오류 처리
+    }
+  }
+  
+  // 현재 거래량 데이터 전송
+  void _emitCurrentVolumes(
+    StreamController<List<VolumeItem>> controller,
+    String timeFrame
+  ) {
+    // 해당 시간대의 데이터가 없으면 빈 리스트 반환
+    if (!_volumeByTimeFrame.containsKey(timeFrame)) {
+      controller.add([]);
+      return;
+    }
+    
+    final volumeData = _volumeByTimeFrame[timeFrame]!;
+    final items = volumeData.entries.map((entry) {
+      final market = entry.key;
+      final data = entry.value;
+      
+      return VolumeItem(
+        market: market,
+        volume: data.volume,
+        price: data.price,
+        timeFrame: timeFrame,
+        lastUpdated: data.lastUpdated,
+      );
+    }).toList();
+    
+    // 볼륨 기준 내림차순 정렬
+    items.sort((a, b) => b.volume.compareTo(a.volume));
+    
+    controller.add(items);
+  }
+  
+  // 각 시간대별 데이터 리셋 확인
+  void _checkAndResetData() {
+    final now = DateTime.now();
+    
+    for (var entry in _lastResetTime.entries) {
+      final timeFrame = entry.key;
+      final lastReset = entry.value;
+      
+      // 시간대에서 숫자 부분만 추출 (예: "5m" -> 5)
+      final minutes = int.tryParse(timeFrame.replaceAll('m', '')) ?? 1;
+      
+      // 해당 시간 간격만큼 지났으면 리셋
+      if (now.difference(lastReset).inMinutes >= minutes) {
+        _volumeByTimeFrame[timeFrame]?.clear();
+        _lastResetTime[timeFrame] = now;
+      }
+    }
+  }
+  
+  // 특정 시간대 데이터 수동 리셋
+  void resetTimeFrame(String timeFrame) {
+    if (_volumeByTimeFrame.containsKey(timeFrame)) {
+      _volumeByTimeFrame[timeFrame]?.clear();
+      _lastResetTime[timeFrame] = DateTime.now();
+    }
+  }
+}
+
+// 내부용 거래량 데이터 클래스
+class _VolumeData {
+  double price;
+  double volume;
+  DateTime lastUpdated;
+  
+  _VolumeData({
+    required this.price,
+    required this.volume,
+    DateTime? lastUpdated,
+  }) : lastUpdated = lastUpdated ?? DateTime.now();
+}\n\n// ====== lib/features/volume/domain/entities/volume_item.dart ======\n
+import 'package:equatable/equatable.dart';
+
+class VolumeItem extends Equatable {
+  final String market;
+  final double volume;
+  final double price;
+  final String timeFrame;  // "1m", "5m", "15m" 등
+  final DateTime lastUpdated;
+  
+  const VolumeItem({
+    required this.market,
+    required this.volume,
+    required this.price,
+    required this.timeFrame,
+    required this.lastUpdated,
+  });
+  
+  @override
+  List<Object?> get props => [market, volume, price, timeFrame, lastUpdated];
+  
+  // 복사 메서드
+  VolumeItem copyWith({
+    String? market,
+    double? volume,
+    double? price,
+    String? timeFrame,
+    DateTime? lastUpdated,
+  }) {
+    return VolumeItem(
+      market: market ?? this.market,
+      volume: volume ?? this.volume,
+      price: price ?? this.price,
+      timeFrame: timeFrame ?? this.timeFrame,
+      lastUpdated: lastUpdated ?? this.lastUpdated,
+    );
+  }
+  
+  // 볼륨 단위 포맷팅
+  String get formattedVolume {
+    if (volume >= 1000000000) {
+      return '${(volume / 1000000000).toStringAsFixed(2)}B';
+    } else if (volume >= 1000000) {
+      return '${(volume / 1000000).toStringAsFixed(2)}M';
+    } else if (volume >= 1000) {
+      return '${(volume / 1000).toStringAsFixed(2)}K';
+    } else {
+      return volume.toStringAsFixed(2);
+    }
+  }
+}\n\n// ====== lib/features/volume/presentation/providers/volume_provider.dart ======\n
+import 'dart:async';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../../../core/bridge/signal_bus.dart';
+import '../../../../core/config/app_config.dart';
+import '../../domain/entities/volume_item.dart';
+import '../../domain/usecases/watch_volume.dart';
+
+// 선택된 시간대 프로바이더
+final selectedTimeFrameProvider = StateProvider<String>((ref) => '1m');
+
+// 시간대 인덱스 프로바이더
+final timeFrameIndexProvider = StateProvider<int>((ref) => 0); // 기본값: 인덱스 0 (1분)
+
+// UseCase 프로바이더
+final volumeUseCaseProvider = Provider<WatchVolumeUseCase>((ref) {
+  final signalBus = SignalBus();
+  return WatchVolumeUseCase(signalBus);
+});
+
+// 거래량 상태 관리 Notifier
+class VolumeNotifier extends AutoDisposeAsyncNotifier<List<VolumeItem>> {
+  StreamSubscription<List<VolumeItem>>? _subscription;
+  
+  @override
+  FutureOr<List<VolumeItem>> build() async {
+    ref.onDispose(() {
+      _subscription?.cancel();
+    });
+    
+    // 선택된 시간대 변화 감지
+    final timeFrame = ref.watch(selectedTimeFrameProvider);
+    
+    // UseCase 인스턴스
+    final useCase = ref.watch(volumeUseCaseProvider);
+    
+    // 구독 취소 후 새로운 시간대로 재구독
+    _subscription?.cancel();
+    _subscription = useCase.execute(timeFrame).listen(
+      (volumes) {
+        state = AsyncData(volumes);
+      },
+      onError: (error, stack) {
+        state = AsyncError(error, stack);
+      }
+    );
+    
+    return [];
+  }
+  
+  // 시간대 변경
+  void setTimeFrame(String timeFrame, int index) {
+    ref.read(selectedTimeFrameProvider.notifier).state = timeFrame;
+    ref.read(timeFrameIndexProvider.notifier).state = index;
+  }
+  
+  // 데이터 수동 리셋
+  void resetData() {
+    final timeFrame = ref.read(selectedTimeFrameProvider);
+    ref.read(volumeUseCaseProvider).resetTimeFrame(timeFrame);
+  }
+  
+  // 특정 마켓 데이터 조회
+  VolumeItem? getMarketVolume(String market) {
+    if (state.value == null) return null;
+    
+    final items = state.value!;
+    for (final item in items) {
+      if (item.market == market) {
+        return item;
+      }
+    }
+    
+    return null;
+  }
+}
+
+// 거래량 데이터 Provider
+final volumeProvider = 
+    AutoDisposeAsyncNotifierProvider<VolumeNotifier, List<VolumeItem>>(
+        VolumeNotifier.new);
+
+// Top N 거래량 Provider (기본: 상위 50개)
+final topVolumeProvider = Provider.family<List<VolumeItem>, int>((ref, count) {
+  final volumeAsync = ref.watch(volumeProvider);
+  
+  return volumeAsync.maybeWhen(
+    data: (items) => items.take(count).toList(),
+    orElse: () => [],
+  );
+});\n\n// ====== lib/features/volume/presentation/pages/volume_page.dart ======\n
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../../../shared/widgets/common_app_bar.dart';
+import '../../../../core/config/app_config.dart';
+import '../../../../features/settings/presentation/providers/settings_provider.dart';
+import '../providers/volume_provider.dart';
+import '../widgets/volume_tile.dart';
+
+class VolumePage extends ConsumerWidget {
+  const VolumePage({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final volumeAsync = ref.watch(volumeProvider);
+    final settings = ref.watch(settingsProvider);
+    final selectedTimeFrame = ref.watch(selectedTimeFrameProvider);
+    final timeFrameIndex = ref.watch(timeFrameIndexProvider);
+    
+    return Scaffold(
+      appBar: const CommonAppBar(title: '거래량 분석'),
+      body: Column(
+        children: [
+          // 상단 슬라이더 (settings에 따라 위치 결정)
+          if (settings.sliderPosition == 'top') 
+            _buildTimeFrameSlider(context, ref, timeFrameIndex),
+          
+          // 메인 거래량 목록
+          Expanded(
+            child: volumeAsync.when(
+              data: (volumes) {
+                if (volumes.isEmpty) {
+                  return Center(
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Text(
+                          '거래량 데이터 수집 중...',
+                          style: TextStyle(
+                            color: Theme.of(context).hintColor,
+                            fontSize: 16,
+                          ),
+                        ),
+                        const SizedBox(height: 16),
+                        Text(
+                          '선택된 시간대: ${AppConfig.timeFrameNames[int.parse(selectedTimeFrame.replaceAll('m', ''))] ?? selectedTimeFrame}',
+                          style: const TextStyle(
+                            fontSize: 14,
+                          ),
+                        ),
+                      ],
+                    ),
+                  );
+                }
+                
+                return RefreshIndicator(
+                  onRefresh: () async {
+                    ref.read(volumeProvider.notifier).resetData();
+                  },
+                  child: ListView.builder(
+                    itemCount: volumes.length,
+                    padding: const EdgeInsets.all(16.0),
+                    itemBuilder: (context, index) {
+                      final volume = volumes[index];
+                      return VolumeTile(
+                        item: volume,
+                        rank: index + 1,
+                      );
+                    },
+                  ),
+                );
+              },
+              loading: () => const Center(child: CircularProgressIndicator()),
+              error: (error, stack) => Center(
+                child: Padding(
+                  padding: const EdgeInsets.all(16.0),
+                  child: Text(
+                    '오류가 발생했습니다: $error',
+                    style: const TextStyle(color: Colors.red),
+                    textAlign: TextAlign.center,
+                  ),
+                ),
+              ),
+            ),
+          ),
+          
+          // 하단 슬라이더 (settings에 따라 위치 결정)
+          if (settings.sliderPosition == 'bottom') 
+            _buildTimeFrameSlider(context, ref, timeFrameIndex),
+        ],
+      ),
+    );
+  }
+  
+  // 시간대 선택 슬라이더 위젯
+  Widget _buildTimeFrameSlider(BuildContext context, WidgetRef ref, int timeFrameIndex) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            '시간대: ${AppConfig.timeFrameNames[AppConfig.timeFrames[timeFrameIndex]]}',
+            style: const TextStyle(
+              fontSize: 16, 
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          Slider(
+            value: timeFrameIndex.toDouble(),
+            min: 0,
+            max: (AppConfig.timeFrames.length - 1).toDouble(),
+            divisions: AppConfig.timeFrames.length - 1,
+            label: AppConfig.timeFrameNames[AppConfig.timeFrames[timeFrameIndex]],
+            activeColor: Colors.orange,
+            onChanged: (value) {
+              final index = value.round();
+              final timeFrame = '${AppConfig.timeFrames[index]}m';
+              ref.read(volumeProvider.notifier).setTimeFrame(timeFrame, index);
+            },
+          ),
+        ],
+      ),
+    );
+  }
+}\n\n// ====== lib/features/volume/presentation/widgets/volume_tile.dart ======\n
+import 'package:flutter/material.dart';
+import 'package:intl/intl.dart';
+import '../../domain/entities/volume_item.dart';
+
+class VolumeTile extends StatelessWidget {
+  final VolumeItem item;
+  final int rank;
+  
+  const VolumeTile({
+    Key? key,
+    required this.item,
+    required this.rank,
+  }) : super(key: key);
+  
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final numberFormat = NumberFormat('#,###');
+    
+    return Card(
+      elevation: 2,
+      margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 0),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
+        child: Row(
+          children: [
+            // 순위
+            SizedBox(
+              width: 32,
+              child: Text(
+                '$rank',
+                style: TextStyle(
+                  fontWeight: FontWeight.bold,
+                  fontSize: rank <= 3 ? 18 : 16,
+                  color: rank <= 3 ? theme.colorScheme.primary : theme.colorScheme.onSurface,
+                ),
+              ),
+            ),
+            
+            // 마켓 코드
+            Expanded(
+              flex: 2,
+              child: Text(
+                item.market,
+                style: TextStyle(
+                  fontWeight: FontWeight.bold,
+                  color: theme.colorScheme.primary,
+                ),
+              ),
+            ),
+            
+            // 현재 가격
+            Expanded(
+              child: Text(
+                numberFormat.format(item.price),
+                style: TextStyle(
+                  color: theme.colorScheme.onSurface,
+                  fontSize: 14,
+                ),
+                textAlign: TextAlign.end,
+              ),
+            ),
+            
+            // 거래량
+            Expanded(
+              flex: 2,
+              child: Text(
+                numberFormat.format(item.volume),
+                style: const TextStyle(
+                  fontWeight: FontWeight.bold,
+                  fontSize: 14,
+                ),
+                textAlign: TextAlign.end,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}

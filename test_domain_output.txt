@@ -1,0 +1,1403 @@
+\n\n// ====== test/domain/repositories/settings_repository_test.dart ======\n
+\n\n// ====== test/domain/repositories/surge_repository_test.dart ======\n
+\n\n// ====== test/domain/repositories/momentary_repository_test.dart ======\n
+\n\n// ====== test/domain/repositories/volume_repository_test.dart ======\n
+\n\n// ====== test/domain/repositories/trade_repository_test.dart ======\n
+\n\n// ====== test/domain/usecases/trade_usecase_test.dart ======\n
+// test/domain/usecases/trade_usecase_test.dart
+import 'dart:async';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:mocktail/mocktail.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
+import 'package:noonchit/core/extensions/result.dart';
+import 'package:noonchit/domain/entities/trade.dart';
+import 'package:noonchit/domain/repositories/trade_repository.dart';
+import 'package:noonchit/domain/usecases/trade_usecase.dart';
+
+class MockTradeRepository extends Mock implements TradeRepository {}
+
+void main() {
+  late TradeUsecase usecase;
+  late MockTradeRepository mockRepo;
+
+  setUpAll(() async {
+    dotenv.testLoad(fileInput: '''
+LOG_LEVEL=debug
+DEBUG_MODE=true
+    ''');
+  });
+
+  setUp(() {
+    mockRepo = MockTradeRepository();
+    usecase = TradeUsecase(mockRepo);
+  });
+
+  group('TradeUsecase', () {
+    const trade = Trade(
+      market: 'KRW-BTC',
+      price: 50000.0,
+      volume: 2.5,
+      side: 'BID',
+      changePrice: 0.0,
+      changeState: 'EVEN',
+      timestampMs: 1630000000000,
+      sequentialId: '12345',
+    );
+
+    test('filterTrades should stream Ok with trades', () async {
+      final controller = StreamController<List<Trade>>();
+      when(() => mockRepo.watchFilteredTrades(20000000, ['KRW-BTC']))
+          .thenAnswer((_) => controller.stream);
+
+      final stream = usecase.filterTrades(20000000, ['KRW-BTC']);
+      controller.add([trade]);
+
+      final result = await stream.first;
+      expect(result, isA<Ok>());
+      expect((result as Ok).value, [trade]);
+
+      await controller.close();
+    });
+
+    test('filterTrades should stream Err on error', () async {
+      when(() => mockRepo.watchFilteredTrades(20000000, ['KRW-BTC']))
+          .thenAnswer((_) => Stream.error(Exception('Test error')));
+
+      final stream = usecase.filterTrades(20000000, ['KRW-BTC']);
+      final result = await stream.first;
+
+      expect(result, isA<Err>());
+      expect((result as Err).error.message, contains('Test error'));
+    });
+
+    test('filterTrades should handle multiple trades', () async {
+      final controller = StreamController<List<Trade>>();
+      when(() => mockRepo.watchFilteredTrades(20000000, ['KRW-BTC']))
+          .thenAnswer((_) => controller.stream);
+
+      final stream = usecase.filterTrades(20000000, ['KRW-BTC']);
+      
+      final trade2 = Trade(
+        market: 'KRW-ETH',
+        price: 30000.0,
+        volume: 1.0,
+        side: 'ASK',
+        changePrice: 0.0,
+        changeState: 'EVEN',
+        timestampMs: 1630000001000,
+        sequentialId: '67890',
+      );
+      
+      controller.add([trade, trade2]);
+
+      final result = await stream.first;
+      expect(result, isA<Ok>());
+      expect((result as Ok).value.length, 2);
+      expect((result as Ok).value, contains(trade));
+      expect((result as Ok).value, contains(trade2));
+
+      await controller.close();
+    });
+
+    test('filterTrades should handle empty list', () async {
+      final controller = StreamController<List<Trade>>();
+      when(() => mockRepo.watchFilteredTrades(20000000, ['KRW-BTC']))
+          .thenAnswer((_) => controller.stream);
+
+      final stream = usecase.filterTrades(20000000, ['KRW-BTC']);
+      controller.add(<Trade>[]);
+
+      final result = await stream.first;
+      expect(result, isA<Ok>());
+      expect((result as Ok).value, isEmpty);
+
+      await controller.close();
+    });
+
+    test('aggregateTrades should stream Ok with trade', () async {
+      final controller = StreamController<Trade>();
+      when(() => mockRepo.watchAggregatedTrades())
+          .thenAnswer((_) => controller.stream);
+
+      final stream = usecase.aggregateTrades();
+      controller.add(trade);
+
+      final result = await stream.first;
+      expect(result, isA<Ok>());
+      expect((result as Ok).value, trade);
+
+      await controller.close();
+    });
+
+    test('aggregateTrades should stream Err on error', () async {
+      when(() => mockRepo.watchAggregatedTrades())
+          .thenAnswer((_) => Stream.error(Exception('Aggregate error')));
+
+      final stream = usecase.aggregateTrades();
+      final result = await stream.first;
+
+      expect(result, isA<Err>());
+      expect((result as Err).error.message, contains('Aggregate error'));
+    });
+
+    test('aggregateTrades should handle multiple trades in sequence', () async {
+      final controller = StreamController<Trade>();
+      when(() => mockRepo.watchAggregatedTrades())
+          .thenAnswer((_) => controller.stream);
+
+      final stream = usecase.aggregateTrades();
+      final results = <Result<Trade, dynamic>>[];
+      
+      final subscription = stream.listen((result) {
+        results.add(result);
+      });
+      
+      controller.add(trade);
+      await Future.delayed(const Duration(milliseconds: 50));
+      
+      expect(results.length, 1);
+      expect(results[0], isA<Ok>());
+      expect((results[0] as Ok).value, trade);
+
+      final trade2 = Trade(
+        market: 'KRW-ETH',
+        price: 30000.0,
+        volume: 1.0,
+        side: 'ASK',
+        changePrice: 0.0,
+        changeState: 'EVEN',
+        timestampMs: 1630000001000,
+        sequentialId: '67890',
+      );
+      
+      controller.add(trade2);
+      await Future.delayed(const Duration(milliseconds: 50));
+      
+      expect(results.length, 2);
+      expect(results[1], isA<Ok>());
+      expect((results[1] as Ok).value, trade2);
+
+      await subscription.cancel();
+      await controller.close();
+    });
+
+    test('should handle repository method calls correctly', () async {
+      final filterController = StreamController<List<Trade>>();
+      final aggregateController = StreamController<Trade>();
+      
+      when(() => mockRepo.watchFilteredTrades(any(), any()))
+          .thenAnswer((_) => filterController.stream);
+      when(() => mockRepo.watchAggregatedTrades())
+          .thenAnswer((_) => aggregateController.stream);
+
+      // Test filter trades
+      final filterStream = usecase.filterTrades(100000, ['KRW-BTC', 'KRW-ETH']);
+      filterController.add([trade]);
+      await filterStream.first;
+      
+      verify(() => mockRepo.watchFilteredTrades(100000, ['KRW-BTC', 'KRW-ETH'])).called(1);
+
+      // Test aggregate trades
+      final aggregateStream = usecase.aggregateTrades();
+      aggregateController.add(trade);
+      await aggregateStream.first;
+      
+      verify(() => mockRepo.watchAggregatedTrades()).called(1);
+
+      await filterController.close();
+      await aggregateController.close();
+    });
+  });
+}\n\n// ====== test/domain/usecases/surge_usecase_test.dart ======\n
+\n\n// ====== test/domain/usecases/settings_usecase_test.dart ======\n
+// test/domain/usecases/settings_usecase_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:mocktail/mocktail.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
+import 'package:noonchit/domain/entities/app_settings.dart';
+import 'package:noonchit/domain/repositories/settings_repository.dart';
+import 'package:noonchit/domain/usecases/settings_usecase.dart';
+
+class MockSettingsRepository extends Mock implements SettingsRepository {}
+
+void main() {
+  late SettingsUsecase usecase;
+  late MockSettingsRepository mockRepo;
+
+  setUpAll(() async {
+    dotenv.testLoad(fileInput: '''
+LOG_LEVEL=debug
+DEBUG_MODE=true
+    ''');
+    registerFallbackValue(ThemeMode.system);
+    registerFallbackValue(SliderPosition.top);
+  });
+
+  setUp(() {
+    mockRepo = MockSettingsRepository();
+    usecase = SettingsUsecase(mockRepo);
+  });
+
+  group('SettingsUsecase', () {
+    const settings = AppSettings(
+      themeMode: ThemeMode.dark,
+      keepScreenOn: true,
+      sliderPosition: SliderPosition.bottom,
+    );
+
+    group('getSettings', () {
+      test('should return settings from repository', () async {
+        when(() => mockRepo.getSettings()).thenAnswer((_) async => settings);
+
+        final result = await usecase.getSettings();
+
+        expect(result, settings);
+        expect(result.themeMode, ThemeMode.dark);
+        expect(result.keepScreenOn, true);
+        expect(result.sliderPosition, SliderPosition.bottom);
+        verify(() => mockRepo.getSettings()).called(1);
+      });
+
+      test('should return default settings when repository returns defaults', () async {
+        const defaultSettings = AppSettings();
+        when(() => mockRepo.getSettings()).thenAnswer((_) async => defaultSettings);
+
+        final result = await usecase.getSettings();
+
+        expect(result, defaultSettings);
+        expect(result.themeMode, ThemeMode.system);
+        expect(result.keepScreenOn, false);
+        expect(result.sliderPosition, SliderPosition.top);
+        verify(() => mockRepo.getSettings()).called(1);
+      });
+
+      test('should propagate repository errors', () async {
+        when(() => mockRepo.getSettings()).thenThrow(Exception('Storage error'));
+
+        expect(() => usecase.getSettings(), throwsException);
+        verify(() => mockRepo.getSettings()).called(1);
+      });
+    });
+
+    group('updateThemeMode', () {
+      test('should call repository with light theme', () async {
+        when(() => mockRepo.updateThemeMode(ThemeMode.light)).thenAnswer((_) async => {});
+
+        await usecase.updateThemeMode(ThemeMode.light);
+
+        verify(() => mockRepo.updateThemeMode(ThemeMode.light)).called(1);
+      });
+
+      test('should call repository with dark theme', () async {
+        when(() => mockRepo.updateThemeMode(ThemeMode.dark)).thenAnswer((_) async => {});
+
+        await usecase.updateThemeMode(ThemeMode.dark);
+
+        verify(() => mockRepo.updateThemeMode(ThemeMode.dark)).called(1);
+      });
+
+      test('should call repository with system theme', () async {
+        when(() => mockRepo.updateThemeMode(ThemeMode.system)).thenAnswer((_) async => {});
+
+        await usecase.updateThemeMode(ThemeMode.system);
+
+        verify(() => mockRepo.updateThemeMode(ThemeMode.system)).called(1);
+      });
+
+      test('should propagate repository errors', () async {
+        when(() => mockRepo.updateThemeMode(any())).thenThrow(Exception('Update failed'));
+
+        expect(() => usecase.updateThemeMode(ThemeMode.light), throwsException);
+        verify(() => mockRepo.updateThemeMode(ThemeMode.light)).called(1);
+      });
+    });
+
+    group('updateKeepScreenOn', () {
+      test('should call repository with true', () async {
+        when(() => mockRepo.updateKeepScreenOn(true)).thenAnswer((_) async => {});
+
+        await usecase.updateKeepScreenOn(true);
+
+        verify(() => mockRepo.updateKeepScreenOn(true)).called(1);
+      });
+
+      test('should call repository with false', () async {
+        when(() => mockRepo.updateKeepScreenOn(false)).thenAnswer((_) async => {});
+
+        await usecase.updateKeepScreenOn(false);
+
+        verify(() => mockRepo.updateKeepScreenOn(false)).called(1);
+      });
+
+      test('should propagate repository errors', () async {
+        when(() => mockRepo.updateKeepScreenOn(any())).thenThrow(Exception('Update failed'));
+
+        expect(() => usecase.updateKeepScreenOn(true), throwsException);
+        verify(() => mockRepo.updateKeepScreenOn(true)).called(1);
+      });
+    });
+
+    group('updateSliderPosition', () {
+      test('should call repository with top position', () async {
+        when(() => mockRepo.updateSliderPosition(SliderPosition.top)).thenAnswer((_) async => {});
+
+        await usecase.updateSliderPosition(SliderPosition.top);
+
+        verify(() => mockRepo.updateSliderPosition(SliderPosition.top)).called(1);
+      });
+
+      test('should call repository with bottom position', () async {
+        when(() => mockRepo.updateSliderPosition(SliderPosition.bottom)).thenAnswer((_) async => {});
+
+        await usecase.updateSliderPosition(SliderPosition.bottom);
+
+        verify(() => mockRepo.updateSliderPosition(SliderPosition.bottom)).called(1);
+      });
+
+      test('should propagate repository errors', () async {
+        when(() => mockRepo.updateSliderPosition(any())).thenThrow(Exception('Update failed'));
+
+        expect(() => usecase.updateSliderPosition(SliderPosition.top), throwsException);
+        verify(() => mockRepo.updateSliderPosition(SliderPosition.top)).called(1);
+      });
+    });
+
+    group('integration scenarios', () {
+      test('should handle multiple sequential operations', () async {
+        when(() => mockRepo.getSettings()).thenAnswer((_) async => const AppSettings());
+        when(() => mockRepo.updateThemeMode(any())).thenAnswer((_) async => {});
+        when(() => mockRepo.updateKeepScreenOn(any())).thenAnswer((_) async => {});
+        when(() => mockRepo.updateSliderPosition(any())).thenAnswer((_) async => {});
+
+        // 초기 설정 가져오기
+        final initialSettings = await usecase.getSettings();
+        expect(initialSettings.themeMode, ThemeMode.system);
+
+        // 여러 설정 순차적으로 업데이트
+        await usecase.updateThemeMode(ThemeMode.dark);
+        await usecase.updateKeepScreenOn(true);
+        await usecase.updateSliderPosition(SliderPosition.bottom);
+
+        // 모든 메서드가 호출되었는지 확인
+        verify(() => mockRepo.getSettings()).called(1);
+        verify(() => mockRepo.updateThemeMode(ThemeMode.dark)).called(1);
+        verify(() => mockRepo.updateKeepScreenOn(true)).called(1);
+        verify(() => mockRepo.updateSliderPosition(SliderPosition.bottom)).called(1);
+      });
+
+      test('should handle repository method calls independently', () async {
+        when(() => mockRepo.updateThemeMode(any())).thenAnswer((_) async => {});
+        when(() => mockRepo.updateKeepScreenOn(any())).thenAnswer((_) async => {});
+        when(() => mockRepo.updateSliderPosition(any())).thenAnswer((_) async => {});
+
+        // 각 메서드를 독립적으로 호출
+        await usecase.updateKeepScreenOn(false);
+        await usecase.updateSliderPosition(SliderPosition.top);
+        await usecase.updateThemeMode(ThemeMode.light);
+
+        // 다른 메서드는 호출되지 않았는지 확인
+        verifyNever(() => mockRepo.getSettings());
+        verify(() => mockRepo.updateThemeMode(ThemeMode.light)).called(1);
+        verify(() => mockRepo.updateKeepScreenOn(false)).called(1);
+        verify(() => mockRepo.updateSliderPosition(SliderPosition.top)).called(1);
+      });
+    });
+  });
+}\n\n// ====== test/domain/usecases/volume_usecase_test.dart ======\n
+\n\n// ====== test/domain/usecases/momentary_usecase_test.dart ======\n
+\n\n// ====== test/domain/entities/volume_test.dart ======\n
+\n\n// ====== test/domain/entities/surge_test.dart ======\n
+\n\n// ====== test/domain/entities/app_settings_test.dart ======\n
+// test/domain/entities/app_settings_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
+import 'package:noonchit/domain/entities/app_settings.dart';
+
+void main() {
+  setUpAll(() async {
+    dotenv.testLoad(fileInput: '''
+LOG_LEVEL=debug
+DEBUG_MODE=true
+    ''');
+  });
+
+  group('AppSettings', () {
+    group('constructor and defaults', () {
+      test('should have correct default values', () {
+        const settings = AppSettings();
+
+        expect(settings.themeMode, ThemeMode.system);
+        expect(settings.keepScreenOn, false);
+        expect(settings.sliderPosition, SliderPosition.top);
+      });
+
+      test('should accept custom values', () {
+        const settings = AppSettings(
+          themeMode: ThemeMode.dark,
+          keepScreenOn: true,
+          sliderPosition: SliderPosition.bottom,
+        );
+
+        expect(settings.themeMode, ThemeMode.dark);
+        expect(settings.keepScreenOn, true);
+        expect(settings.sliderPosition, SliderPosition.bottom);
+      });
+
+      test('should support partial initialization', () {
+        const settings1 = AppSettings(themeMode: ThemeMode.light);
+        const settings2 = AppSettings(keepScreenOn: true);
+        const settings3 = AppSettings(sliderPosition: SliderPosition.bottom);
+
+        expect(settings1.themeMode, ThemeMode.light);
+        expect(settings1.keepScreenOn, false);
+        expect(settings1.sliderPosition, SliderPosition.top);
+
+        expect(settings2.themeMode, ThemeMode.system);
+        expect(settings2.keepScreenOn, true);
+        expect(settings2.sliderPosition, SliderPosition.top);
+
+        expect(settings3.themeMode, ThemeMode.system);
+        expect(settings3.keepScreenOn, false);
+        expect(settings3.sliderPosition, SliderPosition.bottom);
+      });
+    });
+
+    group('copyWith', () {
+      const originalSettings = AppSettings(
+        themeMode: ThemeMode.dark,
+        keepScreenOn: true,
+        sliderPosition: SliderPosition.bottom,
+      );
+
+      test('should return copy with updated themeMode', () {
+        final updated = originalSettings.copyWith(themeMode: ThemeMode.light);
+
+        expect(updated.themeMode, ThemeMode.light);
+        expect(updated.keepScreenOn, true); // 변경되지 않음
+        expect(updated.sliderPosition, SliderPosition.bottom); // 변경되지 않음
+      });
+
+      test('should return copy with updated keepScreenOn', () {
+        final updated = originalSettings.copyWith(keepScreenOn: false);
+
+        expect(updated.themeMode, ThemeMode.dark); // 변경되지 않음
+        expect(updated.keepScreenOn, false);
+        expect(updated.sliderPosition, SliderPosition.bottom); // 변경되지 않음
+      });
+
+      test('should return copy with updated sliderPosition', () {
+        final updated = originalSettings.copyWith(sliderPosition: SliderPosition.top);
+
+        expect(updated.themeMode, ThemeMode.dark); // 변경되지 않음
+        expect(updated.keepScreenOn, true); // 변경되지 않음
+        expect(updated.sliderPosition, SliderPosition.top);
+      });
+
+      test('should return copy with multiple updated values', () {
+        final updated = originalSettings.copyWith(
+          themeMode: ThemeMode.system,
+          keepScreenOn: false,
+        );
+
+        expect(updated.themeMode, ThemeMode.system);
+        expect(updated.keepScreenOn, false);
+        expect(updated.sliderPosition, SliderPosition.bottom); // 변경되지 않음
+      });
+
+      test('should return copy with all updated values', () {
+        final updated = originalSettings.copyWith(
+          themeMode: ThemeMode.light,
+          keepScreenOn: false,
+          sliderPosition: SliderPosition.top,
+        );
+
+        expect(updated.themeMode, ThemeMode.light);
+        expect(updated.keepScreenOn, false);
+        expect(updated.sliderPosition, SliderPosition.top);
+      });
+
+      test('should return identical copy when no parameters provided', () {
+        final updated = originalSettings.copyWith();
+
+        expect(updated.themeMode, originalSettings.themeMode);
+        expect(updated.keepScreenOn, originalSettings.keepScreenOn);
+        expect(updated.sliderPosition, originalSettings.sliderPosition);
+        expect(updated, equals(originalSettings));
+      });
+
+      test('should not modify original instance', () {
+        const original = AppSettings(
+          themeMode: ThemeMode.dark,
+          keepScreenOn: true,
+          sliderPosition: SliderPosition.bottom,
+        );
+
+        final updated = original.copyWith(
+          themeMode: ThemeMode.light,
+          keepScreenOn: false,
+          sliderPosition: SliderPosition.top,
+        );
+
+        // 원본은 변경되지 않아야 함
+        expect(original.themeMode, ThemeMode.dark);
+        expect(original.keepScreenOn, true);
+        expect(original.sliderPosition, SliderPosition.bottom);
+
+        // 새 인스턴스는 업데이트된 값을 가져야 함
+        expect(updated.themeMode, ThemeMode.light);
+        expect(updated.keepScreenOn, false);
+        expect(updated.sliderPosition, SliderPosition.top);
+      });
+    });
+
+    group('Equatable', () {
+      test('should be equal when all properties are same', () {
+        const settings1 = AppSettings(
+          themeMode: ThemeMode.dark,
+          keepScreenOn: true,
+          sliderPosition: SliderPosition.bottom,
+        );
+        const settings2 = AppSettings(
+          themeMode: ThemeMode.dark,
+          keepScreenOn: true,
+          sliderPosition: SliderPosition.bottom,
+        );
+
+        expect(settings1, equals(settings2));
+        expect(settings1.hashCode, equals(settings2.hashCode));
+      });
+
+      test('should not be equal when themeMode differs', () {
+        const settings1 = AppSettings(themeMode: ThemeMode.dark);
+        const settings2 = AppSettings(themeMode: ThemeMode.light);
+
+        expect(settings1, isNot(equals(settings2)));
+      });
+
+      test('should not be equal when keepScreenOn differs', () {
+        const settings1 = AppSettings(keepScreenOn: true);
+        const settings2 = AppSettings(keepScreenOn: false);
+
+        expect(settings1, isNot(equals(settings2)));
+      });
+
+      test('should not be equal when sliderPosition differs', () {
+        const settings1 = AppSettings(sliderPosition: SliderPosition.top);
+        const settings2 = AppSettings(sliderPosition: SliderPosition.bottom);
+
+        expect(settings1, isNot(equals(settings2)));
+      });
+
+      test('should have correct props', () {
+        const settings = AppSettings(
+          themeMode: ThemeMode.dark,
+          keepScreenOn: true,
+          sliderPosition: SliderPosition.bottom,
+        );
+
+        expect(settings.props, [
+          ThemeMode.dark,
+          true,
+          SliderPosition.bottom,
+        ]);
+      });
+
+      test('should work correctly with default values', () {
+        const settings1 = AppSettings();
+        const settings2 = AppSettings();
+
+        expect(settings1, equals(settings2));
+        expect(settings1.props, [
+          ThemeMode.system,
+          false,
+          SliderPosition.top,
+        ]);
+      });
+    });
+
+    group('SliderPosition enum', () {
+      test('should have correct values', () {
+        expect(SliderPosition.values, [SliderPosition.top, SliderPosition.bottom]);
+      });
+
+      test('should be usable in switch statements', () {
+        String getPositionName(SliderPosition position) {
+          switch (position) {
+            case SliderPosition.top:
+              return 'top';
+            case SliderPosition.bottom:
+              return 'bottom';
+          }
+        }
+
+        expect(getPositionName(SliderPosition.top), 'top');
+        expect(getPositionName(SliderPosition.bottom), 'bottom');
+      });
+    });
+
+    group('edge cases', () {
+      test('should handle all ThemeMode values', () {
+        const systemSettings = AppSettings(themeMode: ThemeMode.system);
+        const lightSettings = AppSettings(themeMode: ThemeMode.light);
+        const darkSettings = AppSettings(themeMode: ThemeMode.dark);
+
+        expect(systemSettings.themeMode, ThemeMode.system);
+        expect(lightSettings.themeMode, ThemeMode.light);
+        expect(darkSettings.themeMode, ThemeMode.dark);
+      });
+
+      test('should handle copyWith with same values', () {
+        const original = AppSettings(
+          themeMode: ThemeMode.dark,
+          keepScreenOn: true,
+          sliderPosition: SliderPosition.bottom,
+        );
+
+        final updated = original.copyWith(
+          themeMode: ThemeMode.dark, // 같은 값
+          keepScreenOn: true, // 같은 값
+          sliderPosition: SliderPosition.bottom, // 같은 값
+        );
+
+        expect(updated, equals(original));
+        expect(updated.themeMode, ThemeMode.dark);
+        expect(updated.keepScreenOn, true);
+        expect(updated.sliderPosition, SliderPosition.bottom);
+      });
+    });
+  });
+}\n\n// ====== test/domain/entities/momentary_test.dart ======\n
+\n\n// ====== test/domain/entities/trade_test.dart ======\n
+// test/domain/entities/trade_test.dart
+import 'package:flutter_test/flutter_test.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
+import 'package:noonchit/domain/entities/trade.dart';
+
+void main() {
+  setUpAll(() async {
+    dotenv.testLoad(fileInput: '''
+LOG_LEVEL=debug
+DEBUG_MODE=true
+    ''');
+  });
+
+  group('Trade', () {
+    const baseTrade = Trade(
+      market: 'KRW-BTC',
+      price: 50000.0,
+      volume: 2.5,
+      side: 'BID',
+      changePrice: 100.0,
+      changeState: 'RISE',
+      timestampMs: 1630000000000,
+      sequentialId: '12345',
+    );
+
+    group('constructor and properties', () {
+      test('should create trade with all required properties', () {
+        expect(baseTrade.market, 'KRW-BTC');
+        expect(baseTrade.price, 50000.0);
+        expect(baseTrade.volume, 2.5);
+        expect(baseTrade.side, 'BID');
+        expect(baseTrade.changePrice, 100.0);
+        expect(baseTrade.changeState, 'RISE');
+        expect(baseTrade.timestampMs, 1630000000000);
+        expect(baseTrade.sequentialId, '12345');
+      });
+
+      test('should handle different market codes', () {
+        const trades = [
+          Trade(
+            market: 'KRW-BTC',
+            price: 50000000.0,
+            volume: 1.0,
+            side: 'BID',
+            changePrice: 0.0,
+            changeState: 'EVEN',
+            timestampMs: 1630000000000,
+            sequentialId: '1',
+          ),
+          Trade(
+            market: 'KRW-ETH',
+            price: 4000000.0,
+            volume: 1.0,
+            side: 'ASK',
+            changePrice: -50000.0,
+            changeState: 'FALL',
+            timestampMs: 1630000000000,
+            sequentialId: '2',
+          ),
+          Trade(
+            market: 'BTC-ETH',
+            price: 0.08,
+            volume: 5.0,
+            side: 'BID',
+            changePrice: 0.001,
+            changeState: 'RISE',
+            timestampMs: 1630000000000,
+            sequentialId: '3',
+          ),
+        ];
+
+        expect(trades[0].market, 'KRW-BTC');
+        expect(trades[1].market, 'KRW-ETH');
+        expect(trades[2].market, 'BTC-ETH');
+      });
+    });
+
+    group('total calculation', () {
+      test('should calculate total correctly', () {
+        expect(baseTrade.total, 125000.0); // 50000.0 * 2.5
+      });
+
+      test('should handle small volumes', () {
+        const smallTrade = Trade(
+          market: 'KRW-BTC',
+          price: 50000000.0,
+          volume: 0.00001,
+          side: 'BID',
+          changePrice: 0.0,
+          changeState: 'EVEN',
+          timestampMs: 1630000000000,
+          sequentialId: '12345',
+        );
+
+        expect(smallTrade.total, closeTo(500.0, 0.0001)); // 50000000.0 * 0.00001
+      });
+
+      test('should handle large volumes', () {
+        const largeTrade = Trade(
+          market: 'KRW-BTC',
+          price: 50000000.0,
+          volume: 100.0,
+          side: 'BID',
+          changePrice: 0.0,
+          changeState: 'EVEN',
+          timestampMs: 1630000000000,
+          sequentialId: '12345',
+        );
+
+        expect(largeTrade.total, 5000000000.0); // 50000000.0 * 100.0
+      });
+
+      test('should handle zero volume', () {
+        const zeroTrade = Trade(
+          market: 'KRW-BTC',
+          price: 50000000.0,
+          volume: 0.0,
+          side: 'BID',
+          changePrice: 0.0,
+          changeState: 'EVEN',
+          timestampMs: 1630000000000,
+          sequentialId: '12345',
+        );
+
+        expect(zeroTrade.total, 0.0);
+      });
+
+      test('should handle decimal precision correctly', () {
+        const decimalTrade = Trade(
+          market: 'KRW-BTC',
+          price: 50000.123,
+          volume: 2.456789,
+          side: 'BID',
+          changePrice: 0.0,
+          changeState: 'EVEN',
+          timestampMs: 1630000000000,
+          sequentialId: '12345',
+        );
+
+        // 실제 계산값 확인: 50000.123 * 2.456789
+        expect(decimalTrade.total, closeTo(122839.75218504701, 0.01));
+      });
+    });
+
+    group('isBuy property', () {
+      test('should return true for BID', () {
+        const bidTrade = Trade(
+          market: 'KRW-BTC',
+          price: 50000.0,
+          volume: 1.0,
+          side: 'BID',
+          changePrice: 0.0,
+          changeState: 'EVEN',
+          timestampMs: 1630000000000,
+          sequentialId: '12345',
+        );
+
+        expect(bidTrade.isBuy, true);
+      });
+
+      test('should return false for ASK', () {
+        const askTrade = Trade(
+          market: 'KRW-BTC',
+          price: 50000.0,
+          volume: 1.0,
+          side: 'ASK',
+          changePrice: 0.0,
+          changeState: 'EVEN',
+          timestampMs: 1630000000000,
+          sequentialId: '12345',
+        );
+
+        expect(askTrade.isBuy, false);
+      });
+
+      test('should handle case sensitivity', () {
+        const lowercaseBid = Trade(
+          market: 'KRW-BTC',
+          price: 50000.0,
+          volume: 1.0,
+          side: 'bid', // 소문자
+          changePrice: 0.0,
+          changeState: 'EVEN',
+          timestampMs: 1630000000000,
+          sequentialId: '12345',
+        );
+
+        expect(lowercaseBid.isBuy, false); // 'BID'가 아니므로 false
+      });
+    });
+
+    group('timestamp conversion', () {
+      test('should convert timestampMs to DateTime correctly', () {
+        expect(baseTrade.timestamp.millisecondsSinceEpoch, 1630000000000);
+        expect(baseTrade.timestamp.year, 2021);
+        expect(baseTrade.timestamp.month, 8);
+        expect(baseTrade.timestamp.day, 27); // UTC 기준으로 27일
+      });
+
+      test('should handle different timestamps', () {
+        const recentTrade = Trade(
+          market: 'KRW-BTC',
+          price: 50000.0,
+          volume: 1.0,
+          side: 'BID',
+          changePrice: 0.0,
+          changeState: 'EVEN',
+          timestampMs: 1700000000000, // 2023년
+          sequentialId: '12345',
+        );
+
+        expect(recentTrade.timestamp.year, 2023);
+        expect(recentTrade.timestamp.month, 11);
+      });
+
+      test('should handle zero timestamp', () {
+        const zeroTrade = Trade(
+          market: 'KRW-BTC',
+          price: 50000.0,
+          volume: 1.0,
+          side: 'BID',
+          changePrice: 0.0,
+          changeState: 'EVEN',
+          timestampMs: 0,
+          sequentialId: '12345',
+        );
+
+        expect(zeroTrade.timestamp.year, 1970);
+        expect(zeroTrade.timestamp.month, 1);
+        expect(zeroTrade.timestamp.day, 1);
+      });
+    });
+
+    group('Equatable', () {
+      test('should be equal when all properties are same', () {
+        const trade1 = Trade(
+          market: 'KRW-BTC',
+          price: 50000.0,
+          volume: 2.5,
+          side: 'BID',
+          changePrice: 100.0,
+          changeState: 'RISE',
+          timestampMs: 1630000000000,
+          sequentialId: '12345',
+        );
+        const trade2 = Trade(
+          market: 'KRW-BTC',
+          price: 50000.0,
+          volume: 2.5,
+          side: 'BID',
+          changePrice: 100.0,
+          changeState: 'RISE',
+          timestampMs: 1630000000000,
+          sequentialId: '12345',
+        );
+
+        expect(trade1, equals(trade2));
+        expect(trade1.hashCode, equals(trade2.hashCode));
+      });
+
+      test('should not be equal when sequential ID differs', () {
+        const trade1 = Trade(
+          market: 'KRW-BTC',
+          price: 50000.0,
+          volume: 2.5,
+          side: 'BID',
+          changePrice: 100.0,
+          changeState: 'RISE',
+          timestampMs: 1630000000000,
+          sequentialId: '12345',
+        );
+        const trade2 = Trade(
+          market: 'KRW-BTC',
+          price: 50000.0,
+          volume: 2.5,
+          side: 'BID',
+          changePrice: 100.0,
+          changeState: 'RISE',
+          timestampMs: 1630000000000,
+          sequentialId: '67890',
+        );
+
+        expect(trade1, isNot(equals(trade2)));
+      });
+
+      test('should not be equal when price differs', () {
+        const trade1 = Trade(
+          market: 'KRW-BTC',
+          price: 50000.0,
+          volume: 2.5,
+          side: 'BID',
+          changePrice: 100.0,
+          changeState: 'RISE',
+          timestampMs: 1630000000000,
+          sequentialId: '12345',
+        );
+        const trade2 = Trade(
+          market: 'KRW-BTC',
+          price: 51000.0,
+          volume: 2.5,
+          side: 'BID',
+          changePrice: 100.0,
+          changeState: 'RISE',
+          timestampMs: 1630000000000,
+          sequentialId: '12345',
+        );
+
+        expect(trade1, isNot(equals(trade2)));
+      });
+
+      test('should have correct props order', () {
+        expect(baseTrade.props, [
+          'KRW-BTC',
+          50000.0,
+          2.5,
+          'BID',
+          100.0,
+          'RISE',
+          1630000000000,
+          '12345',
+        ]);
+      });
+    });
+
+    group('change states and price movements', () {
+      test('should handle RISE state', () {
+        const riseTrade = Trade(
+          market: 'KRW-BTC',
+          price: 50000.0,
+          volume: 1.0,
+          side: 'BID',
+          changePrice: 1000.0,
+          changeState: 'RISE',
+          timestampMs: 1630000000000,
+          sequentialId: '12345',
+        );
+
+        expect(riseTrade.changeState, 'RISE');
+        expect(riseTrade.changePrice, 1000.0);
+      });
+
+      test('should handle FALL state', () {
+        const fallTrade = Trade(
+          market: 'KRW-BTC',
+          price: 49000.0,
+          volume: 1.0,
+          side: 'ASK',
+          changePrice: -1000.0,
+          changeState: 'FALL',
+          timestampMs: 1630000000000,
+          sequentialId: '12345',
+        );
+
+        expect(fallTrade.changeState, 'FALL');
+        expect(fallTrade.changePrice, -1000.0);
+      });
+
+      test('should handle EVEN state', () {
+        const evenTrade = Trade(
+          market: 'KRW-BTC',
+          price: 50000.0,
+          volume: 1.0,
+          side: 'BID',
+          changePrice: 0.0,
+          changeState: 'EVEN',
+          timestampMs: 1630000000000,
+          sequentialId: '12345',
+        );
+
+        expect(evenTrade.changeState, 'EVEN');
+        expect(evenTrade.changePrice, 0.0);
+      });
+    });
+
+    group('different cryptocurrencies', () {
+      test('should handle Bitcoin trades', () {
+        const btcTrade = Trade(
+          market: 'KRW-BTC',
+          price: 50000000.0,
+          volume: 0.1,
+          side: 'BID',
+          changePrice: 500000.0,
+          changeState: 'RISE',
+          timestampMs: 1630000000000,
+          sequentialId: 'btc123',
+        );
+
+        expect(btcTrade.market, 'KRW-BTC');
+        expect(btcTrade.total, 5000000.0);
+        expect(btcTrade.isBuy, true);
+      });
+
+      test('should handle Ethereum trades', () {
+        const ethTrade = Trade(
+          market: 'KRW-ETH',
+          price: 4000000.0,
+          volume: 2.5,
+          side: 'ASK',
+          changePrice: -100000.0,
+          changeState: 'FALL',
+          timestampMs: 1630000000000,
+          sequentialId: 'eth456',
+        );
+
+        expect(ethTrade.market, 'KRW-ETH');
+        expect(ethTrade.total, 10000000.0);
+        expect(ethTrade.isBuy, false);
+      });
+
+      test('should handle altcoin trades', () {
+        const altTrade = Trade(
+          market: 'KRW-ADA',
+          price: 1500.0,
+          volume: 1000.0,
+          side: 'BID',
+          changePrice: 50.0,
+          changeState: 'RISE',
+          timestampMs: 1630000000000,
+          sequentialId: 'ada789',
+        );
+
+        expect(altTrade.market, 'KRW-ADA');
+        expect(altTrade.total, 1500000.0);
+        expect(altTrade.changePrice, 50.0);
+      });
+    });
+
+    group('edge cases and validations', () {
+      test('should handle very small decimal prices', () {
+        const microTrade = Trade(
+          market: 'KRW-DOGE',
+          price: 0.123456789,
+          volume: 10000.0,
+          side: 'BID',
+          changePrice: 0.001,
+          changeState: 'RISE',
+          timestampMs: 1630000000000,
+          sequentialId: '12345',
+        );
+
+        expect(microTrade.price, 0.123456789);
+        expect(microTrade.total, closeTo(1234.56789, 0.00001));
+      });
+
+      test('should handle very large volumes', () {
+        const largeTrade = Trade(
+          market: 'KRW-SHIB',
+          price: 0.001,
+          volume: 1000000000.0,
+          side: 'ASK',
+          changePrice: 0.0,
+          changeState: 'EVEN',
+          timestampMs: 1630000000000,
+          sequentialId: '12345',
+        );
+
+        expect(largeTrade.volume, 1000000000.0);
+        expect(largeTrade.total, 1000000.0);
+      });
+
+      test('should handle empty string market', () {
+        const emptyMarketTrade = Trade(
+          market: '',
+          price: 50000.0,
+          volume: 1.0,
+          side: 'BID',
+          changePrice: 0.0,
+          changeState: 'EVEN',
+          timestampMs: 1630000000000,
+          sequentialId: '12345',
+        );
+
+        expect(emptyMarketTrade.market, '');
+        expect(emptyMarketTrade.total, 50000.0);
+      });
+
+      test('should handle unusual side values', () {
+        const unusualTrade = Trade(
+          market: 'KRW-BTC',
+          price: 50000.0,
+          volume: 1.0,
+          side: 'UNKNOWN',
+          changePrice: 0.0,
+          changeState: 'EVEN',
+          timestampMs: 1630000000000,
+          sequentialId: '12345',
+        );
+
+        expect(unusualTrade.side, 'UNKNOWN');
+        expect(unusualTrade.isBuy, false); // BID가 아니므로 false
+      });
+
+      test('should handle negative prices (theoretical)', () {
+        const negativeTrade = Trade(
+          market: 'KRW-TEST',
+          price: -1000.0,
+          volume: 1.0,
+          side: 'BID',
+          changePrice: -100.0,
+          changeState: 'FALL',
+          timestampMs: 1630000000000,
+          sequentialId: '12345',
+        );
+
+        expect(negativeTrade.price, -1000.0);
+        expect(negativeTrade.total, -1000.0);
+      });
+
+      test('should handle future timestamps', () {
+        const futureTrade = Trade(
+          market: 'KRW-BTC',
+          price: 50000.0,
+          volume: 1.0,
+          side: 'BID',
+          changePrice: 0.0,
+          changeState: 'EVEN',
+          timestampMs: 2000000000000, // 2033년
+          sequentialId: '12345',
+        );
+
+        expect(futureTrade.timestamp.year, 2033);
+        expect(futureTrade.timestampMs, 2000000000000);
+      });
+    });
+
+    group('business logic scenarios', () {
+      test('should identify large trades by total value', () {
+        const smallTrade = Trade(
+          market: 'KRW-BTC',
+          price: 50000000.0,
+          volume: 0.0001, // 5천원
+          side: 'BID',
+          changePrice: 0.0,
+          changeState: 'EVEN',
+          timestampMs: 1630000000000,
+          sequentialId: '1',
+        );
+
+        const largeTrade = Trade(
+          market: 'KRW-BTC',
+          price: 50000000.0,
+          volume: 1.0, // 5천만원
+          side: 'BID',
+          changePrice: 0.0,
+          changeState: 'EVEN',
+          timestampMs: 1630000000000,
+          sequentialId: '2',
+        );
+
+        expect(smallTrade.total < 10000, true); // 1만원 미만
+        expect(largeTrade.total > 10000000, true); // 1천만원 초과
+      });
+
+      test('should compare trades by timestamp', () {
+        const earlierTrade = Trade(
+          market: 'KRW-BTC',
+          price: 50000.0,
+          volume: 1.0,
+          side: 'BID',
+          changePrice: 0.0,
+          changeState: 'EVEN',
+          timestampMs: 1630000000000,
+          sequentialId: '1',
+        );
+
+        const laterTrade = Trade(
+          market: 'KRW-BTC',
+          price: 50000.0,
+          volume: 1.0,
+          side: 'BID',
+          changePrice: 0.0,
+          changeState: 'EVEN',
+          timestampMs: 1630000001000,
+          sequentialId: '2',
+        );
+
+        expect(earlierTrade.timestampMs < laterTrade.timestampMs, true);
+        expect(earlierTrade.timestamp.isBefore(laterTrade.timestamp), true);
+      });
+
+      test('should handle trade aggregation scenarios', () {
+        final trades = [
+          const Trade(
+            market: 'KRW-BTC',
+            price: 50000000.0,
+            volume: 0.1,
+            side: 'BID',
+            changePrice: 0.0,
+            changeState: 'EVEN',
+            timestampMs: 1630000000000,
+            sequentialId: '1',
+          ),
+          const Trade(
+            market: 'KRW-BTC',
+            price: 50100000.0,
+            volume: 0.2,
+            side: 'BID',
+            changePrice: 100000.0,
+            changeState: 'RISE',
+            timestampMs: 1630000001000,
+            sequentialId: '2',
+          ),
+        ];
+
+        final totalVolume = trades.fold(0.0, (sum, trade) => sum + trade.volume);
+        final totalValue = trades.fold(0.0, (sum, trade) => sum + trade.total);
+
+        expect(totalVolume, closeTo(0.3, 0.0001));
+        expect(totalValue, closeTo(15020000.0, 0.01)); // 5000000 + 10020000
+      });
+
+      test('should filter trades by market', () {
+        final trades = [
+          const Trade(
+            market: 'KRW-BTC',
+            price: 50000000.0,
+            volume: 1.0,
+            side: 'BID',
+            changePrice: 0.0,
+            changeState: 'EVEN',
+            timestampMs: 1630000000000,
+            sequentialId: '1',
+          ),
+          const Trade(
+            market: 'KRW-ETH',
+            price: 4000000.0,
+            volume: 1.0,
+            side: 'BID',
+            changePrice: 0.0,
+            changeState: 'EVEN',
+            timestampMs: 1630000000000,
+            sequentialId: '2',
+          ),
+          const Trade(
+            market: 'KRW-BTC',
+            price: 50100000.0,
+            volume: 0.5,
+            side: 'ASK',
+            changePrice: 100000.0,
+            changeState: 'RISE',
+            timestampMs: 1630000000000,
+            sequentialId: '3',
+          ),
+        ];
+
+        final btcTrades = trades.where((trade) => trade.market == 'KRW-BTC').toList();
+        final ethTrades = trades.where((trade) => trade.market == 'KRW-ETH').toList();
+
+        expect(btcTrades.length, 2);
+        expect(ethTrades.length, 1);
+        expect(btcTrades[0].market, 'KRW-BTC');
+        expect(btcTrades[1].market, 'KRW-BTC');
+        expect(ethTrades[0].market, 'KRW-ETH');
+      });
+
+      test('should filter trades by side', () {
+        final trades = [
+          const Trade(
+            market: 'KRW-BTC',
+            price: 50000000.0,
+            volume: 1.0,
+            side: 'BID',
+            changePrice: 0.0,
+            changeState: 'EVEN',
+            timestampMs: 1630000000000,
+            sequentialId: '1',
+          ),
+          const Trade(
+            market: 'KRW-BTC',
+            price: 50000000.0,
+            volume: 0.5,
+            side: 'ASK',
+            changePrice: 0.0,
+            changeState: 'EVEN',
+            timestampMs: 1630000000000,
+            sequentialId: '2',
+          ),
+          const Trade(
+            market: 'KRW-BTC',
+            price: 50000000.0,
+            volume: 2.0,
+            side: 'BID',
+            changePrice: 0.0,
+            changeState: 'EVEN',
+            timestampMs: 1630000000000,
+            sequentialId: '3',
+          ),
+        ];
+
+        final buyTrades = trades.where((trade) => trade.isBuy).toList();
+        final sellTrades = trades.where((trade) => !trade.isBuy).toList();
+
+        expect(buyTrades.length, 2);
+        expect(sellTrades.length, 1);
+        expect(buyTrades.every((trade) => trade.side == 'BID'), true);
+        expect(sellTrades.every((trade) => trade.side == 'ASK'), true);
+      });
+
+      test('should calculate weighted average price', () {
+        final trades = [
+          const Trade(
+            market: 'KRW-BTC',
+            price: 50000000.0,
+            volume: 1.0,
+            side: 'BID',
+            changePrice: 0.0,
+            changeState: 'EVEN',
+            timestampMs: 1630000000000,
+            sequentialId: '1',
+          ),
+          const Trade(
+            market: 'KRW-BTC',
+            price: 51000000.0,
+            volume: 2.0,
+            side: 'BID',
+            changePrice: 1000000.0,
+            changeState: 'RISE',
+            timestampMs: 1630000001000,
+            sequentialId: '2',
+          ),
+        ];
+
+        final totalValue = trades.fold(0.0, (sum, trade) => sum + trade.total);
+        final totalVolume = trades.fold(0.0, (sum, trade) => sum + trade.volume);
+        final weightedAvgPrice = totalValue / totalVolume;
+
+        expect(weightedAvgPrice, closeTo(50666666.67, 0.01)); // (50M + 102M) / 3
+      });
+    });
+  });
+}

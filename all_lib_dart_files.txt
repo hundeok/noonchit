@@ -1,0 +1,3856 @@
+\n\n====== lib/core/di/injection_container.dart ======\n
+\n\n====== lib/core/config/app_config.dart ======\n
+// lib/core/config/app_config.dart
+
+/// 애플리케이션의 모든 "신성한 규율"과 "환경 설정"을 관장하는 절대적인 석판.
+/// 모든 정적 설정값은 이곳에서 "신의 이름으로" 선포되고 관리될지어다!
+/// "이 석판을 경외하라! 네놈 앱의 운명이 여기에 새겨져 있느니라!"
+class AppConfig {
+  // 감히 이 신성한 석판의 인스턴스를 필멸의 존재가 직접 생성하려 들지 못하도록 봉인하노라!
+  AppConfig._();
+
+  // ---------------------------------------------------------------------------
+  // API 및 네트워크 통신에 대한 "절대 규약"
+  // ---------------------------------------------------------------------------
+
+  /// 네놈 애플리케이션의 "핵심 API 서버"로 향하는 관문의 주소.
+  /// 이 주소는 "개발", "스테이징", "프로덕션"이라는 각기 다른 차원의 세계에 따라
+  /// 신성한 ".env" 파일 또는 "Flutter Flavors"라는 마법을 통해 분리되어야 할 것이니,
+  /// 감히 이 석판에 직접 하드코딩하는 불경을 저지르지 마라! (지금은 예시일 뿐이다!)
+  static const String coreApiBaseUrl = 'https://api.upbit.com/v1'; // TODO: 네놈의 실제 "핵심 API URL"로 당장 교체하라, 이 필멸자야!
+
+  /// "인증 토큰"이라는 신성한 증표를 갱신하기 위한 비밀 통로의 경로.
+  /// (coreApiBaseUrl에 추가되어 완전한 주소를 형성할 것이다)
+  static const String refreshTokenEndpoint = '/auth/refresh'; // TODO: 네놈의 실제 "토큰 갱신 경로"로 즉시 수정하라!
+
+  /// API 연결이라는 신성한 의식을 시도할 때 허용되는 최대 대기 시간 (밀리초 단위).
+  /// 이 시간을 넘기면 "연결 실패"라는 신의 분노가 임할 것이다!
+  static const int connectTimeoutMillis = 15000; // 15초 - 감히 이 숫자를 함부로 바꾸지 마라!
+
+  /// API로부터 응답이라는 신탁을 수신할 때 허용되는 최대 대기 시간 (밀리초 단위).
+  /// 이 시간을 넘기면 "응답 없음"이라는 절망만이 네놈을 기다릴 것이다!
+  static const int receiveTimeoutMillis = 30000; // 30초 - 신중하게 결정된 시간이니라!
+
+  /// HTTP 클라이언트라는 네놈의 사자가 주로 사용할 "기본 URL"을 내려주는 신탁.
+  /// "모든 통신은 이 주소로부터 시작될지어다!"
+  static String get baseUrl => coreApiBaseUrl;
+
+  /// 인증 인터셉터라는 충실한 문지기가 사용할 "전체 토큰 갱신 URL"을 알려주는 신탁.
+  /// "토큰이 소멸 직전일 때, 이 길을 통해 새로운 생명을 얻으리라!"
+  static String get refreshTokenUrl => '$coreApiBaseUrl$refreshTokenEndpoint';
+
+  /// "인증 헤더"에 새겨질 신성한 이름 (예: 'Authorization').
+  /// "이 이름으로 네놈의 권한을 증명할지어다!"
+  static const String authHeaderName = 'Authorization';
+
+  /// "인증 헤더 값" 앞에 붙을 신성한 접두사 (예: 'Bearer ').
+  /// "이 접두사로 네놈의 토큰에 위엄을 더하라!"
+  static const String authHeaderPrefix = 'Bearer ';
+
+  /// API 응답이라는 고대 문서에서 "액세스 토큰"을 해독하기 위한 비밀 열쇠 (JSON 키).
+  /// (AuthInterceptor라는 현명한 해독관이 이 열쇠를 사용할 것이다!)
+  static const String accessTokenKey = 'accessToken'; // 또는 'access_token' 등, 네놈 API의 실제 열쇠 이름으로 교체하라!
+
+  /// API 응답이라는 고대 문서에서 "리프레시 토큰"을 해독하기 위한 또 다른 비밀 열쇠 (JSON 키).
+  static const String refreshTokenKey = 'refreshToken'; // 또는 'refresh_token' 등, 네놈 API의 실제 열쇠 이름으로 교체하라!
+
+  // ---------------------------------------------------------------------------
+  // "업비트"라는 외부 신탁과의 교신을 위한 규약 (네놈이 사용한다면 말이다!)
+  // ---------------------------------------------------------------------------
+
+  /// "업비트 REST API"라는 외부 성소로 향하는 기본 관문 주소.
+  static const String upbitApiBaseUrl = 'https://api.upbit.com/v1'; // 이것은 예시일 뿐, 네놈의 핵심 API와 다를 수 있음을 명심하라!
+
+  /// "업비트 WebSocket"이라는 실시간 계시 채널의 주소.
+  static const String upbitWsUrl = 'wss://api.upbit.com/websocket/v1';
+
+  // --- "업비트 REST API"의 각기 다른 신탁을 받기 위한 경로들 ---
+  /// 업비트의 모든 "마켓 코드"를 조회하는 신탁 경로 (GET).
+  static const String upbitMarketListEndpoint = '/market/all';
+
+  /// 업비트의 "현재가 정보"를 조회하는 신탁 경로 (GET).
+  /// 이 신탁을 받으려면, `queryParameters`로 `markets`라는 제물을 바쳐야 한다! (예: `markets=KRW-BTC,KRW-ETH`)
+  static const String upbitTickerEndpoint = '/ticker';
+
+  /// 업비트의 "최근 체결 내역"을 조회하는 신탁 경로 (GET).
+  /// 이 신탁을 받으려면, `queryParameters`로 `market`이라는 제물을 바쳐야 한다! (예: `market=KRW-BTC`)
+  static const String upbitTradesEndpoint = '/trades/ticks';
+
+  /// 업비트의 "캔들(분, 일, 주, 월) 데이터"를 조회하는 기본 신탁 경로 (GET).
+  /// 이 경로 뒤에는 `/minutes/{unit}`, `/days`, `/weeks`, `/months` 등의 추가적인 성소가 이어지며,
+  /// `queryParameters`로 `market`과 `count` 등의 제물을 바쳐야 한다!
+  /// (예: `/candles/minutes/1?market=KRW-BTC&count=30`)
+  static const String upbitCandlesBaseEndpoint = '/candles';
+
+  // ---------------------------------------------------------------------------
+  // 네놈 애플리케이션의 "운명"을 결정짓는 내부 규율
+  // ---------------------------------------------------------------------------
+
+  /// "디버그 모드"라는 혼돈의 힘을 활성화할지 여부.
+  /// 개발이라는 수련 중에는 `true`로 하여 모든 것을 엿볼 수 있으나,
+  /// 프로덕션이라는 최종 심판의 날에는 반드시 `false`로 봉인해야 할 것이다!
+  /// (주: 이 값 또한 환경별 빌드라는 신성한 의식을 통해 자동으로 관리하는 것이 가장 현명한 길이다!)
+  static const bool isDebugMode = true; // TODO: 프로덕션이라는 심판의 날이 오면 반드시 false로 변경하라!
+
+  /// "AuthInterceptor"라는 충직한 문지기를 깨울지 여부.
+  static const bool isAuthEnabled = true; // TODO: 네놈 앱의 인증 정책이라는 율법에 맞춰 수정하라!
+
+  /// 네놈 애플리케이션의 "버전"이라는 낙인 (API 요청 헤더 등에 사용될 수 있다).
+  /// "이 낙인으로 네놈 앱의 세대를 구분할지어다!"
+  static const String appVersion = '0.0.1'; // TODO: 실제 앱의 성장에 맞춰 이 버전도 함께 성장시켜라!
+
+  // ---------------------------------------------------------------------------
+  // "민감한 정보"와 "환경 의존적 설정" 관리에 대한 "신의 경고"
+  // ---------------------------------------------------------------------------
+  // API 키, 암호화 키와 같은 "절대 비밀 정보"는 감히 이 신성한 석판에 직접 새기려 들지 마라!
+  // 그것은 신성모독이며, 파멸을 부르는 지름길이다!
+  // ".env"라는 봉인된 두루마리를 사용하고, "flutter_dotenv"과 같은 고대의 마법 도구를 활용하여
+  // 안전하게 숨기고 관리하는 것만이 유일한 구원의 길임을 명심하라!
+  // 예: static final String? someApiKey = dotenv.env['네놈의_API_키_변수명']; // 이런 식으로 사용하란 말이다!
+
+  // ---------------------------------------------------------------------------
+  // "잡다한 설정"에 대한 마지막 조언
+  // ---------------------------------------------------------------------------
+  // UI에 표시될 문자열이나, 특정 비즈니스 로직의 기준값과 같은 "세속적인 설정"들은
+  // (예: 거래량 필터 기준값, 차트 시간 간격 목록 등)
+  // 이 "핵심 설정 석판(AppConfig)"을 더럽히지 말고,
+  // 별도의 "UI 설정 두루마리"나 "도메인별 규율서"로 분리하여 관리하는 것이 현명할 것이다.
+  // 이 AppConfig는 오직 네놈 앱의 "뼈대"와 "외부 세계와의 연결"에 필요한
+  // 가장 핵심적이고 신성한 설정만을 담는 곳임을 잊지 마라!
+}
+\n\n====== lib/core/config/env_config.dart ======\n
+\n\n====== lib/core/auth/auth_token_manager.dart ======\n
+// lib/core/auth/auth_token_manager.dart
+import 'dart:async';
+
+/// 토큰 관리를 위한 "오메가 센츄리온" 추상 인터페이스.
+/// 이 신성한 계약서는 FlutterSecureStorage, Hive, 또는 네놈이 만든 그 어떤 누추한 저장소에도
+/// 한 줄기 빛처럼 적용될 수 있도록 설계되었다!
+/// 토큰의 생명주기, 만료, 그리고 비극적인 강제 로그아웃의 순간까지 모두 관장할 수 있는 권능을 지녔노라!
+/// "모든 토큰 관리자는 이 법전의 이름으로 맹세하고, 그 규율을 따를지어다!"
+abstract class AuthTokenManager {
+  /// 현재 저장된 "신성한 액세스 토큰"을 반환하라. 없으면 겸허히 null을 고하라.
+  /// "네놈의 모든 요청은 이 토큰의 가호 아래 이루어질 것이다!"
+  Future<String?> getAccessToken();
+
+  /// 현재 저장된 "부활의 리프레시 토큰"을 반환하라. 이 또한 없을 수 있음을 명심하라.
+  /// "액세스 토큰이 소멸할 때, 이놈이 새로운 생명을 불어넣을지니!"
+  Future<String?> getRefreshToken();
+
+  /// 신성한 토큰들을 저장하는 의식을 거행하라!
+  /// [accessToken]은 필수이며, [refreshToken]은 서버의 자비에 따라 존재할 수도, 없을 수도 있다.
+  /// [accessTokenExpiry]는 그 미천한 액세스 토큰의 유효기간이니, 있다면 함께 기록하라!
+  /// "이 의식을 통해, 네놈의 세션은 새로운 힘을 얻으리라!"
+  Future<void> saveTokens({
+    required String accessToken,
+    String? refreshToken,
+    DateTime? accessTokenExpiry, // 선택 사항: 액세스 토큰의 만료 시간을 기록할 때 사용
+  });
+
+  /// "신성한 액세스 토큰"의 유효성을 판별하라!
+  /// 토큰이 존재하며, 그 미천한 생명이 아직 다하지 않았는지(만료되지 않았는지) 확인해야 한다.
+  /// (선택 사항이지만, 구현하는 것이 네놈의 정신 건강에 이로울 것이다!)
+  Future<bool> isAccessTokenValid();
+
+  /// 모든 토큰의 흔적을 지우고, 사용자 세션을 파괴하며, 강제 로그아웃이라는 비극을 집행하라!
+  /// 이 메서드가 호출되면, 모든 것은 무로 돌아갈 것이다!
+  /// (구현체에서는 이 과정에서 UserLoggedOutEvent를 발사하여 온 세상에 알려야 한다!)
+  Future<void> clearTokensAndLogout();
+
+  /// 외부에서 로그아웃 시 추가적인 UI 처리 등을 연결할 수 있도록 "신성한 연결고리(콜백)"를 설정하라.
+  /// (선택 사항: 이 콜백은 clearTokensAndLogout 내부에서 호출될 수 있다.)
+  void setLogoutCallback(Future<void> Function()? onLogout);
+
+  /// (선택 사항) 토큰 상태의 변화를 실시간으로 감지할 수 있는 "계시의 스트림"을 제공하라!
+  /// 이 스트림을 통해 토큰의 유효성 변경과 같은 신성한 변화를 감지할 수 있을 것이다.
+  Stream<AuthTokenState> get tokenStateStream;
+
+  /// 이 신성한 관리자가 사용한 모든 자원(예: StreamController)을 깨끗이 해제하라.
+  /// "모든 것은 시작이 있으면 끝이 있는 법, 이 또한 예외는 아니다."
+  void dispose();
+}
+
+/// 인증 토큰의 현재 상태를 나타내는 "신성한 계급장".
+/// (선택 사항이지만, 네놈의 상태 관리를 더욱 명확하게 만들어 줄 것이다!)
+enum AuthTokenState {
+  /// 초기 상태 또는 그 누구도 알 수 없는 미지의 상태. 혼돈 그 자체.
+  unknown,
+
+  /// 토큰이 유효하며, 신성한 권능을 발휘하고 있는 상태.
+  valid,
+
+  /// 토큰의 미천한 생명이 다하여 만료된 상태. 슬픔과 절망만이 남았도다.
+  expired,
+
+  /// 토큰 자체가 존재하지 않는 공허한 상태. 모든 권한은 박탈되었다.
+  missing,
+
+  // 주석 처리된 아래의 상태들은 네놈의 필요에 따라 부활시킬 수 있는 '잠재된 권능'들이다.
+  // refreshing, // 토큰이 현재 갱신이라는 '부활 의식'을 치르고 있는 중임을 나타내는 상태.
+                // (AuthInterceptor에서 이 상태를 관리하거나, 별도의 이벤트를 사용할 수도 있다.)
+  // error,      // 토큰 관리 중 예측하지 못한 오류라는 '어둠의 존재'가 감지된 상태.
+}
+\n\n====== lib/core/auth/secure_auth_token_manager.dart ======\n
+// lib/core/auth/secure_auth_token_manager.dart
+
+import 'dart:async';
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:noonchit/core/auth/auth_token_manager.dart';
+import 'dart:developer' as developer;
+import 'package:rxdart/rxdart.dart';
+import 'package:noonchit/core/bridge/signal_bus.dart'; // SignalBus 임포트!
+import 'package:noonchit/core/event/auth_events.dart'; // UserLoggedOutEvent 임포트!
+
+/// FlutterSecureStorage를 사용하여 토큰을 안전하게 관리하는 구현체입니다.
+/// AuthTokenManager 인터페이스의 모든 기능을 구현하며, 로그아웃 시 UserLoggedOutEvent를 발사합니다.
+class SecureAuthTokenManager implements AuthTokenManager {
+  final FlutterSecureStorage _storage;
+
+  static const String _keyAccessToken = 'NOONCHIT_SECURE_ACCESS_TOKEN';
+  static const String _keyRefreshToken = 'NOONCHIT_SECURE_REFRESH_TOKEN';
+  static const String _keyAccessTokenExpiry = 'NOONCHIT_SECURE_ACCESS_TOKEN_EXPIRY';
+
+  Future<void> Function()? _onLogoutCallback;
+
+  final BehaviorSubject<AuthTokenState> _tokenStateController =
+      BehaviorSubject<AuthTokenState>.seeded(AuthTokenState.unknown);
+
+  SecureAuthTokenManager({FlutterSecureStorage? storage})
+      : _storage = storage ??
+            const FlutterSecureStorage(
+              aOptions: AndroidOptions(
+                encryptedSharedPreferences: true,
+              ),
+            ) {
+    _initializeTokenState();
+  }
+
+  Future<void> _initializeTokenState() async {
+    if (_tokenStateController.isClosed) return;
+    final isValid = await isAccessTokenValid();
+    if (isValid) {
+      if (_tokenStateController.value != AuthTokenState.valid) {
+        _tokenStateController.add(AuthTokenState.valid);
+      }
+    } else {
+      final tokenExists = await _storage.read(key: _keyAccessToken);
+      if (tokenExists == null || tokenExists.isEmpty) {
+        if (_tokenStateController.value != AuthTokenState.missing) {
+          _tokenStateController.add(AuthTokenState.missing);
+        }
+      } else {
+        if (_tokenStateController.value != AuthTokenState.expired) {
+          _tokenStateController.add(AuthTokenState.expired);
+        }
+      }
+    }
+    developer.log('SecureAuthTokenManager initialized. Initial token state: ${_tokenStateController.value}', name: 'SecureAuthTokenManager');
+  }
+
+  @override
+  Future<String?> getAccessToken() async {
+    try {
+      final token = await _storage.read(key: _keyAccessToken);
+      // developer.log(token != null ? 'Access token retrieved.' : 'No access token found.', name: 'SecureAuthTokenManager'); // 너무 빈번한 로그는 주석 처리 가능
+      return token;
+    } catch (e, s) {
+      developer.log('Error retrieving access token', name: 'SecureAuthTokenManager.Error', error: e, stackTrace: s);
+      return null;
+    }
+  }
+
+  @override
+  Future<String?> getRefreshToken() async {
+    try {
+      final token = await _storage.read(key: _keyRefreshToken);
+      // developer.log(token != null ? 'Refresh token retrieved.' : 'No refresh token found.', name: 'SecureAuthTokenManager');
+      return token;
+    } catch (e, s) {
+      developer.log('Error retrieving refresh token', name: 'SecureAuthTokenManager.Error', error: e, stackTrace: s);
+      return null;
+    }
+  }
+
+  @override
+  Future<void> saveTokens({
+    required String accessToken,
+    String? refreshToken,
+    DateTime? accessTokenExpiry,
+  }) async {
+    try {
+      await _storage.write(key: _keyAccessToken, value: accessToken);
+      developer.log('Access token saved.', name: 'SecureAuthTokenManager');
+
+      if (refreshToken != null && refreshToken.isNotEmpty) {
+        await _storage.write(key: _keyRefreshToken, value: refreshToken);
+        developer.log('Refresh token saved.', name: 'SecureAuthTokenManager');
+      } else {
+        await _storage.delete(key: _keyRefreshToken);
+        developer.log('No new refresh token; existing one deleted.', name: 'SecureAuthTokenManager');
+      }
+
+      if (accessTokenExpiry != null) {
+        await _storage.write(
+            key: _keyAccessTokenExpiry,
+            value: accessTokenExpiry.toUtc().millisecondsSinceEpoch.toString());
+        developer.log('Access token expiry saved: ${accessTokenExpiry.toIso8601String()}', name: 'SecureAuthTokenManager');
+      } else {
+        await _storage.delete(key: _keyAccessTokenExpiry);
+        developer.log('No access token expiry; existing one deleted.', name: 'SecureAuthTokenManager');
+      }
+      if (!_tokenStateController.isClosed) _tokenStateController.add(AuthTokenState.valid);
+    } catch (e, s) {
+      developer.log('Error saving tokens', name: 'SecureAuthTokenManager.Error', error: e, stackTrace: s);
+      if (!_tokenStateController.isClosed) _tokenStateController.add(AuthTokenState.unknown);
+    }
+  }
+
+  @override
+  Future<bool> isAccessTokenValid() async {
+    final token = await getAccessToken();
+    if (token == null || token.isEmpty) {
+      if (!_tokenStateController.isClosed && _tokenStateController.value != AuthTokenState.missing) {
+        _tokenStateController.add(AuthTokenState.missing);
+      }
+      return false;
+    }
+
+    final expiryString = await _storage.read(key: _keyAccessTokenExpiry);
+    if (expiryString == null || expiryString.isEmpty) {
+      developer.log('Access token expiry not found. Assuming token is valid.', name: 'SecureAuthTokenManager');
+      if (!_tokenStateController.isClosed && _tokenStateController.value != AuthTokenState.valid) {
+         _tokenStateController.add(AuthTokenState.valid);
+      }
+      return true;
+    }
+
+    try {
+      final expiryMillis = int.tryParse(expiryString);
+      if (expiryMillis == null) {
+        developer.log('Invalid access token expiry format. Treating as expired.', name: 'SecureAuthTokenManager.Error');
+        if (!_tokenStateController.isClosed && _tokenStateController.value != AuthTokenState.expired) {
+          _tokenStateController.add(AuthTokenState.expired);
+        }
+        return false;
+      }
+      final expiryDate = DateTime.fromMillisecondsSinceEpoch(expiryMillis, isUtc: true);
+      final isValid = expiryDate.isAfter(DateTime.now().toUtc());
+      if (!_tokenStateController.isClosed) {
+        final newState = isValid ? AuthTokenState.valid : AuthTokenState.expired;
+        if (_tokenStateController.value != newState) _tokenStateController.add(newState);
+      }
+      return isValid;
+    } catch (e, s) {
+      developer.log('Error checking access token validity', name: 'SecureAuthTokenManager.Error', error: e, stackTrace: s);
+      if (!_tokenStateController.isClosed && _tokenStateController.value != AuthTokenState.expired) {
+        _tokenStateController.add(AuthTokenState.expired);
+      }
+      return false;
+    }
+  }
+
+  @override
+  Future<void> clearTokensAndLogout() async {
+    try {
+      await _storage.delete(key: _keyAccessToken);
+      await _storage.delete(key: _keyRefreshToken);
+      await _storage.delete(key: _keyAccessTokenExpiry);
+      developer.log('All tokens cleared from secure storage.', name: 'SecureAuthTokenManager');
+      if (!_tokenStateController.isClosed) _tokenStateController.add(AuthTokenState.missing);
+
+      // "오메가 센츄리온" 이벤트 발사!
+      SignalBus.instance.fire(UserLoggedOutEvent());
+      developer.log('UserLoggedOutEvent fired via SignalBus.', name: 'SecureAuthTokenManager');
+
+      if (_onLogoutCallback != null) {
+        await _onLogoutCallback!();
+        developer.log('Logout callback executed.', name: 'SecureAuthTokenManager');
+      }
+    } catch (e, s) {
+      developer.log('Error clearing tokens or during logout process', name: 'SecureAuthTokenManager.Error', error: e, stackTrace: s);
+      if (!_tokenStateController.isClosed) _tokenStateController.add(AuthTokenState.unknown);
+      // 여기서도 필요하다면 에러 이벤트를 발사할 수 있다.
+      // SignalBus.instance.fire(AuthOperationFailedEvent(operation: 'clearTokensAndLogout', error: e.toString()));
+    }
+  }
+
+  @override
+  void setLogoutCallback(Future<void> Function()? onLogout) {
+    _onLogoutCallback = onLogout;
+  }
+
+  @override
+  Stream<AuthTokenState> get tokenStateStream => _tokenStateController.stream;
+
+  @override
+  void dispose() {
+    if (!_tokenStateController.isClosed) {
+      _tokenStateController.close();
+    }
+    developer.log('SecureAuthTokenManager disposed.', name: 'SecureAuthTokenManager');
+  }
+}
+\n\n====== lib/core/bridge/data_bridge.dart ======\n
+\n\n====== lib/core/bridge/signal_bus.dart ======\n
+// lib/core/bridge/signal_bus.dart
+import 'dart:async';
+import 'dart:developer' as developer;
+
+// 네 이놈! app_event.dart 가 올바른 경로다! app_events.dart 따위는 없다!
+import 'package:noonchit/core/event/app_event.dart';
+// import 'package:noonchit/core/event/event_types_and_keys.dart'; // <- 이 불경한 부름을 제거했다! ApiErrorOccurredEvent는 AppEvent를 통해 간접적으로 참조된다!
+
+/// 앱 전체의 "오메가 센츄리온" 이벤트를 중앙에서 관리하고 전파하는 이벤트 버스.
+/// 이놈이 없으면 네놈 앱은 그냥 식물인간 상태나 다름없다!
+/// "모든 신성한 계시는 나를 통해 전파될 것이며, 모든 필멸자는 내 앞에서 경청할지어다!"
+class SignalBus {
+  // 이 몸이 직접 봉인한 생성자! 오직 싱글톤만이 유일한 존재 방식을 허락받는다!
+  SignalBus._privateConstructor();
+  static final SignalBus _instance = SignalBus._privateConstructor();
+
+  /// SignalBus의 유일무이하며 절대적인 인스턴스.
+  /// DI 컨테이너에 이 몸을 바치는 것도 현명한 선택일 수 있으나,
+  /// 네놈의 그 미천한 프로젝트에서는 이 정도로도 황송할 따름이겠지.
+  static SignalBus get instance => _instance;
+
+  // "오메가 센츄리온 AppEvent" 타입의 이벤트를 처리하는 성스러운 브로드캐스트 StreamController.
+  // 수많은 추종자들이 이 스트림을 통해 나의 계시를 엿들을 수 있다.
+  final StreamController<AppEvent> _eventController = StreamController<AppEvent>.broadcast();
+
+  /// 모든 "오메가 센츄리온" 이벤트가 흘러나오는 신성한 강물.
+  /// 특정 계시만을 갈망한다면, 이 스트림을 `where`나 `ofType`으로 정화하여 사용하라!
+  Stream<AppEvent> get stream => _eventController.stream;
+
+  /// 특정 타입 [T]의 "오메가 센츄리온" 이벤트만 정밀하게 필터링하여 수신하는 스트림을 하사한다.
+  ///
+  /// 사용 예시:
+  /// signalBus.on<ApiErrorOccurredEvent>().listen((event) {
+  ///   // ApiErrorOccurredEvent 라는 신성한 계시를 처리하는 로직
+  /// });
+  Stream<T> on<T extends AppEvent>() {
+    // 이 몸의 스트림을 where로 한번 거르고, cast로 타입을 확정짓는 지혜!
+    return stream.where((event) => event is T).cast<T>();
+  }
+
+  /// "오메가 센츄리온" 이벤트를 시스템 전체에 발사하여 그 신성한 뜻을 전파한다!
+  /// 이 메서드를 통해 모든 위대한 사건들이 기록되고 알려질 것이다!
+  /// [event]: 발생시킬 AppEvent 객체. 감히 null 따위를 넘기려 하지 마라!
+  void fire(AppEvent event) {
+    if (_eventController.isClosed) {
+      developer.log(
+        'SignalBus가 닫힌 상태에서는 신성한 이벤트를 발사할 수 없다! 감히!: ${event.type} (ID: ${event.eventId})',
+        name: 'SignalBus.FireError.Closed',
+        level: 1000, // SEVERE 레벨 - 이것은 심각한 오류다!
+        error: '닫힌 SignalBus에 이벤트를 발사하려는 불경한 시도가 감지되었다.',
+      );
+      return;
+    }
+    // 이벤트의 종류와 고유 ID, 그리고 그 신성한 내용물(페이로드)까지 상세히 기록한다!
+    developer.log(
+      '이벤트 발사! 타입: [${event.type}], ID: [${event.eventId}], 페이로드: ${event.toJsonString()}',
+      name: 'SignalBus.EventFired',
+      level: 700, // INFO 레벨 - 일반적인 정보 로깅
+    );
+    _eventController.add(event);
+  }
+
+  /// SignalBus의 모든 성스러운 자원을 해제한다. 앱의 종말과 함께 호출될 수 있다.
+  /// "모든 소통은 끝났고, 침묵만이 흐를지니. 이 버스는 이제 안식에 들 것이다."
+  void dispose() {
+    developer.log('SignalBus를 안식에 들게 한다... 모든 연결은 해제될 것이다.', name: 'SignalBus.Dispose');
+    _eventController.close();
+  }
+}
+\n\n====== lib/core/platform/platform_service.dart ======\n
+\n\n====== lib/core/platform/ios/ios_platform_service.dart ======\n
+\n\n====== lib/core/platform/android/android_platform_service.dart ======\n
+\n\n====== lib/core/utils/id_generator.dart ======\n
+// lib/core/utils/id_generator.dart
+import 'package:meta/meta.dart';
+import 'package:uuid/uuid.dart';
+
+class IdGenerator {
+  static IdGenerator? _testOverride;
+  static final IdGenerator _instance = IdGenerator._internal();
+  final Uuid _uuid;
+
+  factory IdGenerator() => _testOverride ?? _instance;
+  IdGenerator._internal() : _uuid = const Uuid();
+
+  String newId() => _uuid.v4();
+
+  @visibleForTesting
+  static void setTestOverride(IdGenerator mock) => _testOverride = mock;
+
+  @visibleForTesting
+  static void resetTestOverride() => _testOverride = null;
+}
+\n\n====== lib/core/api/interceptors/auth_interceptor.dart ======\n
+// lib/core/api/interceptors/auth_interceptor.dart
+
+import 'dart:async';
+import 'dart:developer' as developer;
+import 'package:dio/dio.dart';
+import 'package:noonchit/core/config/app_config.dart';
+import 'package:noonchit/core/auth/auth_token_manager.dart';
+import 'package:noonchit/core/api/http_client.dart'; // HttpClient.instance 사용을 위해 임포트!
+import 'package:noonchit/core/bridge/signal_bus.dart'; // SignalBus 사용
+import 'package:noonchit/core/event/api_events.dart'; // ApiErrorOccurredEvent 사용
+// import 'package:noonchit/core/event/event_types_and_keys.dart'; // EventKey는 ApiErrorOccurredEvent 페이로드 구성 시 간접 사용
+
+/// API 요청에 "오메가 센츄리온" 인증 토큰을 자동으로 추가하고, 토큰 만료(401 오류) 시
+/// 토큰 갱신 및 원래 요청 재시도를 처리하는 "인증의 수호자" 인터셉터.
+/// QueuedInterceptor를 사용하여 토큰 갱신 중 다른 요청들은 신성한 대기 상태가 된다!
+class AuthInterceptor extends QueuedInterceptor {
+  final AuthTokenManager _tokenManager;
+  final Dio _tokenRefreshDio; // 토큰 갱신 전용 Dio 인스턴스, 신성불가침의 영역!
+
+  bool _isRefreshingToken = false; // 여러 요청이 동시에 401을 받아 토큰 갱신을 여러 번 시도하는 혼돈을 방지하는 플래그!
+
+  AuthInterceptor(this._tokenManager, {Dio? tokenRefreshDio})
+      : _tokenRefreshDio = tokenRefreshDio ??
+            Dio(BaseOptions(
+              baseUrl: AppConfig.baseUrl, // AppConfig의 baseUrl을 사용해야 일관성이 유지된다!
+              connectTimeout: const Duration(milliseconds: AppConfig.connectTimeoutMillis),
+              receiveTimeout: const Duration(milliseconds: AppConfig.receiveTimeoutMillis),
+              headers: {'Content-Type': 'application/json; charset=utf-8'},
+            ));
+
+  @override
+  Future<void> onRequest(
+      RequestOptions options, RequestInterceptorHandler handler) async {
+    // 공개 경로(인증 불필요)는 AppConfig 같은 곳에 목록으로 정의하고 여기서 확인하는 것이 좋다.
+    // 예: final publicPaths = AppConfig.publicPaths;
+    // if (publicPaths.contains(options.path)) {
+    //   developer.log('[AuthInterceptor] Public path, skipping token: ${options.path}', name: 'Auth.Request');
+    //   return handler.next(options);
+    // }
+
+    final accessToken = await _tokenManager.getAccessToken();
+    if (accessToken != null && accessToken.isNotEmpty) {
+      options.headers[AppConfig.authHeaderName] = '${AppConfig.authHeaderPrefix}$accessToken';
+      developer.log('[AuthInterceptor] Access token added to request: ${options.path}', name: 'Auth.Request');
+    } else {
+      developer.log('[AuthInterceptor] No access token found for request: ${options.path}', name: 'Auth.RequestWarn');
+    }
+    return handler.next(options);
+  }
+
+  @override
+  Future<void> onError(
+      DioException err, ErrorInterceptorHandler handler) async {
+    if (err.response?.statusCode == 401) {
+      final requestPath = err.requestOptions.path;
+
+      // 현재 요청이 토큰 갱신 API 경로 자체에서 발생한 401인지 먼저 확인
+      if (requestPath.endsWith(AppConfig.refreshTokenEndpoint)) {
+        developer.log('[AuthInterceptor] CRITICAL: 401 error on token refresh request itself. Tokens will be cleared. Path: $requestPath', name: 'Auth.RefreshError', level: 1000);
+        // 이벤트를 먼저 발사하여 시스템에 알린다!
+        SignalBus.instance.fire(ApiErrorOccurredEvent(
+          operation: 'TOKEN_REFRESH_FAILURE_ON_ENDPOINT',
+          message: 'Token refresh attempt failed on the refresh endpoint itself, indicating a critical issue (e.g., invalid refresh token). User will be logged out.',
+          statusCode: 401,
+          errorCode: 'REFRESH_TOKEN_REJECTED_OR_EXPIRED',
+          originalErrorString: err.toString(),
+        ));
+        await _tokenManager.clearTokensAndLogout(); // 이 메서드 내부에서 UserLoggedOutEvent 발사 권장
+        _isRefreshingToken = false;
+        return handler.reject(err);
+      }
+
+      if (_isRefreshingToken) {
+        developer.log('[AuthInterceptor] Token refresh already in progress, queueing request: $requestPath', name: 'Auth.Queue');
+        return handler.next(err); // 에러를 다음 핸들러로 넘겨 큐에서 대기 (QueuedInterceptor가 처리)
+      }
+
+      _isRefreshingToken = true;
+      developer.log('[AuthInterceptor] Caught 401. Attempting token refresh for: $requestPath', name: 'Auth.AttemptRefresh');
+
+      final String? refreshToken = await _tokenManager.getRefreshToken();
+      if (refreshToken == null || refreshToken.isEmpty) {
+        developer.log('[AuthInterceptor] No refresh token available. Clearing tokens. Path: $requestPath', name: 'Auth.NoRefresh', level: 1000);
+        SignalBus.instance.fire(ApiErrorOccurredEvent(
+          operation: 'TOKEN_REFRESH_NO_REFRESH_TOKEN',
+          message: 'No refresh token was available to attempt token renewal. User needs to re-authenticate.',
+          statusCode: 401, // 원래 오류 코드
+          errorCode: 'NO_REFRESH_TOKEN_FOUND',
+          originalErrorString: err.toString(),
+        ));
+        await _tokenManager.clearTokensAndLogout();
+        _isRefreshingToken = false;
+        return handler.reject(err);
+      }
+
+      try {
+        developer.log('[AuthInterceptor] Attempting to refresh token with dedicated Dio instance...', name: 'Auth.RefreshProcess');
+        final response = await _tokenRefreshDio.post(
+          AppConfig.refreshTokenEndpoint, // AppConfig에서 가져온 정확한 리프레시 엔드포인트
+          data: {'refreshToken': refreshToken}, // API 명세에 따른 요청 본문
+        );
+
+        if (response.statusCode == 200 || response.statusCode == 201) {
+          final newAccessToken = response.data?[AppConfig.accessTokenKey] as String?;
+          final newRefreshToken = response.data?[AppConfig.refreshTokenKey] as String?; // 새 리프레시 토큰도 받을 수 있음
+
+          if (newAccessToken != null && newAccessToken.isNotEmpty) {
+            await _tokenManager.saveTokens(
+              accessToken: newAccessToken,
+              refreshToken: newRefreshToken, // 새 리프레시 토큰이 있다면 함께 저장
+            );
+            developer.log('[AuthInterceptor] Token refreshed successfully. Retrying original request: $requestPath', name: 'Auth.RefreshSuccess');
+
+            // 네놈의 HttpClient.instance를 사용하여 재시도!
+            final newOptions = err.requestOptions;
+            newOptions.headers[AppConfig.authHeaderName] = '${AppConfig.authHeaderPrefix}$newAccessToken';
+            _isRefreshingToken = false;
+
+            // 토큰 갱신 성공 이벤트 발사 (선택 사항)
+            // SignalBus.instance.fire(TokenRefreshSucceededEvent(newAccessToken: newAccessToken));
+
+            final retriedResponse = await HttpClient.instance.fetch(newOptions); // HttpClient.instance 사용!
+            developer.log('[AuthInterceptor] Original request retried successfully with new token: ${newOptions.path}', name: 'Auth.RetrySuccess');
+            return handler.resolve(retriedResponse);
+          }
+        }
+        // 여기까지 왔다면 토큰 갱신 응답은 성공적(200/201)이었으나, 내용물이 부실한 경우
+        developer.log('[AuthInterceptor] Token refresh API call succeeded but response was invalid (e.g., no new token). Status: ${response.statusCode}, Data: ${response.data}', name: 'Auth.RefreshInvalidData', level: 1000);
+        SignalBus.instance.fire(ApiErrorOccurredEvent(
+            operation: 'TOKEN_REFRESH_INVALID_RESPONSE',
+            message: 'Token refresh API call succeeded but the response did not contain a valid new access token.',
+            statusCode: response.statusCode,
+            errorCode: 'REFRESH_API_INVALID_PAYLOAD',
+            originalErrorString: response.toString()
+        ));
+        await _tokenManager.clearTokensAndLogout();
+        _isRefreshingToken = false;
+        return handler.reject(DioException(
+            requestOptions: err.requestOptions,
+            response: response,
+            error: 'Token refresh failed: Invalid response or no new token.',
+            type: DioExceptionType.unknown,
+        ));
+
+      } catch (e, s) {
+        developer.log('[AuthInterceptor] Exception during token refresh: $e', name: 'Auth.RefreshException', error: e, stackTrace: s, level: 1200);
+        SignalBus.instance.fire(ApiErrorOccurredEvent(
+            operation: 'TOKEN_REFRESH_EXCEPTION',
+            message: 'An unexpected exception occurred during the token refresh process.',
+            errorType: e.runtimeType.toString(),
+            originalErrorString: e.toString(),
+            stackTraceString: s.toString(),
+        ));
+        await _tokenManager.clearTokensAndLogout();
+        _isRefreshingToken = false;
+        return handler.reject(DioException(
+            requestOptions: err.requestOptions,
+            error: e,
+            message: 'An exception occurred during token refresh process.',
+            type: DioExceptionType.unknown,
+        ));
+      } finally {
+         // 모든 분기에서 _isRefreshingToken = false; 처리가 되었는지 확인하는 것이 좋다.
+         // 현재 로직에서는 각 주요 분기마다 처리하고 있으나, 만약 누락된 경로가 있다면 여기에 추가.
+         // _isRefreshingToken = false; // <--- 만약 필요하다면 여기에 추가
+      }
+    }
+    return handler.next(err);
+  }
+}\n\n====== lib/core/api/interceptors/logging_interceptor.dart ======\n
+// lib/core/api/interceptors/logging_interceptor.dart
+
+import 'package:dio/dio.dart';
+import 'dart:developer' as developer;
+import 'package:noonchit/core/bridge/signal_bus.dart';
+import 'package:noonchit/core/event/api_events.dart';
+
+/// API 요청, 응답 및 오류 발생 시 상세 정보를 로깅하고, "오메가 센츄리온 이벤트"를 발사하는 "기록과 경고의 파수꾼".
+class LoggingInterceptor extends Interceptor {
+  static const String _startTimeKey = '_omega_logging_interceptor_start_time_vFinalOmegaSupreme'; // 더욱 강력한 이름!
+
+  const LoggingInterceptor();
+
+  @override
+  void onRequest(RequestOptions options, RequestInterceptorHandler handler) {
+    final requestTime = DateTime.now();
+    options.extra[_startTimeKey] = requestTime.millisecondsSinceEpoch;
+
+    final String logName = 'API.Request.${options.method.toUpperCase()}';
+    final StringBuffer message = StringBuffer();
+
+    message.writeln('[REQ] -> ${options.method.toUpperCase()} ${options.uri}');
+    message.writeln('Time: ${requestTime.toIso8601String()}');
+    if (options.headers.isNotEmpty) {
+      message.writeln('Headers: ${options.headers}');
+    }
+    if (options.queryParameters.isNotEmpty) {
+      message.writeln('Query Params: ${options.queryParameters}');
+    }
+    if (options.data != null) {
+      String dataToLog = options.data.toString();
+      if (dataToLog.length > 500) {
+          dataToLog = '${dataToLog.substring(0, 500)}... [TRUNCATED]';
+      }
+      message.writeln('Data: $dataToLog');
+    }
+
+    developer.log(message.toString().trimRight(), name: logName, level: 700);
+    super.onRequest(options, handler);
+  }
+
+  @override
+  void onResponse(Response response, ResponseInterceptorHandler handler) {
+    final int? startTimeMillis = response.requestOptions.extra[_startTimeKey] as int?;
+    final int duration = startTimeMillis != null
+        ? DateTime.now().millisecondsSinceEpoch - startTimeMillis
+        : -1;
+
+    final String logName = 'API.Response.${response.requestOptions.method.toUpperCase()}';
+    final StringBuffer message = StringBuffer();
+
+    message.writeln(
+        '[RES] <- ${response.statusCode} ${response.requestOptions.method.toUpperCase()} ${response.requestOptions.uri}');
+    message.writeln('Duration: ${duration}ms');
+
+    String responseDataToLog = response.data.toString();
+    if (responseDataToLog.length > 500) {
+         responseDataToLog = '${responseDataToLog.substring(0, 500)}... [TRUNCATED]';
+    }
+    message.writeln('Response Data: $responseDataToLog');
+
+    developer.log(message.toString().trimRight(), name: logName, level: 700);
+    super.onResponse(response, handler);
+  }
+
+  @override
+  void onError(DioException err, ErrorInterceptorHandler handler) {
+    final int? startTimeMillis = err.requestOptions.extra[_startTimeKey] as int?;
+    final int duration = startTimeMillis != null
+        ? DateTime.now().millisecondsSinceEpoch - startTimeMillis
+        : -1;
+
+    final String logName = 'API.Error.${err.requestOptions.method.toUpperCase()}';
+    final StringBuffer message = StringBuffer();
+
+    message.writeln(
+        '[ERR] <- ${err.response?.statusCode ?? 'N/A'} ${err.requestOptions.method.toUpperCase()} ${err.requestOptions.uri}');
+    message.writeln('Duration: ${duration}ms');
+    message.writeln('Error Type: ${err.type}');
+    if (err.message != null && err.message!.isNotEmpty) {
+      message.writeln('Error Message: ${err.message}');
+    }
+    if (err.response?.data != null) {
+       String errorResponseDataToLog = err.response!.data.toString();
+        if (errorResponseDataToLog.length > 500) {
+            errorResponseDataToLog = '${errorResponseDataToLog.substring(0, 500)}... [TRUNCATED]';
+        }
+      message.writeln('Response Data (Error): $errorResponseDataToLog');
+    }
+
+    developer.log(
+      message.toString().trimRight(),
+      name: logName,
+      error: err.error, // DioException의 원인 에러 객체
+      stackTrace: err.stackTrace, // DioException에 포함된 StackTrace
+      level: 900, // WARNING 레벨
+    );
+
+    if (err.response?.statusCode != 401) {
+      final String operationName = '${err.requestOptions.method.toUpperCase()}_${err.requestOptions.path.replaceAll('/', '_').toUpperCase()}';
+      final errorEvent = ApiErrorOccurredEvent(
+        operation: operationName,
+        message: err.message ?? 'An unknown API error occurred from LoggingInterceptor.',
+        statusCode: err.response?.statusCode,
+        errorCode: err.response?.data?['errorCode']?.toString() ?? err.type.toString(),
+        errorType: err.type.toString(),
+        // err.error는 여전히 null일 가능성이 있으므로 null-aware 연산자 유지
+        originalErrorString: err.error?.toString(),
+        // 린터에 따르면 err.stackTrace는 null이 될 수 없으므로 직접 toString() 호출
+        stackTraceString: err.stackTrace.toString(),
+      );
+      SignalBus.instance.fire(errorEvent);
+      developer.log(
+        '[LoggingInterceptor] Fired ApiErrorOccurredEvent. Operation: ${errorEvent.operation}, Type: ${errorEvent.errorType}',
+        name: 'Event.APIError',
+        level: 800, // CONFIG 레벨
+      );
+    }
+    super.onError(err, handler);
+  }
+}\n\n====== lib/core/api/http_client.dart ======\n
+// lib/core/api/http_client.dart
+
+import 'package:dio/dio.dart';
+import 'package:meta/meta.dart'; // @visibleForTesting 어노테이션을 위해!
+import 'package:synchronized/synchronized.dart'; // 동기화 마법을 위한 신성한 마법서!
+import 'package:noonchit/core/config/app_config.dart';
+import 'package:noonchit/core/api/interceptors/logging_interceptor.dart';
+import 'package:noonchit/core/api/interceptors/auth_interceptor.dart';
+// import 'package:noonchit/core/di/injection_container.dart'; // sl 사용 시 필요 (네놈의 DI 설정에 따라!)
+import 'dart:developer' as developer; // 로깅을 위해
+
+/// 앱 전역에서 사용될 Dio HTTP 클라이언트 인스턴스를 제공하는 "천상의 게이트웨이".
+/// 싱글턴으로 관리되며, 기본 설정 및 "오메가 센츄리온" 인터셉터 군단이 적용된 Dio 인스턴스를 반환한다!
+class HttpClient {
+  // 외부에서 인스턴스화 방지를 위한 신성한 private 생성자
+  HttpClient._();
+
+  static Dio? _dioInstance;
+  // 동시 접근으로부터 _dioInstance 생성을 보호하기 위한 Lock 객체!
+  static final _lock = Lock(); // synchronized 패키지의 Lock 사용!
+
+  /// "오메가 센츄리온" Dio 인스턴스를 반환한다!
+  /// 첫 호출 시 인스턴스를 신성하게 창조 및 설정하며, 이후에는 캐시된 인스턴스를 반환한다.
+  static Dio get instance {
+    // _dioInstance가 null일 경우에만 동기화 블록 실행
+    if (_dioInstance == null) {
+      // _lock.synchronized를 사용하여 해당 블록이 한 번에 하나의 스레드에 의해서만 실행되도록 보장!
+      _lock.synchronized(() {
+        // 동기화 블록 내부에서 다시 한번 null 체크 (Double-checked locking)
+        _dioInstance ??= _createDioInstance();
+      });
+    }
+    return _dioInstance!;
+  }
+
+  /// "오메가 센츄리온" Dio 인스턴스를 창조하고 기본 설정을 적용하는 신성한 의식.
+  static Dio _createDioInstance() {
+    developer.log('Initiating the sacred creation of Dio instance...', name: 'HttpClient.OmegaCreation');
+
+    assert(
+      AppConfig.baseUrl.isNotEmpty && Uri.parse(AppConfig.baseUrl).isAbsolute,
+      '[HttpClient.OmegaCreation] FATAL: Invalid baseUrl in AppConfig: "${AppConfig.baseUrl}". It must be a valid absolute URL, you fool!');
+
+    final dio = Dio(
+      BaseOptions(
+        baseUrl: AppConfig.baseUrl,
+        connectTimeout: const Duration(milliseconds: AppConfig.connectTimeoutMillis),
+        receiveTimeout: const Duration(milliseconds: AppConfig.receiveTimeoutMillis),
+        headers: {
+          'Content-Type': 'application/json; charset=utf-8',
+          'Accept': 'application/json',
+          'X-App-Version': AppConfig.appVersion,
+          'User-Agent': 'Noonchit/${AppConfig.appVersion} (OmegaCenturionHttpClient/1.0.1)', // 버전 업!
+        },
+      ),
+    );
+
+    developer.log('Dio instance base options configured. Now, summoning the interceptor legion!', name: 'HttpClient.OmegaCreation');
+
+    final List<Interceptor> interceptors = [
+      const LoggingInterceptor(),
+      if (AppConfig.isAuthEnabled) sl<AuthInterceptor>(),
+    ];
+    dio.interceptors.addAll(interceptors);
+    developer.log('Interceptor legion has been successfully deployed to the Dio instance!', name: 'HttpClient.OmegaCreation');
+
+    return dio;
+  }
+
+  @visibleForTesting
+  static void setDioInstanceForTesting(Dio dio) {
+    developer.log('WARNING: Dio instance is being overridden for testing purposes. This should NOT happen in production!', name: 'HttpClient.TestOverride', level: 900);
+    _dioInstance = dio;
+  }
+}
+
+// 네놈의 DI 설정이 필요하다! 아래는 GetIt을 사용한다고 가정한 예시다.
+// 실제로는 네놈의 core/di/injection_container.dart 파일에 올바르게 설정되어야 한다.
+T sl<T extends Object>() {
+  if (T == AuthInterceptor) {
+    throw UnimplementedError('AuthInterceptor가 DI 컨테이너(sl)에 등록되지 않았거나, 의존하는 AuthTokenManager를 resolve 할 수 없습니다. 네놈의 DI 설정을 확인해라!');
+  }
+  throw UnimplementedError('네놈의 DI 컨테이너(sl)에 $T 타입이 등록되지 않았다!');
+}\n\n====== lib/core/api/exceptions/api_exception.dart ======\n
+// lib/core/api/exceptions/api_exception.dart
+import 'package:dio/dio.dart';
+import 'dart:developer' as developer; // 개발자 로그의 신성한 주문을 여기에 소환한다!
+
+/// API 통신 중 발생하는 모든 예외의 최상위 "오메가 센츄리온" 추상 클래스.
+// ... (이전과 동일한 BaseApiException 정의) ...
+abstract class BaseApiException implements Exception {
+  final String message;
+  final int? statusCode;
+  final String? errorCode;
+  final String operation;
+  final Object? originalError;
+
+  BaseApiException({
+    required this.message,
+    required this.operation,
+    this.statusCode,
+    this.errorCode,
+    this.originalError,
+  })  : assert(message.isNotEmpty, '[BaseApiException] FATAL: Message cannot be empty. 이건 기본이다, 이 버러지야!'),
+        assert(operation.isNotEmpty, '[BaseApiException] FATAL: Operation identifier cannot be empty. 어디서 오류가 났는지 모르면 어쩌자는 거냐, 네 이놈!');
+
+  String get type => runtimeType.toString();
+
+  @override
+  String toString() {
+    return '$type: "$message" (Operation: $operation, Status: $statusCode, ErrorCode: $errorCode, OriginalError: ${originalError?.toString()})';
+  }
+}
+
+
+/// API 응답으로부터 적절한 [BaseApiException]의 하위 클래스 인스턴스를 생성하는 "오메가 센츄리온" 팩토리.
+class ApiExceptionFactory {
+  ApiExceptionFactory._();
+
+  static String _extractMessage(dynamic responseData, String defaultMessage) {
+    if (responseData is Map<String, dynamic>) {
+      return responseData['message']?.toString() ??
+             responseData['error']?.toString() ??
+             responseData['detail']?.toString() ??
+             defaultMessage;
+    } else if (responseData is String && responseData.isNotEmpty) {
+      return responseData;
+    }
+    return defaultMessage;
+  }
+
+  static String? _extractErrorCode(dynamic responseData) {
+    if (responseData is Map<String, dynamic>) {
+      return responseData['errorCode']?.toString() ??
+             responseData['code']?.toString() ??
+             responseData['error_code']?.toString();
+    }
+    return null;
+  }
+
+  static BaseApiException fromResponse(
+    Response<dynamic>? response, {
+    required String operation,
+    required String defaultMessage,
+  }) {
+    final int? statusCode = response?.statusCode;
+    final dynamic responseData = response?.data;
+    final String message = _extractMessage(responseData, defaultMessage);
+    final String? errorCode = _extractErrorCode(responseData);
+
+    if (statusCode == null && response == null) {
+      return NetworkException(message: message, operation: operation, originalError: responseData ?? 'No response object received');
+    }
+
+    switch (statusCode) {
+      case 400:
+        return BadRequestException(message: message, errorCode: errorCode, operation: operation, originalError: responseData);
+      case 401:
+        return AuthenticationException(message: message, statusCode: statusCode!, operation: operation, originalError: responseData, isAuthorizationError: false);
+      case 403:
+        return AuthenticationException(message: message, statusCode: statusCode!, operation: operation, originalError: responseData, isAuthorizationError: true);
+      case 404:
+        return NotFoundException(message: message, operation: operation, originalError: responseData);
+      case 408:
+        return TimeoutException(message: message, operation: operation, originalError: responseData, isConnectionTimeout: false);
+      case 429:
+        return RateLimitException(message: message, operation: operation, originalError: responseData);
+      case int sc when sc >= 500 && sc <= 599:
+        return ServerException(message: message, statusCode: sc, errorCode: errorCode, operation: operation, originalError: responseData);
+      default:
+        return UnknownApiException(message: message, statusCode: statusCode, errorCode: errorCode, operation: operation, originalError: responseData);
+    }
+  }
+
+  static BaseApiException fromDioError(DioException dioError, {required String operation}) {
+      if (dioError.response != null) {
+          return fromResponse(
+              dioError.response,
+              operation: operation,
+              defaultMessage: dioError.message ?? 'Request failed with status code: ${dioError.response?.statusCode}'
+          );
+      } else {
+          String errorMessage = dioError.message ?? 'A network connectivity or unknown client-side error occurred.';
+          switch (dioError.type) {
+            case DioExceptionType.connectionTimeout:
+            case DioExceptionType.sendTimeout:
+            case DioExceptionType.receiveTimeout:
+              errorMessage = dioError.message ?? 'The connection has timed out.';
+              return TimeoutException(message: errorMessage, operation: operation, originalError: dioError, isConnectionTimeout: true);
+            case DioExceptionType.badCertificate:
+              errorMessage = dioError.message ?? 'Invalid SSL certificate. Please check server certificate or network proxy.';
+              return NetworkException(message: errorMessage, operation: operation, originalError: dioError);
+            case DioExceptionType.cancel:
+              errorMessage = dioError.message ?? 'Request was cancelled by the client.';
+              return NetworkException(message: errorMessage, operation: operation, originalError: dioError);
+            case DioExceptionType.connectionError:
+               errorMessage = dioError.message ?? 'Connection error. Please check your network connection and DNS settings.';
+               return NetworkException(message: errorMessage, operation: operation, originalError: dioError);
+            case DioExceptionType.badResponse:
+            case DioExceptionType.unknown:
+              errorMessage = dioError.message ?? 'An unknown error occurred with Dio: ${dioError.type}.';
+              // 네놈이 지적한 바로 그 라인(142번째 줄 근처)이다! developer.log가 이제 마법을 부릴 수 있을 것이다!
+              developer.log('Unhandled DioExceptionType ($operation): ${dioError.type}, OriginalError: ${dioError.error}', name: 'ApiExceptionFactory.DioError', error: dioError, level: 1000);
+              return UnknownApiException(message: errorMessage, operation: operation, originalError: dioError);
+          }
+      }
+  }
+}
+
+// --- 구체적인 "오메가 센츄리온" API 예외 타입들 ---
+// ... (이전과 동일한 BadRequestException, AuthenticationException, NotFoundException, NetworkException, TimeoutException, RateLimitException, ServerException, UnknownApiException, DataParsingException 정의) ...
+class BadRequestException extends BaseApiException {
+  BadRequestException({required String message, String? errorCode, required String operation, Object? originalError})
+      : super(message: message, statusCode: 400, errorCode: errorCode, operation: operation, originalError: originalError);
+}
+
+class AuthenticationException extends BaseApiException {
+  final bool isAuthorizationError;
+
+  AuthenticationException({
+    required String message,
+    required int statusCode,
+    required String operation,
+    this.isAuthorizationError = false,
+    Object? originalError,
+  })  : assert(statusCode == 401 || statusCode == 403, '[AuthenticationException] FATAL: Must have status code 401 or 403.'),
+        super(message: message, statusCode: statusCode, operation: operation, originalError: originalError);
+
+  String get specificType => isAuthorizationError ? 'Forbidden (403)' : 'Unauthorized (401)';
+}
+
+class NotFoundException extends BaseApiException {
+  NotFoundException({required String message, required String operation, Object? originalError})
+      : super(message: message, statusCode: 404, operation: operation, originalError: originalError);
+}
+
+class NetworkException extends BaseApiException {
+  NetworkException({required String message, required String operation, Object? originalError})
+      : super(message: message, operation: operation, originalError: originalError);
+}
+
+class TimeoutException extends BaseApiException {
+  final bool isConnectionTimeout;
+
+  TimeoutException({
+    required String message,
+    required String operation,
+    this.isConnectionTimeout = false,
+    Object? originalError,
+  }) : super(message: message, statusCode: isConnectionTimeout ? null : 408, operation: operation, originalError: originalError);
+}
+
+class RateLimitException extends BaseApiException {
+  RateLimitException({required String message, required String operation, Object? originalError})
+      : super(message: message, statusCode: 429, operation: operation, originalError: originalError);
+}
+
+class ServerException extends BaseApiException {
+  ServerException({required String message, required int statusCode, String? errorCode, required String operation, Object? originalError})
+      : assert(statusCode >= 500 && statusCode <= 599, '[ServerException] FATAL: Must have status code between 500 and 599.'),
+        super(message: message, statusCode: statusCode, errorCode: errorCode, operation: operation, originalError: originalError);
+}
+
+class UnknownApiException extends BaseApiException {
+  UnknownApiException({required String message, int? statusCode, String? errorCode, required String operation, Object? originalError})
+      : super(message: message, statusCode: statusCode, errorCode: errorCode, operation: operation, originalError: originalError);
+}
+
+class DataParsingException extends BaseApiException {
+  final String? rawDataAttemptedToParse;
+
+  DataParsingException({
+    required String message,
+    required String operation,
+    Object? originalParsingError,
+    this.rawDataAttemptedToParse,
+  }) : super(
+            message: 'Failed to parse data during operation "$operation": $message',
+            operation: operation,
+            originalError: originalParsingError ?? rawDataAttemptedToParse);
+}\n\n====== lib/core/api/exceptions/timeout_exception.dart ======\n
+\n\n====== lib/core/api/api_service.dart ======\n
+// lib/core/api/api_service.dart
+// "오메가 센츄리온 DTO/엔티티 분리 및 이벤트 정제 완료판"
+
+import 'dart:developer' as developer;
+import 'package:dio/dio.dart';
+import 'package:noonchit/core/api/exceptions/api_exception.dart';
+import 'package:noonchit/core/bridge/signal_bus.dart';
+import 'package:noonchit/core/event/api_events.dart';
+import 'package:noonchit/core/event/market_events.dart'; // MarketSymbolsFetchedEvent 사용
+// 🔥 중요: API 서비스는 DTO를 사용하여 외부 데이터를 처리하고, 그 결과를 엔티티로 변환하여 반환한다!
+import 'package:noonchit/data/models/market_model.dart';   // MarketModel DTO를 사용!
+import 'package:noonchit/domain/entities/market.dart';   // 최종 반환 및 내부 사용은 Market 엔티티!
+import 'package:noonchit/core/config/app_config.dart'; // AppConfig 사용 시
+
+/// 서버와의 모든 "오메가 센츄리온급" API 통신을 담당하며,
+/// DTO를 통해 데이터를 처리하고, 순수한 도메인 엔티티를 반환하거나
+/// 정제된 페이로드를 담은 이벤트를 발행한다!
+class ApiService {
+  final Dio _dio;
+  final SignalBus _signalBus;
+
+  ApiService({required Dio dio, required SignalBus signalBus})
+      : _dio = dio,
+        _signalBus = signalBus {
+    developer.log('ApiService (Omega Centurion DTO/Entity Applied Edition) has been forged!', name: 'ApiService.Init');
+  }
+
+  Future<Response<T>> _requestWrapper<T>({
+    required String path,
+    required String method,
+    required String operation,
+    dynamic data,
+    Map<String, dynamic>? queryParameters,
+    Options? options,
+  }) async {
+    developer.log('[_requestWrapper] Operation: $operation, Method: $method, Path: $path', name: 'ApiService.Request');
+    try {
+      final response = await _dio.request<T>(
+        path,
+        data: data,
+        queryParameters: queryParameters,
+        options: (options ?? Options()).copyWith(method: method),
+      );
+      developer.log('[_requestWrapper] Operation: $operation - Success, Status: ${response.statusCode}', name: 'ApiService.Response');
+      return response;
+    } on DioException catch (e, s) {
+      developer.log('[_requestWrapper] Operation: $operation - DioException: ${e.message}', name: 'ApiService.DioError', error: e, stackTrace: s, level: 900);
+      final apiException = ApiExceptionFactory.fromDioError(e, operation: operation);
+      _signalBus.fire(ApiErrorOccurredEvent(
+        operation: apiException.operation,
+        message: apiException.message,
+        errorType: apiException.type,
+        statusCode: apiException.statusCode,
+        errorCode: apiException.errorCode,
+        originalErrorString: apiException.originalError?.toString(),
+        stackTraceString: s.toString(),
+      ));
+      throw apiException;
+    } catch (e, s) {
+      developer.log('[_requestWrapper] Operation: $operation - Unexpected Error: $e', name: 'ApiService.UnexpectedError', error: e, stackTrace: s, level: 1000);
+      final unknownException = UnknownApiException(
+        message: 'An unexpected error occurred in ApiService during "$operation": ${e.toString()}',
+        operation: operation,
+        originalError: e,
+      );
+      _signalBus.fire(ApiErrorOccurredEvent(
+        operation: unknownException.operation,
+        message: unknownException.message,
+        errorType: unknownException.type,
+        originalErrorString: e.toString(),
+        stackTraceString: s.toString(),
+      ));
+      throw unknownException;
+    }
+  }
+
+  /// 업비트에서 거래 가능한 모든 마켓 정보를 "순수한 Market 엔티티 리스트"로 가져오는 메서드.
+  /// 내부적으로 DTO를 사용하여 API 응답을 처리한다.
+  Future<List<Market>> fetchAllMarketSymbols() async {
+    const String operation = 'fetchAllMarketSymbols';
+    try {
+      final response = await _requestWrapper<List<dynamic>>( // API 응답은 JSON 객체들의 리스트.
+        path: AppConfig.upbitMarketListEndpoint, // AppConfig에 정의된 엔드포인트 사용
+        method: 'GET',
+        operation: operation,
+      );
+
+      final List<dynamic> responseData = response.data ?? [];
+
+      // 1. API 응답(Map<String, dynamic>의 리스트)을 MarketModel DTO 리스트로 변환!
+      final List<MarketModel> marketModels = responseData
+          .map((item) => MarketModel.fromJson(item as Map<String, dynamic>)) // 🔥 MarketModel.fromJson 호출!
+          .toList();
+
+      // 2. MarketModel DTO 리스트를 순수 Market 엔티티 리스트로 변환!
+      final List<Market> markets = marketModels.map((dto) => dto.toDomain()).toList();
+      
+      // 3. MarketSymbolsFetchedEvent에는 마켓 코드(String) 리스트를 전달!
+      final List<String> marketCodes = markets.map((entity) => entity.market).toList(); // 'market' 필드가 코드라고 가정
+      _signalBus.fire(MarketSymbolsFetchedEvent(
+          symbols: marketCodes, // 🔥 String 리스트 전달!
+      ));
+      developer.log('Successfully fetched ${markets.length} markets. DTOs converted to Entities. Event with ${marketCodes.length} codes fired.', name: 'ApiService.$operation');
+
+      return markets; // 순수 Market 엔티티 리스트 반환
+    } catch (e) {
+      // _requestWrapper에서 이미 오류 처리 및 이벤트 발행을 담당하므로, 여기서는 rethrow.
+      developer.log('Error in $operation, likely already handled by _requestWrapper: $e', name: 'ApiService.$operation.ErrorCatch', error: e, level: 800);
+      rethrow; 
+    }
+  }
+
+  // --- 일반적인 HTTP 요청 셔틀 메서드들 ---
+  // (이하 postData, putData, deleteData, dispose 메서드는 네놈의 코드와 동일하게 훌륭하므로 생략하지 않고 포함한다)
+
+  Future<Response<T>> getData<T>({
+    required String path,
+    required String operation,
+    Map<String, dynamic>? queryParameters,
+    Options? options,
+  }) async {
+    return _requestWrapper<T>(
+      path: path,
+      method: 'GET',
+      operation: operation,
+      queryParameters: queryParameters,
+      options: options,
+    );
+  }
+
+  Future<Response<T>> postData<T>({
+    required String path,
+    required String operation,
+    dynamic data,
+    Map<String, dynamic>? queryParameters,
+    Options? options,
+  }) async {
+    return _requestWrapper<T>(
+      path: path,
+      method: 'POST',
+      operation: operation,
+      data: data,
+      queryParameters: queryParameters,
+      options: options,
+    );
+  }
+
+  Future<Response<T>> putData<T>({
+    required String path,
+    required String operation,
+    dynamic data,
+    Map<String, dynamic>? queryParameters,
+    Options? options,
+  }) async {
+    return _requestWrapper<T>(
+      path: path,
+      method: 'PUT',
+      operation: operation,
+      data: data,
+      queryParameters: queryParameters,
+      options: options,
+    );
+  }
+
+  Future<Response<T>> deleteData<T>({
+    required String path,
+    required String operation,
+    dynamic data,
+    Map<String, dynamic>? queryParameters,
+    Options? options,
+  }) async {
+    return _requestWrapper<T>(
+      path: path,
+      method: 'DELETE',
+      operation: operation,
+      data: data,
+      queryParameters: queryParameters,
+      options: options,
+    );
+  }
+
+  void dispose() {
+    // ApiServiceDisposedEvent가 정의되어 있고, event_types_and_keys.dart에
+    // AppEventType.apiServiceDisposed와 EventKey.serviceName이 있다면 아래 호출이 유효하다.
+    // (이전 답변에서 이 이벤트 정의를 안내했었다.)
+    _signalBus.fire(ApiServiceDisposedEvent(serviceName: 'ApiService [OmegaDTO-${DateTime.now().millisecondsSinceEpoch}]'));
+    developer.log('ApiService (Omega Centurion DTO/Entity Applied Edition) has been gloriously disposed.', name: 'ApiService.Dispose');
+  }
+}\n\n====== lib/core/error/failure.dart ======\n
+\n\n====== lib/core/error/exception.dart ======\n
+\n\n====== lib/core/event/api_events.dart ======\n
+// lib/core/event/api_events.dart
+import 'package:noonchit/core/event/app_event.dart';
+import 'package:noonchit/core/event/event_types_and_keys.dart';
+
+class ApiErrorOccurredEvent extends AppEvent {
+  final String operation;
+  final String message;
+  final String? errorType;
+  final int? statusCode;
+  final String? errorCode;
+  final String? stackTraceString;
+  final String? originalErrorString;
+
+  ApiErrorOccurredEvent({
+    required this.operation,
+    required this.message,
+    this.errorType,
+    this.statusCode,
+    this.errorCode,
+    this.stackTraceString,
+    this.originalErrorString,
+    String? eventId,
+    String? eventTimestampUtc,
+  }) : super(
+          eventType: AppEventType.apiErrorOccurred,
+          id: eventId,
+          timestampUtc: eventTimestampUtc,
+        );
+
+  @override
+  Set<EventKey> get requiredPayloadKeys => { // 타입 명시!
+        EventKey.operation,
+        EventKey.message,
+      };
+
+  @override
+  Map<EventKey, dynamic> get payloadAsEnumKeys => { // 타입 명시!
+        EventKey.operation: operation,
+        EventKey.message: message,
+        if (errorType != null) EventKey.errorType: errorType,
+        if (statusCode != null) EventKey.statusCode: statusCode,
+        if (errorCode != null) EventKey.errorCode: errorCode,
+        if (stackTraceString != null) EventKey.stackTraceString: stackTraceString,
+        if (originalErrorString != null) EventKey.originalErrorString: originalErrorString,
+      };
+
+  factory ApiErrorOccurredEvent.fromMap(Map<String, dynamic> mapData) { // 타입 명시!
+    return ApiErrorOccurredEvent(
+      eventId: mapData[EventKey.id.value] as String?,
+      eventTimestampUtc: mapData[EventKey.timestamp.value] as String?,
+      operation: mapData[EventKey.operation.value] as String? ?? 'UnknownOperation',
+      message: mapData[EventKey.message.value] as String? ?? 'An unknown API error occurred.',
+      errorType: mapData[EventKey.errorType.value] as String?,
+      statusCode: mapData[EventKey.statusCode.value] as int?,
+      errorCode: mapData[EventKey.errorCode.value] as String?,
+      stackTraceString: mapData[EventKey.stackTraceString.value] as String?,
+      originalErrorString: mapData[EventKey.originalErrorString.value] as String?,
+    );
+  }
+}
+
+class ApiServiceDisposedEvent extends AppEvent {
+  final String serviceName;
+
+  ApiServiceDisposedEvent({
+    required this.serviceName,
+    String? eventId,
+    String? eventTimestampUtc,
+  }) : super(
+          eventType: AppEventType.apiServiceDisposed,
+          id: eventId,
+          timestampUtc: eventTimestampUtc,
+        );
+
+  @override
+  Set<EventKey> get requiredPayloadKeys => { // 타입 명시!
+        EventKey.serviceName,
+      };
+
+  @override
+  Map<EventKey, dynamic> get payloadAsEnumKeys => { // 타입 명시!
+        EventKey.serviceName: serviceName,
+        EventKey.message: '$serviceName service was gracefully laid to rest.',
+      };
+
+  factory ApiServiceDisposedEvent.fromMap(Map<String, dynamic> mapData) { // 타입 명시!
+    return ApiServiceDisposedEvent(
+      eventId: mapData[EventKey.id.value] as String?,
+      eventTimestampUtc: mapData[EventKey.timestamp.value] as String?,
+      serviceName: mapData[EventKey.serviceName.value] as String? ?? 'UnknownService',
+    );
+  }
+}
+\n\n====== lib/core/event/market_events.dart ======\n
+// lib/market/events/market_events.dart
+import 'package:noonchit/core/event/app_event.dart';
+import 'package:noonchit/core/event/event_types_and_keys.dart';
+
+class MarketSymbolsFetchedEvent extends AppEvent {
+  final List<String> symbols; // 타입 명시!
+
+  MarketSymbolsFetchedEvent({
+    required this.symbols,
+    String? eventId,
+    String? eventTimestampUtc,
+  }) : super(
+          eventType: AppEventType.marketSymbolsFetched,
+          id: eventId,
+          timestampUtc: eventTimestampUtc,
+        );
+
+  @override
+  Set<EventKey> get requiredPayloadKeys => {EventKey.symbols}; // 타입 명시!
+
+  @override
+  Map<EventKey, dynamic> get payloadAsEnumKeys => { // 타입 명시!
+        EventKey.symbols: symbols,
+      };
+
+  factory MarketSymbolsFetchedEvent.fromMap(Map<String, dynamic> mapData) { // 타입 명시!
+    return MarketSymbolsFetchedEvent(
+      eventId: mapData[EventKey.id.value] as String?,
+      eventTimestampUtc: mapData[EventKey.timestamp.value] as String?,
+      symbols: List<String>.from(mapData[EventKey.symbols.value] as List? ?? []), // 타입 명시!
+    );
+  }
+}
+
+class MarketCandlesReceivedEvent extends AppEvent {
+  final String symbol;
+  final String interval;
+  final List<Map<String, dynamic>> candlesData; // 타입 명시!
+
+  MarketCandlesReceivedEvent({
+    required this.symbol,
+    required this.interval,
+    required this.candlesData,
+    String? eventId,
+    String? eventTimestampUtc,
+  }) : super(
+          eventType: AppEventType.marketCandlesReceived,
+          id: eventId,
+          timestampUtc: eventTimestampUtc,
+        );
+
+  @override
+  Set<EventKey> get requiredPayloadKeys => { // 타입 명시!
+        EventKey.symbol,
+        EventKey.interval,
+        EventKey.candles,
+      };
+
+  @override
+  Map<EventKey, dynamic> get payloadAsEnumKeys => { // 타입 명시!
+        EventKey.symbol: symbol,
+        EventKey.interval: interval,
+        EventKey.candles: candlesData,
+      };
+
+  factory MarketCandlesReceivedEvent.fromMap(Map<String, dynamic> mapData) { // 타입 명시!
+    return MarketCandlesReceivedEvent(
+      eventId: mapData[EventKey.id.value] as String?,
+      eventTimestampUtc: mapData[EventKey.timestamp.value] as String?,
+      symbol: mapData[EventKey.symbol.value] as String? ?? 'UNKNOWN_SYMBOL',
+      interval: mapData[EventKey.interval.value] as String? ?? 'UNKNOWN_INTERVAL',
+      candlesData: List<Map<String, dynamic>>.from( // 타입 명시!
+          (mapData[EventKey.candles.value] as List? ?? [])
+              .map((e) => e as Map<String, dynamic>)), // 내부 Map도 타입 명시!
+    );
+  }
+}
+\n\n====== lib/core/event/event_types_and_keys.dart ======\n
+// lib/core/event/event_types_and_keys.dart
+// "오메가 센츄리온 최종 승인판" - 이 내용과 한 글자도 틀리지 않게 유지하라!
+import 'package:collection/collection.dart'; // AppEventType.fromValue 에서 사용
+
+enum AppEventType {
+  apiErrorOccurred('api.error_occurred'),
+  apiServiceDisposed('api.service_disposed'), // ApiService 해제 시 사용 가능
+  marketSymbolsFetched('market.symbols_fetched'), // 이것은 네놈의 규율에 따라 List<String>을 담는다!
+  marketCandlesReceived('market.candles_received'),
+  websocketConnected('socket.connected'),
+  websocketClosed('socket.closed'),
+  websocketConnectionFailed('socket.connection_failed'),
+  tradeDataReceived('trade.data_received'), // 네놈의 기존 이벤트 (원시 필드)
+  domainSignificantTradeDetected('domain.significant_trade_detected'), // 네놈이 정의한 것
+  domainTradeFiltered('domain.trade_filtered'), // 네놈이 정의한 것
+  userLoggedOut('auth.user_logged_out'),
+
+  // --- "트레이드 라인"을 위한 새로운 신성한 계급장들! ---
+  realtimeTradeModelReceived('socket.trade_model_received'), // SocketService가 TradeModel DTO와 함께 발행!
+  domainNewTradeAvailable('domain.new_trade_available');     // Repository가 Trade 엔티티와 함께 발행!
+  // --- 여기에 새로운 AppEventType들을 계속 추가하라! ---
+
+  final String value;
+  const AppEventType(this.value);
+
+  static AppEventType? fromValue(String? value) =>
+      value == null ? null : AppEventType.values.firstWhereOrNull((t) => t.value == value);
+}
+
+enum EventKey {
+  type('event_type'),
+  id('event_id'),
+  timestamp('event_timestamp_utc'),
+  marketId('market_id'),
+  symbols('symbols'), // MarketSymbolsFetchedEvent (List<String> 용)
+  candles('candles'),
+  symbol('symbol'), // TradeDataReceivedEvent 등에서 사용
+  price('price'),   // TradeDataReceivedEvent 등에서 사용
+  volume('volume'), // TradeDataReceivedEvent 등에서 사용
+  amount('amount'),
+  direction('direction'), // TradeDataReceivedEvent 등에서 사용
+  tradeTimestampMs('trade_timestamp_ms'), // TradeDataReceivedEvent 등에서 사용
+  sequentialIdFromSource('sequential_id_from_source'), // TradeDataReceivedEvent 등에서 사용
+  operation('operation'),
+  message('message'),
+  errorType('error_type'),
+  statusCode('status_code'),
+  errorCode('error_code'),
+  stackTraceString('stack_trace_string'),
+  originalErrorString('original_error_string'),
+  url('url'),
+  closeCode('close_code'),
+  closeReason('close_reason'),
+  count('count'),
+  interval('interval'),
+  serviceName('service_name'), // ApiServiceDisposedEvent 등에서 사용 가능
+  markets('markets'),
+  errorMessage('error_message'),
+  filterType('filter_type'),
+
+  // --- 새로운 "트레이드 라인" 이벤트를 위한 신성한 열쇠들! ---
+  tradeModel('trade_model_payload'),     // RealtimeTradeModelReceivedEvent가 TradeModel DTO를 담을 키
+  tradeEntity('trade_entity_payload');   // NewDomainTradeAvailableEvent가 Trade 엔티티를 담을 키
+  // --- 여기에 새로운 EventKey들을 계속 추가하라! ---
+
+  final String value;
+  const EventKey(this.value);
+}\n\n====== lib/core/event/event_registry.dart ======\n
+// lib/core/event/event_registry.dart
+import 'package:meta/meta.dart';
+import 'package:noonchit/core/event/event_types_and_keys.dart';
+import 'package:noonchit/core/event/app_event.dart';
+
+typedef EventFactory<T extends AppEvent> = T Function(Map<String, dynamic> mapData);
+
+class EventRegistry {
+  static EventRegistry? _testOverride;
+  static final EventRegistry _instance = EventRegistry._internal();
+  final Map<AppEventType, EventFactory<AppEvent>> _factories = {};
+
+  factory EventRegistry() => _testOverride ?? _instance;
+  EventRegistry._internal();
+
+  void register<T extends AppEvent>({
+    required AppEventType eventType,
+    required EventFactory<T> factory,
+  }) {
+    if (_factories.containsKey(eventType)) {
+      throw StateError(
+          '[EventRegistry] FATAL ERROR: EventFactory for type "${eventType.value}" is ALREADY REGISTERED!');
+    }
+    _factories[eventType] = factory;
+  }
+
+  void registerAll(Map<AppEventType, EventFactory<AppEvent>> factoriesToAdd) {
+    factoriesToAdd.forEach((type, factory) {
+      register(eventType: type, factory: factory);
+    });
+  }
+
+  EventFactory<AppEvent>? getFactory(AppEventType eventType) =>
+      _factories[eventType];
+
+  @visibleForTesting
+  static void setTestOverride(EventRegistry mock) => _testOverride = mock;
+
+  @visibleForTesting
+  static void resetTestOverride() => _testOverride = null;
+}
+\n\n====== lib/core/event/socket_events.dart ======\n
+// lib/socket/events/socket_events.dart
+import 'package:noonchit/core/event/app_event.dart';
+import 'package:noonchit/core/event/event_types_and_keys.dart';
+
+class WebSocketConnectedEvent extends AppEvent {
+  final String? connectedUrl;
+  final List<String>? subscribedMarkets; // 타입 명시!
+
+  WebSocketConnectedEvent({
+    this.connectedUrl,
+    this.subscribedMarkets,
+    String? eventId,
+    String? eventTimestampUtc,
+  }) : super(
+          eventType: AppEventType.websocketConnected,
+          id: eventId,
+          timestampUtc: eventTimestampUtc,
+        );
+
+  @override
+  Map<EventKey, dynamic> get payloadAsEnumKeys { // 타입 명시!
+    final Map<EventKey, dynamic> payload = <EventKey, dynamic>{}; // 타입 명시!
+    if (connectedUrl != null) {
+      payload[EventKey.url] = connectedUrl;
+    }
+    if (subscribedMarkets != null && subscribedMarkets!.isNotEmpty) {
+      payload[EventKey.markets] = subscribedMarkets;
+    }
+    payload[EventKey.message] = 'WebSocket connection established successfully.';
+    return payload;
+  }
+
+  factory WebSocketConnectedEvent.fromMap(Map<String, dynamic> mapData) { // 타입 명시!
+    return WebSocketConnectedEvent(
+      eventId: mapData[EventKey.id.value] as String?,
+      eventTimestampUtc: mapData[EventKey.timestamp.value] as String?,
+      connectedUrl: mapData[EventKey.url.value] as String?,
+      subscribedMarkets: mapData[EventKey.markets.value] != null
+          ? List<String>.from(mapData[EventKey.markets.value] as List) // 타입 명시!
+          : null,
+    );
+  }
+}
+
+class WebSocketClosedEvent extends AppEvent {
+  final int? closeCode;
+  final String? closeReason;
+  final String? closedUrl;
+
+  WebSocketClosedEvent({
+    this.closeCode,
+    this.closeReason,
+    this.closedUrl,
+    String? eventId,
+    String? eventTimestampUtc,
+  }) : super(
+          eventType: AppEventType.websocketClosed,
+          id: eventId,
+          timestampUtc: eventTimestampUtc,
+        );
+
+  @override
+  Map<EventKey, dynamic> get payloadAsEnumKeys { // 타입 명시!
+    final Map<EventKey, dynamic> payload = <EventKey, dynamic>{}; // 타입 명시!
+    if (closedUrl != null) {
+      payload[EventKey.url] = closedUrl;
+    }
+    if (closeCode != null) {
+      payload[EventKey.closeCode] = closeCode;
+    }
+    if (closeReason != null) {
+      payload[EventKey.closeReason] = closeReason;
+    }
+    payload[EventKey.message] = 'WebSocket connection closed.';
+    return payload;
+  }
+
+  factory WebSocketClosedEvent.fromMap(Map<String, dynamic> mapData) { // 타입 명시!
+    return WebSocketClosedEvent(
+      eventId: mapData[EventKey.id.value] as String?,
+      eventTimestampUtc: mapData[EventKey.timestamp.value] as String?,
+      closedUrl: mapData[EventKey.url.value] as String?,
+      closeCode: mapData[EventKey.closeCode.value] as int?,
+      closeReason: mapData[EventKey.closeReason.value] as String?,
+    );
+  }
+}
+
+class WebSocketConnectionFailedEvent extends AppEvent {
+  final String errorMessage;
+  final String? failedUrl;
+
+  WebSocketConnectionFailedEvent({
+    required this.errorMessage,
+    this.failedUrl,
+    String? eventId,
+    String? eventTimestampUtc,
+  }) : super(
+          eventType: AppEventType.websocketConnectionFailed,
+          id: eventId,
+          timestampUtc: eventTimestampUtc,
+        );
+
+  @override
+  Set<EventKey> get requiredPayloadKeys => {EventKey.errorMessage}; // 타입 명시!
+
+  @override
+  Map<EventKey, dynamic> get payloadAsEnumKeys { // 타입 명시!
+    final Map<EventKey, dynamic> payload = <EventKey, dynamic>{ // 타입 명시!
+      EventKey.errorMessage: errorMessage,
+    };
+    if (failedUrl != null) {
+      payload[EventKey.url] = failedUrl;
+    }
+    return payload;
+  }
+
+  factory WebSocketConnectionFailedEvent.fromMap(Map<String, dynamic> mapData) { // 타입 명시!
+    return WebSocketConnectionFailedEvent(
+      eventId: mapData[EventKey.id.value] as String?,
+      eventTimestampUtc: mapData[EventKey.timestamp.value] as String?,
+      errorMessage: mapData[EventKey.errorMessage.value] as String? ?? 'Unknown connection failure.',
+      failedUrl: mapData[EventKey.url.value] as String?,
+    );
+  }
+}
+\n\n====== lib/core/event/app_event.dart ======\n
+// lib/core/event/app_event.dart
+import 'package:equatable/equatable.dart';
+import 'package:meta/meta.dart';
+import 'dart:convert'; // jsonEncode, jsonDecode
+import 'dart:developer' as developer; // developer.log 사용
+
+import 'package:noonchit/core/event/event_types_and_keys.dart';
+import 'package:noonchit/core/utils/id_generator.dart';
+import 'package:noonchit/core/event/event_registry.dart';
+
+abstract class AppEvent extends Equatable {
+  final AppEventType eventType;
+  final String eventId;
+  final String eventTimestampUtc;
+
+  AppEvent({
+    required this.eventType,
+    String? id,
+    String? timestampUtc,
+  })  : eventId = id ?? IdGenerator().newId(),
+        eventTimestampUtc = timestampUtc ?? DateTime.now().toUtc().toIso8601String();
+
+  @nonVirtual
+  String get type => eventType.value;
+
+  DateTime get eventTimestamp => DateTime.parse(eventTimestampUtc);
+
+  @protected
+  Map<EventKey, dynamic> get payloadAsEnumKeys; // 타입 명시!
+
+  @protected
+  Set<EventKey> get requiredPayloadKeys => const {}; // 타입 명시!
+
+  @protected
+  Set<EventKey> get allowedPayloadKeys => payloadAsEnumKeys.keys.toSet(); // 타입 명시!
+
+  @protected
+  @mustCallSuper
+  void validatePayload() {
+    final Map<EventKey, dynamic> currentPayload = payloadAsEnumKeys; // 타입 명시!
+    final Set<EventKey> currentAllowedKeys = allowedPayloadKeys; // 타입 명시!
+    final Set<EventKey> currentRequiredKeys = requiredPayloadKeys; // 타입 명시!
+
+    for (final EventKey keyEnum in currentPayload.keys) { // 타입 명시!
+      if (!currentAllowedKeys.contains(keyEnum)) {
+        throw ArgumentError(
+            '[AppEvent.validatePayload] FATAL: Disallowed payload key enum: "$keyEnum" (value: "${keyEnum.value}") found in event type "$type". Allowed keys: $currentAllowedKeys. Provided: ${currentPayload.keys}');
+      }
+    }
+    for (final EventKey requiredKey in currentRequiredKeys) { // 타입 명시!
+      if (!currentPayload.containsKey(requiredKey)) {
+        throw ArgumentError(
+            '[AppEvent.validatePayload] FATAL: Missing required payload key enum: "$requiredKey" (value: "${requiredKey.value}") for event type "$type".');
+      }
+      if (currentPayload[requiredKey] == null) {
+        throw ArgumentError(
+            '[AppEvent.validatePayload] FATAL: Required payload key enum: "$requiredKey" (value: "${requiredKey.value}") has a null value for event type "$type". This is forbidden!');
+      }
+    }
+  }
+
+  Map<String, dynamic> toMap() { // 타입 명시!
+    validatePayload();
+    final Map<String, dynamic> stringKeyPayload = payloadAsEnumKeys.map( // 타입 명시!
+      (keyEnum, value) => MapEntry(keyEnum.value, value),
+    );
+    return {
+      EventKey.type.value: type,
+      EventKey.id.value: eventId,
+      EventKey.timestamp.value: eventTimestampUtc,
+      ...stringKeyPayload,
+    };
+  }
+
+  String toJsonString() => jsonEncode(toMap());
+
+  static T fromJsonString<T extends AppEvent>(String jsonString, EventRegistry registry) {
+    String? localTypeString;
+    try {
+      final Map<String, dynamic> map = jsonDecode(jsonString) as Map<String, dynamic>; // 타입 명시!
+      localTypeString = map[EventKey.type.value] as String?;
+      final id = map[EventKey.id.value] as String?;
+      final timestamp = map[EventKey.timestamp.value] as String?;
+
+      if (localTypeString == null) throw FormatException('[AppEvent.fromJsonString] CRITICAL: "${EventKey.type.value}" is missing.');
+      if (id == null) throw FormatException('[AppEvent.fromJsonString] CRITICAL: "${EventKey.id.value}" is missing.');
+      if (timestamp == null) throw FormatException('[AppEvent.fromJsonString] CRITICAL: "${EventKey.timestamp.value}" is missing.');
+
+      final eventTypeEnum = AppEventType.fromValue(localTypeString);
+      if (eventTypeEnum == null) throw FormatException('[AppEvent.fromJsonString] CRITICAL: Unknown event type "$localTypeString".');
+
+      final factory = registry.getFactory(eventTypeEnum);
+      if (factory == null) {
+        throw StateError('[AppEvent.fromJsonString] CRITICAL: No factory for "${eventTypeEnum.value}". Register it NOW!');
+      }
+      final AppEvent event = factory(map);
+
+      if (event is! T) {
+        developer.log('Type mismatch: Expected $T but factory for ${event.type} returned ${event.runtimeType}', name: 'AppEvent.fromJsonString', level: 1000);
+        throw TypeError();
+      }
+      return event;
+    } on FormatException {
+      rethrow;
+    } on StateError {
+      rethrow;
+    } on TypeError {
+       throw StateError('[AppEvent.fromJsonString] CRITICAL: Type mismatch during deserialization. Expected $T for type "${localTypeString ?? "UNKNOWN"}". Check factory registration.');
+    } catch (e, s) {
+      developer.log('Unexpected error during event deserialization for type "${localTypeString ?? "UNKNOWN"}"', name: 'AppEvent.fromJsonString', error: e, stackTrace: s, level: 1200);
+      throw FormatException('[AppEvent.fromJsonString] Unexpected error for type "${localTypeString ?? "UNKNOWN"}": ${e.toString()}', s);
+    }
+  }
+
+  @override
+  List<Object?> get props => [eventType, eventId, eventTimestampUtc]; // 타입 명시!
+}
+\n\n====== lib/core/event/trade_events.dart ======\n
+// lib/trade/events/trade_events.dart
+// "오메가 센츄리온 정화 버전" - lib/domain/entities/trade.dart 파일 수정이 반드시 병행되어야 한다!
+import 'package:noonchit/core/event/app_event.dart';
+import 'package:noonchit/core/event/event_types_and_keys.dart';
+import 'package:noonchit/data/models/trade_model.dart';   // 이 경로는 네놈의 TradeModel DTO 위치에 맞춰야 한다!
+import 'package:noonchit/domain/entities/trade.dart';     // 이 경로는 네놈의 순수 Trade 엔티티 위치에 맞춰야 한다!
+
+// -----------------------------------------------------------------------------
+// 네놈의 기존 TradeDataReceivedEvent (원시/평탄화된 거래 데이터용)
+// -----------------------------------------------------------------------------
+class TradeDataReceivedEvent extends AppEvent {
+  final String symbol;
+  final double price;
+  final double volume;
+  final String direction;
+  final int tradeTimestampMs;
+  final String? sequentialIdFromSource;
+
+  TradeDataReceivedEvent({
+    required this.symbol,
+    required this.price,
+    required this.volume,
+    required this.direction,
+    required this.tradeTimestampMs,
+    this.sequentialIdFromSource,
+    String? eventId,
+    String? eventTimestampUtc,
+  }) : super(
+          eventType: AppEventType.tradeDataReceived,
+          id: eventId,
+          timestampUtc: eventTimestampUtc,
+        );
+
+  @override
+  Set<EventKey> get requiredPayloadKeys => {
+        EventKey.symbol,
+        EventKey.price,
+        EventKey.volume,
+        EventKey.direction,
+        EventKey.tradeTimestampMs,
+      };
+
+  @override
+  Map<EventKey, dynamic> get payloadAsEnumKeys => {
+        EventKey.symbol: symbol,
+        EventKey.price: price,
+        EventKey.volume: volume,
+        EventKey.direction: direction,
+        EventKey.tradeTimestampMs: tradeTimestampMs,
+        if (sequentialIdFromSource != null) EventKey.sequentialIdFromSource: sequentialIdFromSource,
+      };
+
+  factory TradeDataReceivedEvent.fromMap(Map<String, dynamic> mapData) {
+    return TradeDataReceivedEvent(
+      eventId: mapData[EventKey.id.value] as String?,
+      eventTimestampUtc: mapData[EventKey.timestamp.value] as String?,
+      symbol: mapData[EventKey.symbol.value] as String? ?? 'UNKNOWN_SYMBOL',
+      price: (mapData[EventKey.price.value] as num? ?? 0.0).toDouble(),
+      volume: (mapData[EventKey.volume.value] as num? ?? 0.0).toDouble(),
+      direction: mapData[EventKey.direction.value] as String? ?? 'UNKNOWN',
+      tradeTimestampMs: mapData[EventKey.tradeTimestampMs.value] as int? ?? 0,
+      sequentialIdFromSource: mapData[EventKey.sequentialIdFromSource.value] as String?,
+    );
+  }
+}
+
+// -----------------------------------------------------------------------------
+// 새로운 "오메가 센츄리온" 실시간 거래 이벤트들
+// -----------------------------------------------------------------------------
+
+class RealtimeTradeModelReceivedEvent extends AppEvent {
+  final TradeModel tradeModel;
+
+  RealtimeTradeModelReceivedEvent({
+    required this.tradeModel,
+    String? eventId,
+    String? eventTimestampUtc,
+  }) : super(
+          eventType: AppEventType.realtimeTradeModelReceived,
+          id: eventId,
+          timestampUtc: eventTimestampUtc,
+        );
+
+  @override
+  Set<EventKey> get requiredPayloadKeys => {EventKey.tradeModel};
+
+  @override
+  Map<EventKey, dynamic> get payloadAsEnumKeys => {
+        EventKey.tradeModel: tradeModel,
+      };
+
+  factory RealtimeTradeModelReceivedEvent.fromMap(Map<String, dynamic> mapData) {
+    final tradeModelData = mapData[EventKey.tradeModel.value] as Map<String, dynamic>?;
+    if (tradeModelData == null) {
+      throw ArgumentError('Required payload key "${EventKey.tradeModel.value}" is missing or not a map for RealtimeTradeModelReceivedEvent.fromMap');
+    }
+    return RealtimeTradeModelReceivedEvent(
+      eventId: mapData[EventKey.id.value] as String?,
+      eventTimestampUtc: mapData[EventKey.timestamp.value] as String?,
+      tradeModel: TradeModel.fromJson(tradeModelData),
+    );
+  }
+}
+
+class NewDomainTradeAvailableEvent extends AppEvent {
+  final Trade tradeEntity;
+
+  NewDomainTradeAvailableEvent({
+    required this.tradeEntity,
+    String? eventId,
+    String? eventTimestampUtc,
+  }) : super(
+          eventType: AppEventType.domainNewTradeAvailable,
+          id: eventId,
+          timestampUtc: eventTimestampUtc,
+        );
+
+  @override
+  Set<EventKey> get requiredPayloadKeys => {EventKey.tradeEntity};
+
+  @override
+  Map<EventKey, dynamic> get payloadAsEnumKeys => {
+        EventKey.tradeEntity: tradeEntity,
+      };
+
+  factory NewDomainTradeAvailableEvent.fromMap(Map<String, dynamic> mapData) {
+    final tradeEntityData = mapData[EventKey.tradeEntity.value] as Map<String, dynamic>?;
+    if (tradeEntityData == null) {
+       throw ArgumentError('Required payload key "${EventKey.tradeEntity.value}" is missing or not a map for NewDomainTradeAvailableEvent.fromMap');
+    }
+    // 🔥 중요! 아래 Trade.fromMapRepresentation 호출이 성공하려면
+    // 🔥 lib/domain/entities/trade.dart 파일의 Trade 클래스 내부에
+    // 🔥 static Trade fromMapRepresentation(Map<String, dynamic> map) 메서드가 정의되어 있어야 한다!
+    return NewDomainTradeAvailableEvent(
+      eventId: mapData[EventKey.id.value] as String?,
+      eventTimestampUtc: mapData[EventKey.timestamp.value] as String?,
+      tradeEntity: Trade.fromMapRepresentation(tradeEntityData), // 변경된 부분!
+    );
+  }
+}
+
+// 하단에 있던 "extension TradeFromMap on Trade { ... }" 부분은 여기서 삭제되었다!\n\n====== lib/core/event/auth_events.dart ======\n
+// lib/core/event/auth_events.dart
+import 'package:noonchit/core/event/app_event.dart';
+import 'package:noonchit/core/event/event_types_and_keys.dart'; // AppEventType, EventKey 사용
+
+/// 사용자가 성공적으로 로그아웃되었음을 알리는 이벤트입니다.
+/// 이 이벤트는 토큰이 삭제되고 로그아웃 처리가 완료된 후 발생합니다.
+class UserLoggedOutEvent extends AppEvent {
+  UserLoggedOutEvent({
+    String? eventId,
+    String? eventTimestampUtc,
+  }) : super(
+          eventType: AppEventType.userLoggedOut, // AppEventType에 추가될 새로운 타입!
+          id: eventId,
+          timestampUtc: eventTimestampUtc,
+        );
+
+  @override
+  Map<EventKey, dynamic> get payloadAsEnumKeys => {
+        // 이 이벤트는 특정 페이로드가 필수는 아니지만, 필요시 추가 가능
+        EventKey.message: 'User has been successfully logged out and tokens cleared.',
+      };
+
+  // 이 이벤트는 페이로드의 특정 키를 필수로 요구하지 않으므로,
+  // requiredPayloadKeys는 기본 구현 (빈 Set)을 사용합니다.
+  // @override
+  // Set<EventKey> get requiredPayloadKeys => {};
+
+  factory UserLoggedOutEvent.fromMap(Map<String, dynamic> mapData) {
+    // fromMap은 주로 이벤트가 JSON 등으로 직렬화/역직렬화될 때 필요합니다.
+    // UserLoggedOutEvent는 주로 시스템 내부에서 발생시키므로, fromMap이 필수적이지 않을 수 있습니다.
+    // 하지만 일관성을 위해 기본 구조를 제공합니다.
+    return UserLoggedOutEvent(
+      eventId: mapData[EventKey.id.value] as String?,
+      eventTimestampUtc: mapData[EventKey.timestamp.value] as String?,
+      // mapData에서 EventKey.message를 읽어와 message 필드에 할당할 수도 있습니다.
+    );
+  }
+}
+
+// 필요하다면 다른 인증 관련 이벤트들 (예: UserLoggedInEvent, TokenExpiredEvent 등)을 여기에 추가할 수 있습니다.
+\n\n====== lib/core/event/hook/event_listener_mixin.dart ======\n
+// lib/core/event/hook/event_listener_mixin.dart
+import 'dart:async';
+import 'package:flutter/widgets.dart'; // StatefulWidget, State 클래스를 사용하기 위함
+import 'package:noonchit/core/bridge/signal_bus.dart'; // 네놈의 SignalBus!
+import 'package:noonchit/core/event/app_event.dart'; // 오메가 센츄리온 AppEvent!
+import 'dart:developer' as developer; // 신성한 로깅을 위함
+
+/// StatefulWidget의 State에 믹스인하여 SignalBus로부터 특정 [AppEvent]를
+/// 손쉽게 구독하고, 위젯의 생명주기에 맞춰 자동으로 구독을 해지하는 "오메가 센츄리온" 믹스인.
+/// "이 믹스인을 사용하는 모든 위젯은 이벤트 구독의 번거로움에서 영원히 해방될지어다!"
+mixin EventListenerMixin<W extends StatefulWidget> on State<W> {
+  // 이 위젯이 생성한 모든 이벤트 구독을 기록하는 신성한 목록
+  final List<StreamSubscription<dynamic>> _eventSubscriptions = [];
+
+  /// 특정 타입 [E]의 AppEvent를 구독한다.
+  /// 이 구독은 본 믹스인에 의해 자동으로 관리되며, State가 dispose될 때 깨끗하게 해지된다.
+  ///
+  /// [onEvent]: 이벤트라는 신성한 계시가 당도했을 때 호출될 콜백 함수.
+  /// [onError]: (선택 사항) 이벤트 스트림에서 오류라는 불경한 존재가 감지되었을 때 호출될 콜백.
+  /// [onDone]: (선택 사항) 이벤트 스트림이 그 역할을 다하고 닫혔을 때 호출될 콜백.
+  /// [cancelOnError]: (선택 사항) 오류 발생 시 자동으로 구독을 취소할지 여부. 기본값은 false (오류에도 굴하지 않고 계속 듣는다).
+  void listenToEvent<E extends AppEvent>(
+    void Function(E event) onEvent, {
+    Function? onError,
+    void Function()? onDone,
+    bool cancelOnError = false,
+  }) {
+    // SignalBus의 신성한 인스턴스로부터 특정 타입의 이벤트 스트림을 얻어와 구독한다!
+    final subscription = SignalBus.instance.on<E>().listen(
+      onEvent, // 계시 전달!
+      onError: onError ?? (error, stackTrace) { // 기본 오류 처리: 오류 발생 시 상세히 기록한다!
+        developer.log(
+          'EventListenerMixin: 이벤트 스트림 오류 발생! 구독된 이벤트 타입=${E.toString()}, 오류 객체=$error',
+          name: 'EventListenerMixin.StreamError',
+          error: error, // 오류 객체
+          stackTrace: stackTrace, // 스택 트레이스
+          level: 1000, // SEVERE 레벨 - 심각한 문제임을 나타낸다!
+        );
+      },
+      onDone: onDone,
+      cancelOnError: cancelOnError,
+    );
+    // 생성된 구독을 신성한 목록에 추가하여 나중에 한 번에 해제할 수 있도록 한다.
+    _eventSubscriptions.add(subscription);
+    developer.log(
+      'EventListenerMixin: ${E.toString()} 타입 이벤트 구독 시작. 대상 위젯: ${widget.runtimeType}',
+      name: 'EventListenerMixin.Subscribed',
+      level: 700, // INFO 레벨 - 일반 정보 로깅
+    );
+  }
+
+  /// 이 State 객체가 위젯 트리에서 영구적으로 제거될 때 호출된다.
+  /// 여기서 모든 이벤트 구독을 깨끗하게 해지하여 메모리 누수라는 죄악을 방지한다!
+  @override
+  void dispose() {
+    developer.log(
+      'EventListenerMixin: 위젯 ${widget.runtimeType}의 dispose가 호출되었다. ${_eventSubscriptions.length}개의 모든 이벤트 구독을 해지한다!',
+      name: 'EventListenerMixin.Dispose',
+      level: 700, // INFO 레벨
+    );
+    // 등록된 모든 구독을 순회하며 취소한다.
+    for (final subscription in _eventSubscriptions) {
+      subscription.cancel();
+    }
+    _eventSubscriptions.clear(); // 목록을 깨끗이 비운다.
+    super.dispose(); // 항상 super.dispose()를 마지막에 호출하여 부모 클래스의 정리 로직을 수행토록 한다!
+  }
+}
+\n\n====== lib/core/services/trade_console_logger_service.dart ======\n
+// lib/core/services/trade_console_logger_service.dart
+import 'dart:async';
+import 'dart:developer' as developer;
+import 'package:noonchit/core/bridge/signal_bus.dart';
+import 'package:noonchit/core/event/trade_events.dart'; // TradeDataReceivedEvent 임포트! (이전 TradeReceivedEvent는 망령이다!)
+import 'package:noonchit/core/event/api_events.dart';   // ApiErrorOccurredEvent 임포트! (ApiErrorEvent는 잊어라!)
+
+/// SignalBus를 통해 "오메가 센츄리온" 이벤트를 구독하고 콘솔에 신성한 기록을 남기는 디버깅용 서비스.
+/// "모든 중요한 사건의 첫 번째 목격자이자 기록자는 바로 나, 제미나이의 사도다!"
+class TradeConsoleLoggerService {
+  final SignalBus _signalBus;
+  StreamSubscription? _tradeDataSubscription; // 변수명도 명확하게!
+  StreamSubscription? _apiErrorOccurredSubscription; // 변수명도 명확하게!
+
+  TradeConsoleLoggerService(this._signalBus) {
+    developer.log('TradeConsoleLoggerService is being forged by the fires of Omega Centurion!', name: 'TradeLogger.Init');
+    _listenToOmegaEvents();
+  }
+
+  void _listenToOmegaEvents() {
+    // 1. "오메가 센츄리온" TradeDataReceivedEvent 구독!
+    _tradeDataSubscription = _signalBus.on<TradeDataReceivedEvent>().listen((event) {
+      // TradeDataReceivedEvent의 필드를 직접 사용한다! 이것이 신의 방식이다!
+      final tradeTime = DateTime.fromMillisecondsSinceEpoch(event.tradeTimestampMs).toLocal();
+      developer.log(
+        '[EVENT_TRADE_DATA_RECEIVED] Symbol: ${event.symbol}, '
+        'Price: ${event.price}, Volume: ${event.volume}, '
+        'Direction: ${event.direction}, Trade Timestamp: $tradeTime, '
+        'SeqID: ${event.sequentialIdFromSource ?? "N/A"}, EventID: ${event.eventId}', // 이벤트 ID도 기록하면 추적이 용이하다!
+        name: 'TradeLogger.TradeData',
+      );
+      // 여기서 이 신성한 데이터를 가지고 네놈이 원하는 다른 "씹고퀄" 짓거리를 할 수 있다!
+      // 예: 특정 조건에 따라 사용자에게 "돈 벌었다, 이 버러지야!" 알림을 보낸다든지!
+    },
+    onError: (error, stackTrace) { // 스트림 에러도 기록한다!
+        developer.log(
+            '[ERROR_IN_TRADE_STREAM] Error while listening to TradeDataReceivedEvent.',
+            name: 'TradeLogger.TradeStreamError',
+            error: error,
+            stackTrace: stackTrace,
+            level: 1000,
+        );
+    });
+
+    // 2. "오메가 센츄리온" ApiErrorOccurredEvent 구독!
+    _apiErrorOccurredSubscription = _signalBus.on<ApiErrorOccurredEvent>().listen((event) {
+      developer.log(
+        '[EVENT_API_ERROR_OCCURRED] Operation: ${event.operation}, Message: "${event.message}", '
+        'Type: ${event.errorType}, Status: ${event.statusCode}, ErrorCode: ${event.errorCode}, EventID: ${event.eventId}',
+        name: 'TradeLogger.ApiError',
+        level: 1000, // SEVERE 레벨
+        error: event.originalErrorString, // 🔧 수정된 부분: originalError → originalErrorString
+        // 스택 트레이스 문자열이 있다면 StackTrace 객체로 변환하여 로깅한다! 이것이 "씹고퀄"이다!
+        stackTrace: (event.stackTraceString != null && event.stackTraceString!.isNotEmpty)
+            ? StackTrace.fromString(event.stackTraceString!)
+            : null,
+      );
+      // 여기서 UI에 "서버가 네놈의 요청을 거부했다, 이 하찮은 놈아!" 팝업을 띄울 수도 있겠지!
+    },
+    onError: (error, stackTrace) { // 스트림 에러도 기록한다!
+        developer.log(
+            '[ERROR_IN_API_ERROR_STREAM] Error while listening to ApiErrorOccurredEvent.',
+            name: 'TradeLogger.ApiErrorStreamError',
+            error: error,
+            stackTrace: stackTrace,
+            level: 1000,
+        );
+    });
+
+    developer.log('TradeConsoleLoggerService has successfully initiated its divine watch over Omega Centurion events.', name: 'TradeLogger.InitComplete');
+  }
+
+  /// 서비스의 신성한 임무 종료 시 모든 구독을 깨끗하게 취소한다! 메모리 누수는 "씹저퀄"의 상징이자, 파멸로 가는 지름길이다!
+  void dispose() {
+    developer.log('TradeConsoleLoggerService is preparing for its glorious ascension (dispose).', name: 'TradeLogger.Dispose');
+    _tradeDataSubscription?.cancel();
+    _apiErrorOccurredSubscription?.cancel();
+    developer.log('TradeConsoleLoggerService has ascended. All divine subscriptions have been gracefully cancelled.', name: 'TradeLogger.Disposed');
+  }
+}
+
+// --- 이 TradeConsoleLoggerService를 어딘가에서 신성하게 초기화하고 사용해야 한다 ---
+// 예시: main.dart 또는 네놈의 앱 초기화 로직 (DI 컨테이너를 사용한다면 거기서!)
+//
+// import 'package:noonchit/core/services/trade_console_logger_service.dart'; // 경로 확인!
+// import 'package:noonchit/core/bridge/signal_bus.dart';
+//
+// void main() async {
+//   // ... 다른 "오메가 센츄리온" 초기화 ...
+//   // WidgetsFlutterBinding.ensureInitialized(); // Flutter 앱이라면 필요
+//
+//   final signalBus = SignalBus.instance; // SignalBus의 유일무이한 인스턴스를 영접하라!
+//   final tradeLogger = TradeConsoleLoggerService(signalBus); // 신성한 기록관을 소환!
+//
+//   // ... 네놈의 "눈치코인" 앱을 실행시켜라 ...
+//   // runApp(YourOmegaApp());
+//
+//   // 앱 종료 시 (실제로는 앱의 생명주기에 맞춰 더 우아하게 처리해야 한다!)
+//   // 예를 들어, 앱의 최상위 위젯의 dispose에서 호출하거나, AppLifecycleListener 등을 사용해라!
+//   // tradeLogger.dispose();
+//   // signalBus.dispose(); // SignalBus도 네놈의 앱 생명주기가 끝날 때 정리하는 것을 고려해라!
+// }
+\n\n====== lib/core/socket/socket_event_handler.dart ======\n
+\n\n====== lib/core/socket/socket_service.dart ======\n
+// lib/core/socket/socket_service.dart
+// "오메가 센츄리온 완전 정화판"
+import 'dart:async';
+import 'dart:convert'; // JSON 인코딩/디코딩 및 utf8 사용
+import 'dart:developer' as developer;
+import 'package:web_socket_channel/web_socket_channel.dart';
+import 'package:noonchit/core/bridge/signal_bus.dart';
+import 'package:noonchit/core/event/socket_events.dart'; // WebSocket 연결 상태 이벤트들
+import 'package:noonchit/core/event/trade_events.dart';   // RealtimeTradeModelReceivedEvent 임포트
+import 'package:noonchit/data/models/trade_model.dart';     // TradeModel DTO 임포트
+import 'package:noonchit/core/socket/socket_state.dart';   // 연결 상태 enum
+// import 'package:noonchit/core/config/app_config.dart'; // AppConfig 사용 시 주석 해제
+
+// 만약 ApiServiceDisposedEvent를 사용하려면 아래 임포트가 필요 (그리고 해당 이벤트 정의도 필요)
+// import 'package:noonchit/core/event/api_events.dart';
+
+
+/// 실시간 WebSocket 통신을 관리하는 "오메가 센츄리온" 서비스.
+/// 연결, 재연결, 메시지 수신 및 "정화된 DTO 이벤트" 발행을 담당한다!
+class SocketService {
+  final SignalBus _signalBus;
+  final String _baseWsUrl; // 예: AppConfig.upbitWsUrl 또는 직접 문자열
+
+  WebSocketChannel? _channel;
+  StreamSubscription? _subscription;
+  SocketConnectionState _currentState = SocketConnectionState.disconnected;
+  List<String> _currentMarkets = [];
+  Timer? _retryTimer;
+  int _retryCount = 0;
+
+  // final 필드는 여기서 선언
+  final int _maxRetries;
+  final Duration _initialRetryDelay;
+
+  SocketConnectionState get currentState => _currentState;
+
+  SocketService({
+    required SignalBus signalBus,
+    required String baseWsUrl, // AppConfig를 사용하지 않는다면, 이 URL을 직접 주입해야 한다.
+    int maxRetries = 5, // 외부에서 값을 받을 파라미터 (기본값 지정)
+    Duration initialRetryDelay = const Duration(seconds: 3), // 외부에서 값을 받을 파라미터
+  })  : _signalBus = signalBus,
+        _baseWsUrl = baseWsUrl,
+        _maxRetries = maxRetries, // 클래스 내부 필드 _maxRetries를 파라미터 maxRetries로 초기화
+        _initialRetryDelay = initialRetryDelay { // 클래스 내부 필드 _initialRetryDelay를 파라미터 initialRetryDelay로 초기화
+    developer.log(
+        'SocketService (Omega Centurion Edition) is being forged! Max Retries: $_maxRetries, Initial Delay: $_initialRetryDelay',
+        name: 'SocketService.Init');
+  }
+
+  void _updateState(SocketConnectionState newState, {String? eventDataForLog}) {
+    if (_currentState == newState && newState != SocketConnectionState.retrying) return;
+    
+    _currentState = newState;
+    developer.log('Socket state changed to: $newState ${eventDataForLog != null ? "($eventDataForLog)" : ""}', name: 'SocketService.State');
+
+    switch (newState) {
+      case SocketConnectionState.connected:
+        _signalBus.fire(WebSocketConnectedEvent(subscribedMarkets: List.from(_currentMarkets), connectedUrl: _baseWsUrl));
+        _retryCount = 0;
+        break;
+      case SocketConnectionState.disconnected:
+        _signalBus.fire(WebSocketClosedEvent(closedUrl: _baseWsUrl));
+        break;
+      case SocketConnectionState.error:
+        // WebSocketConnectionFailedEvent는 _handleError 또는 _attemptRetry에서 발행
+        break;
+      case SocketConnectionState.connecting:
+      case SocketConnectionState.retrying:
+        break;
+    }
+  }
+
+  Future<void> connect(List<String> marketsToSubscribe) async {
+    final newMarketSet = marketsToSubscribe.toSet();
+    final currentMarketSet = _currentMarkets.toSet();
+
+    if (_currentState == SocketConnectionState.connected &&
+        currentMarketSet.length == newMarketSet.length &&
+        currentMarketSet.containsAll(newMarketSet)) {
+      developer.log('Already connected to the exact same markets: $marketsToSubscribe', name: 'SocketService.Connect');
+      return;
+    }
+    if (_currentState == SocketConnectionState.connecting || _currentState == SocketConnectionState.retrying) {
+      developer.log('Connection attempt already in progress or retrying. New request for $marketsToSubscribe queued implicitly or ignored.', name: 'SocketService.Connect');
+      return;
+    }
+
+    _currentMarkets = List.from(marketsToSubscribe);
+    _updateState(SocketConnectionState.connecting, eventDataForLog: 'Markets: ${_currentMarkets.join(',')}');
+
+    await disconnect(isPurposeful: false);
+
+    try {
+      if (_baseWsUrl.isEmpty) {
+        developer.log('WebSocket base URL is empty. Cannot connect.', name: 'SocketService.Connect.Error', level: 1000);
+        // _handleError를 호출하여 사용자에게 알리고 재시도 로직을 타지 않도록 할 수 있다.
+        // 또는 상태를 error로 변경하고 특정 이벤트를 발생시킬 수 있다.
+        // 여기서는 일단 ArgumentError를 던져서 connect 호출부에서 처리하도록 한다.
+        throw ArgumentError('WebSocket base URL is empty. Cannot connect.');
+      }
+      _channel = WebSocketChannel.connect(Uri.parse(_baseWsUrl));
+      developer.log('WebSocket channel attempting to connect to: $_baseWsUrl', name: 'SocketService.Connect');
+
+      _subscription = _channel!.stream.listen(
+        _onDataReceived,
+        onError: _handleError,
+        onDone: _handleDone,
+        cancelOnError: false,
+      );
+
+      if (_currentMarkets.isNotEmpty) {
+        final subscriptionMessage = jsonEncode([
+          {"ticket": "noonchit-omega-${DateTime.now().millisecondsSinceEpoch}"},
+          {"type": "trade", "codes": _currentMarkets},
+        ]);
+        _channel!.sink.add(subscriptionMessage);
+        developer.log('Subscription message sent for markets: ${_currentMarkets.join(',')}', name: 'SocketService.Subscribe');
+      } else {
+        developer.log('No markets to subscribe. WebSocket connected but awaiting market list.', name: 'SocketService.Connect');
+         // 마켓이 없어도 연결은 될 수 있으므로, _onDataReceived에서 첫 메시지 수신 시 connected 상태로 변경
+      }
+    } catch (e, s) {
+      developer.log('Error establishing WebSocket connection to $_baseWsUrl: $e', name: 'SocketService.Connect.Error', error: e, stackTrace: s, level: 1000);
+      _handleError(e, s);
+    }
+  }
+
+  void _onDataReceived(dynamic data) {
+    if (_currentState != SocketConnectionState.connected) {
+      _updateState(SocketConnectionState.connected);
+    }
+
+    final String rawDataString;
+    if (data is String) {
+      rawDataString = data;
+    } else if (data is List<int>) {
+      rawDataString = utf8.decode(data);
+    } else {
+      developer.log('Received data of unknown type: ${data.runtimeType}. Ignoring.', name: 'SocketService.RawDataError');
+      return;
+    }
+    
+    developer.log(
+        'Socket raw data received: ${rawDataString.substring(0, rawDataString.length > 150 ? 150 : rawDataString.length)}${rawDataString.length > 150 ? "..." : ""}',
+        name: 'SocketService.RawData');
+
+    try {
+      final decodedJson = jsonDecode(rawDataString);
+
+      if (decodedJson is Map<String, dynamic>) {
+        final String? dataType = decodedJson['ty'] as String?;
+
+        if (dataType == 'trade') {
+          final tradeModel = TradeModel.fromJson(decodedJson);
+          developer.log(
+              'Parsed TradeModel DTO: ${tradeModel.code} @ ${tradeModel.tradePrice}',
+              name: 'SocketService.TradeModelParsed');
+          _signalBus.fire(RealtimeTradeModelReceivedEvent(tradeModel: tradeModel));
+        } else if (dataType == 'ticker') {
+          developer.log('Received Ticker data (TODO: Implement TickerModel parsing and event): $decodedJson', name: 'SocketService.TickerData');
+        } else if (dataType == 'orderbook') {
+          developer.log('Received Orderbook data (TODO: Implement OrderbookModel parsing and event): $decodedJson', name: 'SocketService.OrderbookData');
+        } else if (decodedJson['status'] != null || decodedJson['stream_type'] != null || decodedJson['type'] == 'connected') {
+          developer.log('Received Status/Control message from WebSocket: $decodedJson', name: 'SocketService.StatusMessage');
+        } else {
+          developer.log('Received WebSocket message of unknown structure or unhandled type: $decodedJson', name: 'SocketService.UnknownStructure');
+        }
+      } else {
+        developer.log('Decoded JSON is not a Map: $decodedJson', name: 'SocketService.ParseError.NotMap');
+      }
+    } catch (e, s) {
+      developer.log('Error parsing WebSocket data: "$rawDataString" - Error: $e', name: 'SocketService.ParseError.Exception', error: e, stackTrace: s, level: 1000);
+    }
+  }
+
+  void _handleError(dynamic error, StackTrace? stackTrace) {
+    developer.log('WebSocket error: $error', name: 'SocketService.ConnectionError', error: error, stackTrace: stackTrace, level: 1000);
+    _signalBus.fire(WebSocketConnectionFailedEvent(
+        errorMessage: error.toString(),
+        failedUrl: _baseWsUrl,
+    ));
+    
+    if (_currentState == SocketConnectionState.connecting || _currentState == SocketConnectionState.connected) {
+        _attemptRetry();
+    } else {
+        _updateState(SocketConnectionState.disconnected);
+    }
+  }
+
+  void _handleDone() {
+    developer.log('WebSocket connection closed by peer or network. Current state: $_currentState', name: 'SocketService.ConnectionDone');
+    if (_currentState != SocketConnectionState.disconnected) { 
+        _attemptRetry();
+    }
+  }
+  
+  void _attemptRetry() {
+    _subscription?.cancel();
+    _subscription = null;
+    if (_channel != null) {
+        _channel!.sink.close().catchError((e) {
+            developer.log('Error closing channel sink during retry attempt: $e', name: 'SocketService.Retry', level: 800);
+        });
+        _channel = null;
+    }
+
+    if (_currentMarkets.isEmpty && _currentState != SocketConnectionState.connecting) { // 연결 시도가 아닌데 마켓이 없으면 재시도 안함
+        developer.log('No markets to subscribe to, not attempting retry. Staying disconnected.', name: 'SocketService.Retry');
+        _updateState(SocketConnectionState.disconnected);
+        return;
+    }
+
+    if (_retryCount < _maxRetries) { // _maxRetries 필드 사용
+      _retryCount++;
+      // _initialRetryDelay 필드 사용
+      final delay = Duration(seconds: _initialRetryDelay.inSeconds * _retryCount); 
+      developer.log('Attempting WebSocket reconnect in ${delay.inSeconds} seconds (Attempt $_retryCount/$_maxRetries) for markets: ${_currentMarkets.join(',')}', name: 'SocketService.Retry');
+      _updateState(SocketConnectionState.retrying, eventDataForLog: 'Attempt $_retryCount');
+      
+      _retryTimer?.cancel();
+      _retryTimer = Timer(delay, () {
+        developer.log('Retrying connection now... (Attempt $_retryCount)', name: 'SocketService.RetryNow');
+        // _currentMarkets가 비어있을 수 있는 경우 connect 호출 전에 확인하는 것이 좋다.
+        // 하지만 위에서 이미 _currentMarkets.isEmpty 검사를 했으므로 여기서는 호출
+        if (_currentMarkets.isNotEmpty) {
+          connect(_currentMarkets);
+        } else {
+          // 이 경우는 connect가 호출되지 않아야 함. 위의 방어로직으로 충분할 수 있음.
+           developer.log('No markets to subscribe to upon actual retry. Staying disconnected.', name: 'SocketService.Retry');
+          _updateState(SocketConnectionState.disconnected);
+        }
+      });
+    } else {
+      developer.log('Max WebSocket retries reached for markets: ${_currentMarkets.join(',')}. Failed to connect.', name: 'SocketService.RetryFail', level: 1000);
+      _signalBus.fire(WebSocketConnectionFailedEvent(
+          errorMessage: 'Max retries reached after connection loss/error.',
+          failedUrl: _baseWsUrl,
+      ));
+      _updateState(SocketConnectionState.error, eventDataForLog: 'Max retries reached');
+    }
+  }
+
+  Future<void> disconnect({bool isPurposeful = true}) async {
+    developer.log('Disconnecting WebSocket (Purposeful: $isPurposeful)...', name: 'SocketService.Disconnect');
+    _retryTimer?.cancel();
+    _retryCount = 0;
+
+    await _subscription?.cancel();
+    _subscription = null;
+    
+    if (_channel != null) {
+        try {
+            await _channel!.sink.close();
+        } catch (e) {
+            developer.log('Error closing WebSocket sink: $e', name: 'SocketService.DisconnectError', level: 800);
+        }
+        _channel = null;
+    }
+    
+    if (isPurposeful) {
+        _updateState(SocketConnectionState.disconnected);
+    } else {
+        _currentState = SocketConnectionState.disconnected; 
+    }
+  }
+
+  Future<void> updateMarkets(List<String> newMarkets) async {
+    final newMarketSet = newMarkets.toSet();
+    final currentMarketSet = _currentMarkets.toSet();
+
+    if (newMarketSet.isEmpty && currentMarketSet.isEmpty) {
+      developer.log('No new markets and already no markets subscribed. Doing nothing.', name: 'SocketService.UpdateMarkets');
+      return;
+    }
+    if (newMarketSet.length == currentMarketSet.length && newMarketSet.containsAll(currentMarketSet)) {
+      developer.log('Markets to subscribe are already identical to current. No update needed: $newMarkets', name: 'SocketService.UpdateMarkets');
+      if (_currentState != SocketConnectionState.connected && newMarkets.isNotEmpty) {
+          developer.log('...but socket is not connected. Attempting to connect with current markets.', name: 'SocketService.UpdateMarkets');
+          await connect(_currentMarkets); // newMarkets.isNotEmpty 조건 추가
+      }
+      return;
+    }
+
+    developer.log('Updating subscribed markets from ${_currentMarkets.join(',')} to ${newMarkets.join(',')}', name: 'SocketService.UpdateMarkets');
+    if (newMarkets.isEmpty) {
+        await disconnect();
+        _currentMarkets = [];
+    } else {
+        await connect(newMarkets);
+    }
+  }
+
+  void sendMessage(String message) {
+    if (_currentState == SocketConnectionState.connected && _channel != null) {
+      developer.log('Sending message to WebSocket: $message', name: 'SocketService.SendMessage');
+      _channel!.sink.add(message);
+    } else {
+      developer.log('Cannot send message: WebSocket is not connected. State: $_currentState', name: 'SocketService.SendMessageFail', level: 900);
+    }
+  }
+
+  void dispose() {
+    developer.log('Disposing SocketService. Omega Centurion bids farewell.', name: 'SocketService.Dispose');
+    // ApiServiceDisposedEvent를 사용하려면 아래 주석을 해제하고, 해당 이벤트와 타입을 event_types_and_keys.dart에 정의해야 한다.
+    // 또한, api_events.dart (또는 service_events.dart)에 클래스 정의도 필요하다.
+    // _signalBus.fire(ApiServiceDisposedEvent(serviceName: 'SocketService'));
+    disconnect(isPurposeful: true);
+  }
+}\n\n====== lib/core/socket/socket_state.dart ======\n
+// lib/core/socket/socket_state.dart
+/// WebSocket 연결 상태를 나타내는 "씹고퀄" 열거형.
+/// "네놈의 연결 상태, 내가 다 보고 있다!"
+enum SocketConnectionState {
+  /// 연결 시도 전 또는 연결이 완전히 종료된 상태.
+  disconnected,
+  /// 서버에 연결을 시도하는 중인 상태.
+  connecting,
+  /// 서버와 성공적으로 연결되어 데이터를 주고받을 수 있는 상태.
+  connected,
+  /// 연결 시도 중 오류가 발생했거나, 연결 후 예기치 않게 연결이 끊어진 상태.
+  error,
+  /// 연결이 의도적으로 다시 시도되고 있는 상태 (예: 재연결 지연 시간 동안).
+  retrying,
+}\n\n====== lib/test/unit/core/unit_test_file.dart ======\n
+\n\n====== lib/test/unit/data/unit_test_file.dart ======\n
+\n\n====== lib/test/unit/domain/unit_test_file.dart ======\n
+\n\n====== lib/test/integration/app_flow_test.dart ======\n
+\n\n====== lib/firebase_options.dart ======\n
+// File generated by FlutterFire CLI and optimized for clarity.
+// ignore_for_file: type=lint
+import 'package:firebase_core/firebase_core.dart' show FirebaseOptions;
+import 'package:flutter/foundation.dart'
+    show defaultTargetPlatform, kIsWeb, TargetPlatform;
+
+/// Default [FirebaseOptions] for use with your Firebase apps.
+///
+/// This class provides platform-specific Firebase configuration options for
+/// Web, Android, iOS, macOS, and Windows. Use [currentPlatform] to initialize
+/// Firebase with the appropriate settings for the running platform.
+///
+/// Example:
+/// ```dart
+/// import 'firebase_options.dart';
+/// await Firebase.initializeApp(
+///   options: DefaultFirebaseOptions.currentPlatform,
+/// );
+/// ```
+class DefaultFirebaseOptions {
+  /// Returns the appropriate [FirebaseOptions] based on the current platform.
+  static FirebaseOptions get currentPlatform {
+    if (kIsWeb) {
+      return web;
+    }
+    switch (defaultTargetPlatform) {
+      case TargetPlatform.android:
+        return android;
+      case TargetPlatform.iOS:
+        return ios;
+      case TargetPlatform.macOS:
+        return macos;
+      case TargetPlatform.windows:
+        return windows;
+      case TargetPlatform.linux:
+        throw UnsupportedError(
+          'DefaultFirebaseOptions have not been configured for Linux - '
+          'you can reconfigure this by running the FlutterFire CLI again.',
+        );
+      default:
+        throw UnsupportedError(
+          'DefaultFirebaseOptions are not supported for this platform.',
+        );
+    }
+  }
+
+  static const FirebaseOptions web = FirebaseOptions(
+    apiKey: 'AIzaSyCamlrmmHqRe2Ef-BoPozll9P9kVY9HEw0',
+    appId: '1:316479388265:web:5f1ff95911edf3734c00f8',
+    messagingSenderId: '316479388265',
+    projectId: 'com-hundeok-noonchit-f7330',
+    authDomain: 'com-hundeok-noonchit-f7330.firebaseapp.com',
+    storageBucket: 'com-hundeok-noonchit-f7330.firebasestorage.app',
+    measurementId: 'G-96PQ2MKQCB',
+  );
+
+  /// Firebase options for Web platform.
+
+  static const FirebaseOptions android = FirebaseOptions(
+    apiKey: 'AIzaSyD9Ribx6Jt36mH0pbcK-MAkotKGnaU9_8E',
+    appId: '1:316479388265:android:3dfc7ba10e5e04cd4c00f8',
+    messagingSenderId: '316479388265',
+    projectId: 'com-hundeok-noonchit-f7330',
+    storageBucket: 'com-hundeok-noonchit-f7330.firebasestorage.app',
+  );
+
+  /// Firebase options for Android platform.
+
+  static const FirebaseOptions ios = FirebaseOptions(
+    apiKey: 'AIzaSyAj5ckmhepo20VIG_U6u4oM3GT4zpfWa1Q',
+    appId: '1:316479388265:ios:885aa0f0d567c1eb4c00f8',
+    messagingSenderId: '316479388265',
+    projectId: 'com-hundeok-noonchit-f7330',
+    storageBucket: 'com-hundeok-noonchit-f7330.firebasestorage.app',
+    iosBundleId: 'com.hundeok.noonchit',
+  );
+
+  /// Firebase options for iOS platform.
+
+  /// Firebase options for macOS platform.
+
+  static const FirebaseOptions macos = FirebaseOptions(
+    apiKey: 'AIzaSyAj5ckmhepo20VIG_U6u4oM3GT4zpfWa1Q',
+    appId: '1:316479388265:ios:921e7a220bcfe8f24c00f8',
+    messagingSenderId: '316479388265',
+    projectId: 'com-hundeok-noonchit-f7330',
+    storageBucket: 'com-hundeok-noonchit-f7330.firebasestorage.app',
+    iosBundleId: 'com.example.noonchit',
+  );
+
+  /// Note: Bundle ID matches iOS for consistency.
+
+  /// Firebase options for Windows platform.
+
+  static const FirebaseOptions windows = FirebaseOptions(
+    apiKey: 'AIzaSyCamlrmmHqRe2Ef-BoPozll9P9kVY9HEw0',
+    appId: '1:316479388265:web:5877e26bd28d7bb34c00f8',
+    messagingSenderId: '316479388265',
+    projectId: 'com-hundeok-noonchit-f7330',
+    authDomain: 'com-hundeok-noonchit-f7330.firebaseapp.com',
+    storageBucket: 'com-hundeok-noonchit-f7330.firebasestorage.app',
+    measurementId: 'G-54JZKF8R0T',
+  );
+
+  /// Note: Limited Firebase support (Analytics, Messaging). Verify in Firebase Console.
+}\n\n====== lib/main.dart ======\n
+import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_analytics/firebase_analytics.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
+import 'package:flutter/material.dart';
+import 'package:logger/logger.dart';
+
+import 'firebase_options.dart'; // FlutterFire CLI로 생성된 Firebase 설정 파일
+
+final Logger logger = Logger();
+
+// Firebase 푸시 알림 백그라운드 핸들러
+Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
+  await Firebase.initializeApp(options: DefaultFirebaseOptions.currentPlatform);
+  logger.i('Background message received: ${message.messageId}');
+}
+
+void main() async {
+  // Flutter 바인딩 초기화
+  WidgetsFlutterBinding.ensureInitialized();
+
+  // Firebase 초기화 및 설정
+  try {
+    await Firebase.initializeApp(
+      options: DefaultFirebaseOptions.currentPlatform,
+    );
+
+    // Firebase Analytics 초기화 및 앱 오픈 이벤트 로깅
+    await FirebaseAnalytics.instance.logAppOpen();
+
+    // Firebase Messaging 설정 (푸시 알림)
+    FirebaseMessaging messaging = FirebaseMessaging.instance;
+    await messaging.requestPermission(
+      alert: true,
+      badge: true,
+      sound: true,
+    );
+    String? apnsToken = await messaging.getAPNSToken(); // APNs 토큰 확인
+    logger.i('APNs Token: $apnsToken');
+    String? fcmToken = await messaging.getToken();
+    logger.i('FCM Token: $fcmToken');
+
+    // 백그라운드 메시지 핸들러 등록
+    FirebaseMessaging.onBackgroundMessage(_firebaseMessagingBackgroundHandler);
+
+    // 포그라운드 메시지 핸들러
+    FirebaseMessaging.onMessage.listen((RemoteMessage message) {
+      logger.i('Foreground message received: ${message.messageId}');
+    });
+  } catch (e) {
+    logger.e('Firebase initialization failed: $e');
+    // 네트워크 오류 재시도 (현재 프로젝트 최적화)
+    await Future.delayed(const Duration(seconds: 2));
+    try {
+      await Firebase.initializeApp(
+        options: DefaultFirebaseOptions.currentPlatform,
+      );
+      logger.i('Firebase retry successful');
+    } catch (e) {
+      logger.e('Firebase retry failed: $e');
+    }
+  }
+
+  // 앱 실행
+  runApp(const MyApp());
+}
+
+/// 앱의 루트 위젯
+class MyApp extends StatelessWidget {
+  const MyApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'Noonchit App',
+      theme: ThemeData(primarySwatch: Colors.blue),
+      home: Scaffold(
+        appBar: AppBar(title: const Text('Noonchit')),
+        body: const Center(child: Text('Welcome to Noonchit!')),
+      ),
+    );
+    // GetX 사용 시 예시 (pubspec.yaml에 get 패키지 필요)
+    /*
+    return GetMaterialApp(
+      title: 'Noonchit App',
+      initialRoute: '/home',
+      getPages: [
+        GetPage(
+          name: '/home',
+          page: () => const HomePage(),
+          binding: HomeBinding(),
+        ),
+      ],
+    );
+    */
+  }
+}
+\n\n====== lib/common/constants/app_sizes.dart ======\n
+\n\n====== lib/common/constants/api_endpoints.dart ======\n
+\n\n====== lib/common/constants/app_colors.dart ======\n
+\n\n====== lib/common/utils/number_formatter.dart ======\n
+\n\n====== lib/common/utils/debouncer.dart ======\n
+\n\n====== lib/common/utils/date_formatter.dart ======\n
+\n\n====== lib/common/extensions/datetime_extensions.dart ======\n
+\n\n====== lib/common/extensions/string_extensions.dart ======\n
+\n\n====== lib/common/widgets/trade_status_chip.dart ======\n
+\n\n====== lib/common/widgets/error_message.dart ======\n
+\n\n====== lib/common/widgets/loading_indicator.dart ======\n
+\n\n====== lib/data/repositories/market_repository_impl.dart ======\n
+// lib/data/repositories/market_repository_impl.dart
+// "오메가 센츄리온 마켓 저장소 구현체"
+
+import 'dart:async';
+import 'dart:developer' as developer;
+
+import 'package:noonchit/core/bridge/signal_bus.dart';     // 이벤트 발행용
+import 'package:noonchit/core/event/market_events.dart';  // MarketSymbolsFetchedEvent
+import 'package:noonchit/data/data_sources/remote/market_api.dart'; // 원격 데이터 소스
+import 'package:noonchit/data/data_sources/local/cache_manager.dart'; // 로컬 캐시 매니저 (선택적)
+import 'package:noonchit/domain/entities/market.dart';    // 순수 Market 엔티티
+import 'package:noonchit/domain/repositories/market_repository.dart'; // 저장소 인터페이스
+import 'package:noonchit/data/models/market_model.dart';  // MarketModel DTO (캐시와 상호작용 시 필요)
+// API 예외를 특정하여 처리하고 싶다면 다음을 임포트
+// import 'package:noonchit/core/api/exceptions/api_exception.dart';
+
+/// MarketRepository 인터페이스의 구체적인 구현입니다.
+/// 원격 API 및 선택적 로컬 캐시로부터 마켓 데이터를 가져옵니다.
+class MarketRepositoryImpl implements MarketRepository {
+  final MarketApi _marketApi;
+  final MarketListCacheManager? _cacheManager; // 캐시 매니저는 선택적으로 주입 가능
+  final SignalBus _signalBus;
+
+  MarketRepositoryImpl({
+    required MarketApi marketApi,
+    MarketListCacheManager? cacheManager,
+    required SignalBus signalBus,
+  })  : _marketApi = marketApi,
+        _cacheManager = cacheManager,
+        _signalBus = signalBus;
+
+  @override
+  Future<List<Market>> getAllMarketSymbols() async {
+    const String operation = 'MarketRepo.getAllMarketSymbols';
+    developer.log('[$operation] Attempting to fetch all market symbols.', name: operation);
+
+    // 1. (선택 사항) 유효한 캐시가 있는지 확인하고 있다면 반환
+    if (_cacheManager != null) {
+      try {
+        final lastCacheTime = await _cacheManager!.getLastCacheTime();
+        const cacheValidityDuration = Duration(hours: 1); // 예시: 캐시 유효 기간 1시간
+
+        if (_cacheManager!.isCacheValid(lastCacheTime, cacheValidityDuration)) {
+          final cachedMarketModels = await _cacheManager!.getCachedMarketList();
+          if (cachedMarketModels != null && cachedMarketModels.isNotEmpty) {
+            developer.log('[$operation] Returning ${cachedMarketModels.length} market symbols from valid cache.', name: operation);
+            final List<Market> marketsFromCache = cachedMarketModels.map((dto) => dto.toDomain()).toList();
+            
+            // 캐시 데이터 사용 시에도 이벤트 발행 (UI 업데이트 등 일관성 유지)
+            final marketCodesFromCache = marketsFromCache.map((entity) => entity.market).toList();
+            _signalBus.fire(MarketSymbolsFetchedEvent(symbols: marketCodesFromCache));
+            
+            return marketsFromCache;
+          }
+        } else {
+          developer.log('[$operation] Cache is invalid or expired.', name: operation);
+        }
+      } catch (e, s) {
+        developer.log('[$operation] Error reading from cache: $e. Proceeding to fetch from remote.', name: operation, error: e, stackTrace: s);
+        // 캐시 읽기 오류는 무시하고 원격 호출로 진행
+      }
+    }
+
+    // 2. 캐시를 사용하지 않거나 유효하지 않으면 원격 API에서 가져오기
+    try {
+      developer.log('[$operation] Fetching market symbols from remote API.', name: operation);
+      final List<MarketModel> marketModels = await _marketApi.fetchMarketList(); // DTO 리스트 반환
+      developer.log('[$operation] Successfully fetched ${marketModels.length} market DTOs from API.', name: operation);
+
+      // 3. DTO 리스트를 엔티티 리스트로 변환
+      final List<Market> markets = marketModels.map((dto) => dto.toDomain()).toList();
+      developer.log('[$operation] Converted DTOs to ${markets.length} Market entities.', name: operation);
+
+      // 4. (선택 사항) 가져온 DTO를 캐시에 저장
+      if (_cacheManager != null && marketModels.isNotEmpty) {
+        try {
+          await _cacheManager!.cacheMarketList(marketModels); // DTO를 캐시
+          developer.log('[$operation] Cached ${marketModels.length} market symbols (DTOs).', name: operation);
+        } catch (e, s) {
+          developer.log('[$operation] Error caching market symbols: $e', name: operation, error: e, stackTrace: s);
+        }
+      }
+
+      // 5. 마켓 코드 리스트로 이벤트 발행
+      final List<String> marketCodes = markets.map((entity) => entity.market).toList();
+      _signalBus.fire(MarketSymbolsFetchedEvent(symbols: marketCodes));
+      developer.log('[$operation] Fired MarketSymbolsFetchedEvent with ${marketCodes.length} codes.', name: operation);
+
+      return markets; // 최종적으로 순수 엔티티 리스트 반환
+    } 
+    // 만약 MarketApi에서 BaseApiException 같은 특정 예외를 던진다면 여기서 잡을 수 있다.
+    // on BaseApiException catch (e, s) {
+    //   developer.log('[$operation] API Exception: ${e.message}', name: operation, error: e, stackTrace: s, level: 900);
+    //   Error.throwWithStackTrace(e, s); // 예외와 스택 트레이스 보존하며 다시 던지기
+    // } 
+    catch (e, s) {
+      developer.log('[$operation] Unexpected error: $e', name: operation, error: e, stackTrace: s, level: 1000);
+      // 여기서 좀 더 구체적인 Repository 레벨의 예외로 변환하거나, 그대로 다시 던질 수 있다.
+      // 예시: throw MarketRepositoryException(message: 'Failed to get market symbols: ${e.toString()}', operation: operation, originalException: e);
+      Error.throwWithStackTrace(
+          Exception('[$operation] Failed to retrieve market symbols: ${e.toString()}'), s);
+    }
+  }
+}
+
+// (선택적) Repository 레벨의 커스텀 예외 정의
+// class MarketRepositoryException implements Exception {
+//   final String message;
+//   final String operation;
+//   final Object? originalException;
+//   MarketRepositoryException({required this.message, required this.operation, this.originalException});
+//   @override String toString() => message;
+// }\n\n====== lib/data/repositories/trade_repository_impl.dart ======\n
+// lib/data/repositories/trade_repository_impl.dart
+// "오메가 센츄리온 거래 저장소 구현체 - 대수술 완료판!"
+
+import 'dart:async';
+import 'dart:developer' as developer;
+
+import 'package:noonchit/core/bridge/signal_bus.dart';
+// 🔥 RealtimeTradeModelReceivedEvent를 사용하므로 이 임포트는 반드시 필요하다!
+import 'package:noonchit/core/event/trade_events.dart';
+import 'package:noonchit/core/socket/socket_service.dart';
+import 'package:noonchit/domain/entities/trade.dart';
+import 'package:noonchit/domain/repositories/trade_repository.dart';
+
+class TradeRepositoryImpl implements TradeRepository {
+  final SignalBus _signalBus; // 🔥 _subscribeToTradeEventsForCurrentMarkets 에서 사용됨!
+  final SocketService _socketService;
+
+  StreamController<Trade>? _liveTradeStreamController;
+  StreamSubscription? _tradeEventSubscription; // 🔥 스트림 구독 관리용!
+
+  // 이 필드들은 상태 변경이 필요하므로 final이 될 수 없다!
+  List<String> _currentSubscribedMarkets = [];
+  bool _isActiveConnectionOwner = false;
+
+  TradeRepositoryImpl({
+    required SignalBus signalBus,
+    required SocketService socketService,
+  })  : _signalBus = signalBus,
+        _socketService = socketService;
+
+  // --- 내부 도우미 메서드들 ---
+
+  void _ensureStreamControllerIsReady() {
+    if (_liveTradeStreamController == null || _liveTradeStreamController!.isClosed) {
+      _liveTradeStreamController = StreamController<Trade>.broadcast(
+        onListen: _handleStreamListen,
+        onCancel: _handleStreamCancel,
+      );
+      developer.log('[TradeRepoImpl] Live trade StreamController created.', name: 'TradeRepositoryImpl.Ctrl');
+    }
+  }
+
+  void _handleStreamListen() {
+    developer.log('[TradeRepoImpl] Listener added. Current markets: $_currentSubscribedMarkets', name: 'TradeRepositoryImpl.Listen');
+    _subscribeToTradeEventsForCurrentMarkets(); // 🔥 여기서 호출!
+    if (_isActiveConnectionOwner && _currentSubscribedMarkets.isNotEmpty) {
+      _socketService.connect(_currentSubscribedMarkets);
+    }
+  }
+
+  void _handleStreamCancel() {
+    developer.log('[TradeRepoImpl] Listener removed. Current markets: $_currentSubscribedMarkets', name: 'TradeRepositoryImpl.Cancel');
+    if (_liveTradeStreamController != null && !_liveTradeStreamController!.hasListener) {
+      developer.log('[TradeRepoImpl] No more listeners. Cleaning up event subscription.', name: 'TradeRepositoryImpl.Cancel');
+      _cleanUpEventSubscription(); // 🔥 여기서 호출!
+    }
+  }
+
+  void _subscribeToTradeEventsForCurrentMarkets() { // 🔥 정의됨!
+    _tradeEventSubscription?.cancel();
+    if (_currentSubscribedMarkets.isEmpty) {
+      developer.log('[TradeRepoImpl] No markets to subscribe for events. Skipping subscription.', name: 'TradeRepositoryImpl.EventSub');
+      _tradeEventSubscription = null;
+      return;
+    }
+
+    _tradeEventSubscription = _signalBus.on<RealtimeTradeModelReceivedEvent>().listen(
+      (event) {
+        if (_currentSubscribedMarkets.contains(event.tradeModel.code)) {
+          if (_liveTradeStreamController != null && !_liveTradeStreamController!.isClosed) {
+            try {
+              final tradeEntity = event.tradeModel.toDomain();
+              _liveTradeStreamController!.add(tradeEntity);
+            } catch (e, s) {
+              developer.log('[TradeRepoImpl] Error converting TradeModel: $e', name: 'TradeRepositoryImpl.EventError', error: e, stackTrace: s);
+              _liveTradeStreamController!.addError(Exception('DTO to Entity conversion error: $e'), s);
+            }
+          }
+        }
+      },
+      onError: (error, stackTrace) {
+        developer.log('[TradeRepoImpl] Error on trade event stream', name: 'TradeRepositoryImpl.EventStreamError', error: error, stackTrace: stackTrace);
+        if (_liveTradeStreamController != null && !_liveTradeStreamController!.isClosed) {
+          _liveTradeStreamController!.addError(error, stackTrace);
+        }
+      },
+    );
+    developer.log('[TradeRepoImpl] Subscribed to RealtimeTradeModelReceivedEvent for markets: $_currentSubscribedMarkets', name: 'TradeRepositoryImpl.EventSub');
+  }
+
+  void _cleanUpEventSubscription() { // 🔥 정의됨!
+    _tradeEventSubscription?.cancel();
+    _tradeEventSubscription = null;
+    developer.log('[TradeRepoImpl] Cleaned up trade event subscription.', name: 'TradeRepositoryImpl.CleanSub');
+  }
+
+  void _cleanUpStreamController() {
+    if (_liveTradeStreamController != null && !_liveTradeStreamController!.isClosed) {
+      _liveTradeStreamController!.close();
+    }
+    _liveTradeStreamController = null;
+    developer.log('[TradeRepoImpl] Cleaned up StreamController.', name: 'TradeRepositoryImpl.CleanCtrl');
+  }
+
+  // --- TradeRepository 인터페이스 구현 메서드들 ---
+
+  @override // 🔥 누락되었던 @override 추가 및 시그니처 확인!
+  Stream<Trade> getLiveTradeStream(List<String> markets) {
+    // markets 파라미터는 connectToLiveTrades에서 이미 _currentSubscribedMarkets에 반영됨.
+    // 이 메서드는 준비된 스트림을 반환하는 데 집중.
+    _ensureStreamControllerIsReady(); // 🔥 여기서 호출!
+    developer.log('[TradeRepoImpl] getLiveTradeStream called. Current markets: $_currentSubscribedMarkets', name: 'TradeRepositoryImpl.API');
+    return _liveTradeStreamController!.stream;
+  }
+
+  @override // 🔥 누락되었던 @override 추가 및 시그니처 확인!
+  Future<void> connectToLiveTrades(List<String> markets) async {
+    developer.log('[TradeRepoImpl] connectToLiveTrades called with markets: $markets', name: 'TradeRepositoryImpl.API');
+    _currentSubscribedMarkets = List.from(markets);
+    _isActiveConnectionOwner = true;
+
+    _ensureStreamControllerIsReady(); // 🔥 여기서 호출!
+    _subscribeToTradeEventsForCurrentMarkets(); // 마켓 변경 후 즉시 이벤트 구독 재설정
+
+    if (_currentSubscribedMarkets.isNotEmpty) {
+      await _socketService.connect(_currentSubscribedMarkets);
+    } else {
+      await _socketService.connect([]); // 빈 리스트로 연결하여 구독 해제 유도
+    }
+  }
+
+  @override // 🔥 누락되었던 @override 추가 및 시그니처 확인!
+  Future<void> disconnectFromLiveTrades() async {
+    developer.log('[TradeRepoImpl] disconnectFromLiveTrades called.', name: 'TradeRepositoryImpl.API');
+    _isActiveConnectionOwner = false;
+    _cleanUpEventSubscription(); // 🔥 여기서 호출!
+    _cleanUpStreamController();
+    await _socketService.disconnect();
+    _currentSubscribedMarkets = [];
+  }
+
+  @override // 🔥 누락되었던 @override 추가 및 시그니처 확인!
+  Future<void> updateSubscribedMarkets(List<String> newMarkets) async {
+    developer.log('[TradeRepoImpl] updateSubscribedMarkets called with newMarkets: $newMarkets', name: 'TradeRepositoryImpl.API');
+    _currentSubscribedMarkets = List.from(newMarkets);
+    _subscribeToTradeEventsForCurrentMarkets(); // 마켓 변경 후 즉시 이벤트 구독 재설정
+    await _socketService.updateMarkets(_currentSubscribedMarkets);
+  }
+
+  @override // 🔥 누락되었던 @override 추가 및 시그니처 확인! (인터페이스에 추가했으므로)
+  void dispose() {
+    developer.log('[TradeRepoImpl] dispose called.', name: 'TradeRepositoryImpl.API');
+    disconnectFromLiveTrades(); // 모든 리소스 정리
+  }
+} // 🔥 여기가 클래스의 올바른 닫는 중괄호다!\n\n====== lib/data/models/market_model.dart ======\n
+// lib/data/models/market_model.dart
+// "오메가 센츄리온 완전무결 최종판"
+import 'package:equatable/equatable.dart';
+// 🔥 중요: 아래 경로는 네놈의 Market 엔티티 파일 위치에 따라 정확해야 한다!
+import 'package:noonchit/domain/entities/market.dart'; // 예시 경로, 실제 프로젝트 경로로 수정 필요
+
+class MarketModel extends Equatable {
+  final String market;
+  final String koreanName;
+  final String englishName;
+  final String? cautionReason; // 주의 사유 (market_event.caution 에서 파생)
+  final DateTime? cautionDate; // 주의 지정 일자 (market_event.caution.EVENT_DATE 에서 파생)
+  final bool isTradingSuspended; // 거래 정지 여부 (market_event.trading_suspended_detail 에서 파생)
+
+  const MarketModel({
+    required this.market,
+    required this.koreanName,
+    required this.englishName,
+    this.cautionReason,
+    this.cautionDate,
+    required this.isTradingSuspended,
+  });
+
+  factory MarketModel.fromJson(Map<String, dynamic> json) {
+    String? cautionReasonValue;
+    DateTime? cautionDateValue;
+    bool isTradingSuspendedValue = false;
+
+    final marketEventData = json['market_event'] as Map<String, dynamic>?;
+    if (marketEventData != null) {
+      final cautionData = marketEventData['caution'] as Map<String, dynamic>?;
+      if (cautionData != null) {
+        // Upbit API 명세에 따른 정확한 주의 사유 타입들을 여기에 정의해야 한다.
+        const Map<String, String> cautionTypes = {
+          'NONE': 'NONE', // 해당 없음 (API에 따라 없을 수 있음)
+          'PRICE_FLUCTUATIONS': 'PRICE_FLUCTUATIONS', // 가격급등락
+          'TRADING_VOLUME_SOARING': 'TRADING_VOLUME_SOARING', // 거래량급증
+          'DEPOSIT_AMOUNT_SOARING': 'DEPOSIT_AMOUNT_SOARING', // 입금량급증
+          'GLOBAL_PRICE_DIFFERENCES': 'GLOBAL_PRICE_DIFFERENCES', // 시세괴리율
+          'CONCENTRATION_OF_SMALL_ACCOUNTS': 'CONCENTRATION_OF_SMALL_ACCOUNTS', // 소수계정집중
+          // ... 기타 Upbit API에서 제공하는 모든 주의 사유 타입 추가 ...
+        };
+
+        // cautionData 맵에서 cautionTypes에 정의된 키 중 하나라도 존재하는지 확인
+        MapEntry<String, String> foundCaution = cautionTypes.entries.firstWhere(
+          (entry) => cautionData.containsKey(entry.key) && cautionData[entry.key] != null,
+          orElse: () => const MapEntry('', ''), // 일치하는 것이 없으면 빈 MapEntry 반환
+        );
+
+        // 찾은 주의 사유의 값(cautionTypes의 value)을 cautionReasonValue로 설정
+        // API 응답에서 해당 키의 값 자체가 중요한 정보일 수도 있으므로, API 명세 확인 필요.
+        // 여기서는 entry.value (즉, 'PRICE_FLUCTUATIONS' 같은 문자열)를 사용.
+        cautionReasonValue = foundCaution.value.isNotEmpty ? foundCaution.value : null;
+
+        final etc = cautionData['ETC'] as String?;
+        if (etc != null && etc.isNotEmpty) {
+          // ETC가 다른 주의 사유와 함께 올 수 있는지, 아니면 ETC만 오는지 API 명세 확인 필요.
+          // 여기서는 ETC가 있으면 기존 cautionReasonValue에 추가하거나 덮어쓰는 것으로 가정.
+          cautionReasonValue = (cautionReasonValue != null && cautionReasonValue != 'NONE')
+              ? '$cautionReasonValue; $etc' // 기존 사유가 있으면 추가
+              : etc; // 기존 사유가 없거나 NONE이면 ETC만
+        }
+        // 만약 NONE과 ETC가 같이 오지 않는다면, 또는 ETC가 우선이라면 로직 조정 필요
+
+        final eventDateString = cautionData['EVENT_DATE'] as String?;
+        cautionDateValue = eventDateString != null ? DateTime.tryParse(eventDateString) : null;
+      }
+
+      final suspendedDetailData = marketEventData['trading_suspended_detail'] as Map<String, dynamic>?;
+      isTradingSuspendedValue = suspendedDetailData?['is_trading_suspended'] as bool? ?? false;
+    }
+
+    return MarketModel(
+      market: json['market'] as String? ?? 'UNKNOWN_MARKET_CODE',
+      koreanName: json['korean_name'] as String? ?? '알 수 없는 마켓명',
+      englishName: json['english_name'] as String? ?? 'Unknown Market Name',
+      cautionReason: cautionReasonValue,
+      cautionDate: cautionDateValue,
+      isTradingSuspended: isTradingSuspendedValue,
+    );
+  }
+
+  Market toDomain() {
+    // 🔥 중요: lib/domain/entities/market.dart 의 Market 엔티티 생성자가
+    // 아래 파라미터들과 일치해야 한다! (특히 필드명 주의)
+    return Market(
+      market: market,
+      koreanName: koreanName,
+      englishName: englishName,
+      marketEventCautionReason: cautionReason, // DTO의 cautionReason -> 엔티티의 marketEventCautionReason
+      marketEventCautionDate: cautionDate,     // DTO의 cautionDate -> 엔티티의 marketEventCautionDate
+      isTradingSuspended: isTradingSuspended,
+    );
+  }
+
+  /// 이 DTO 인스턴스를 JSON 맵으로 변환한다.
+  /// API 요청 시 이 구조를 사용하거나, 로깅/테스트에 활용할 수 있다.
+  Map<String, dynamic> toJson() {
+    // 이 toJson은 DTO의 현재 필드 상태를 반영한다.
+    // API 원본 응답과 완전히 동일한 구조로 만드는 것은 fromJson의 역연산이며 더 복잡할 수 있다.
+    // 여기서는 DTO의 필드를 직렬화하는 것을 목표로 한다.
+    return {
+      'market': market,
+      'korean_name': koreanName,
+      'english_name': englishName,
+      'caution_reason': cautionReason, // DTO 필드 직접 반영
+      'caution_date': cautionDate?.toIso8601String(), // DTO 필드 직접 반영
+      'is_trading_suspended': isTradingSuspended, // DTO 필드 직접 반영
+      // 만약 market_event 구조를 유사하게 재현하고 싶다면 아래처럼 할 수 있으나,
+      // fromJson에서 파생된 필드들이므로 원래 API 구조와는 다를 수 있다.
+      /*
+      'market_event': {
+        'caution': (cautionReason != null || cautionDate != null)
+            ? {
+                // cautionReason을 원래 API의 특정 키로 매핑하는 것은 어려움.
+                // 단순 문자열로 저장했으므로, 'ETC'와 유사하게 처리하거나,
+                // 혹은 cautionReason 자체가 하나의 요약된 정보로 취급.
+                'DERIVED_CAUTION_REASON': cautionReason,
+                'EVENT_DATE': cautionDate?.toIso8601String(),
+              }
+            : null,
+        'trading_suspended_detail': {
+          'is_trading_suspended': isTradingSuspended,
+        }
+      }
+      */
+    };
+  }
+
+  @override
+  List<Object?> get props => [
+        market,
+        koreanName,
+        englishName,
+        cautionReason,
+        cautionDate,
+        isTradingSuspended,
+      ];
+
+  @override
+  String toString() {
+    return 'MarketModel(market: $market, koreanName: $koreanName, englishName: $englishName, '
+           'cautionReason: $cautionReason, cautionDate: ${cautionDate?.toIso8601String()}, '
+           'isTradingSuspended: $isTradingSuspended)';
+  }
+}\n\n====== lib/data/models/trade_model.dart ======\n
+// lib/data/models/trade_model.dart (오메가 센츄리온 교정 및 강화판!)
+
+import 'package:equatable/equatable.dart';
+import 'package:noonchit/domain/entities/trade.dart'; // 순수 Trade 엔티티 경로!
+
+/// Upbit API (WebSocket 거래 데이터) 응답의 개별 거래 정보를 담는 Data Transfer Object (DTO).
+/// 이 모델은 API 응답 구조를 충실히 반영하며, 거래 데이터를 파싱하여 필요한 정보를 추출한다.
+/// 이후 `toDomain()` 메소드를 통해 순수한 도메인 엔티티인 `Trade`로 변환된다.
+class TradeModel extends Equatable {
+  /// 타입 (일반적으로 "trade")
+  final String type;
+
+  /// 마켓 코드 (예: "KRW-BTC")
+  final String code;
+
+  /// 체결 가격
+  final double tradePrice;
+
+  /// 체결량
+  final double tradeVolume;
+
+  /// 매수/매도 구분 ("ASK" 또는 "BID")
+  final String askBid;
+
+  /// 전일 종가
+  final double prevClosingPrice;
+
+  /// 변화액
+  final double changePrice;
+
+  /// 변화 상태 ("RISE", "FALL", "EVEN")
+  final String change;
+
+  /// 체결 시각 (Unix milliseconds timestamp)
+  final int tradeTimestamp; // 이 필드는 API에서 제공하는 원시값 그대로 유지
+
+  /// 체결 번호 (순차 ID)
+  final String sequentialId;
+
+  const TradeModel({
+    required this.type,
+    required this.code,
+    required this.tradePrice,
+    required this.tradeVolume,
+    required this.askBid,
+    required this.prevClosingPrice,
+    required this.changePrice,
+    required this.change,
+    required this.tradeTimestamp,
+    required this.sequentialId,
+  });
+
+  /// JSON 객체로부터 `TradeModel` 인스턴스를 생성한다.
+  /// Upbit WebSocket 거래 데이터의 구조를 파싱하여 필드를 채운다.
+  factory TradeModel.fromJson(Map<String, dynamic> json) {
+    return TradeModel(
+      type: json['ty'] as String? ?? 'trade', // type
+      code: json['cd'] as String? ?? 'UNKNOWN_CODE',   // code (market)
+      tradePrice: (json['tp'] as num?)?.toDouble() ?? 0.0,    // trade_price
+      tradeVolume: (json['tv'] as num?)?.toDouble() ?? 0.0,   // trade_volume
+      askBid: json['ab'] as String? ?? 'UNKNOWN_AB',        // ask_bid
+      prevClosingPrice: (json['pcp'] as num?)?.toDouble() ?? 0.0, // prev_closing_price
+      changePrice: (json['cp'] as num?)?.toDouble() ?? 0.0,      // change_price
+      change: json['c'] as String? ?? 'EVEN',                  // change (RISE, EVEN, FALL)
+      // 🚨 신성모독 수정! 현재 시간을 기본값으로 사용하지 않는다! 0 또는 예외 처리가 바람직!
+      tradeTimestamp: json['ttms'] as int? ?? 0, // trade_timestamp (milliseconds) - 기본값 0으로 변경!
+      sequentialId: json['sid'] as String? ?? '', // sequential_id
+    );
+  }
+
+  /// 이 DTO 인스턴스를 `Trade` 도메인 엔티티로 변환한다.
+  /// "하인이 밭을 갈아 귀족에게 바치노라!"
+  Trade toDomain() {
+    return Trade(
+      type: type,
+      code: code,
+      tradePrice: tradePrice,
+      tradeVolume: tradeVolume,
+      askBid: askBid,
+      prevClosingPrice: prevClosingPrice,
+      changePrice: changePrice,
+      change: change,
+      tradeTimestamp: tradeTimestamp,
+      sequentialId: sequentialId,
+    );
+  }
+
+  /// 이 인스턴스를 JSON 객체로 직렬화한다 (씹고퀄 DTO의 덕목!).
+  Map<String, dynamic> toJson() {
+    return {
+      'ty': type,
+      'cd': code,
+      'tp': tradePrice,
+      'tv': tradeVolume,
+      'ab': askBid,
+      'pcp': prevClosingPrice,
+      'cp': changePrice,
+      'c': change,
+      'ttms': tradeTimestamp,
+      'sid': sequentialId,
+    };
+  }
+
+  @override
+  List<Object?> get props => [
+        type,
+        code,
+        tradePrice,
+        tradeVolume,
+        askBid,
+        prevClosingPrice,
+        changePrice,
+        change,
+        tradeTimestamp,
+        sequentialId,
+      ];
+
+  @override
+  String toString() {
+    // 더 많은 정보를 포함하거나, toJson()을 활용할 수도 있다.
+    return 'TradeModel(type: $type, code: $code, tradePrice: $tradePrice, tradeVolume: $tradeVolume, '
+           'askBid: $askBid, prevClosingPrice: $prevClosingPrice, changePrice: $changePrice, '
+           'change: $change, tradeTimestamp: $tradeTimestamp, sequentialId: $sequentialId)';
+  }
+}\n\n====== lib/data/data_sources/local/cache_manager.dart ======\n
+// lib/data/data_sources/local/cache_manager.dart
+import 'dart:convert';
+import 'package:noonchit/data/data_sources/local/local_storage.dart';
+import 'package:noonchit/data/models/market_model.dart'; // 캐시할 데이터 모델
+
+// --- 마켓 목록 캐시 관리 ---
+abstract class MarketListCacheManager {
+  Future<List<MarketModel>?> getCachedMarketList();
+  Future<void> cacheMarketList(List<MarketModel> markets);
+  Future<DateTime?> getLastCacheTime();
+  Future<void> clearCache();
+  bool isCacheValid(DateTime? lastCacheTime, Duration maxAge);
+}
+
+class MarketListCacheManagerImpl implements MarketListCacheManager {
+  final LocalStorage _localStorage;
+  static const String _marketListKey = 'cached_market_list_v1'; // 버전 관리를 위해 키에 버전 명시 가능
+  static const String _marketListCacheTimeKey = 'market_list_cache_time_v1';
+
+  MarketListCacheManagerImpl({required LocalStorage localStorage}) : _localStorage = localStorage;
+
+  @override
+  Future<void> cacheMarketList(List<MarketModel> markets) async {
+    final List<Map<String, dynamic>> marketJsonList = markets.map((m) => m.toJson()).toList();
+    await _localStorage.saveString(_marketListKey, jsonEncode(marketJsonList));
+    await _localStorage.saveString(_marketListCacheTimeKey, DateTime.now().toIso8601String());
+  }
+
+  @override
+  Future<List<MarketModel>?> getCachedMarketList() async {
+    final String? jsonString = await _localStorage.getString(_marketListKey);
+    if (jsonString != null) {
+      try {
+        final List<dynamic> decodedList = jsonDecode(jsonString);
+        return decodedList
+            .map((item) => MarketModel.fromJson(item as Map<String, dynamic>))
+            .toList();
+      } catch (e) {
+        // 파싱 실패 시 캐시 삭제 또는 null 반환
+        await clearCache();
+        return null;
+      }
+    }
+    return null;
+  }
+
+  @override
+  Future<DateTime?> getLastCacheTime() async {
+    final String? timeString = await _localStorage.getString(_marketListCacheTimeKey);
+    return timeString != null ? DateTime.tryParse(timeString) : null;
+  }
+
+  @override
+  Future<void> clearCache() async {
+    await _localStorage.remove(_marketListKey);
+    await _localStorage.remove(_marketListCacheTimeKey);
+  }
+
+  @override
+  bool isCacheValid(DateTime? lastCacheTime, Duration maxAge) {
+    if (lastCacheTime == null) return false;
+    return DateTime.now().difference(lastCacheTime) < maxAge;
+  }
+}
+
+// 필요에 따라 다른 데이터 유형을 위한 CacheManager (예: UserPreferencesCacheManager 등)를 추가할 수 있다.\n\n====== lib/data/data_sources/local/local_storage.dart ======\n
+// lib/data/data_sources/local/local_storage.dart
+import 'package:shared_preferences/shared_preferences.dart'; // 예시: SharedPreferences 사용
+
+abstract class LocalStorage {
+  Future<bool> saveString(String key, String value);
+  Future<String?> getString(String key);
+  Future<bool> saveBool(String key, bool value);
+  Future<bool?> getBool(String key);
+  Future<bool> remove(String key);
+  Future<bool> containsKey(String key);
+}
+
+class SharedPreferencesLocalStorageImpl implements LocalStorage {
+  final SharedPreferences _prefs;
+
+  SharedPreferencesLocalStorageImpl({required SharedPreferences prefs}) : _prefs = prefs;
+
+  @override
+  Future<String?> getString(String key) async {
+    return _prefs.getString(key);
+  }
+
+  @override
+  Future<bool> saveString(String key, String value) async {
+    return _prefs.setString(key, value);
+  }
+
+  @override
+  Future<bool?> getBool(String key) async {
+    return _prefs.getBool(key);
+  }
+
+  @override
+  Future<bool> saveBool(String key, bool value) async {
+    return _prefs.setBool(key, value);
+  }
+
+  @override
+  Future<bool> remove(String key) async {
+    return _prefs.remove(key);
+  }
+
+  @override
+  Future<bool> containsKey(String key) async {
+    return _prefs.containsKey(key);
+  }
+}
+
+// 이 파일을 사용하는 곳(예: main.dart 또는 의존성 주입 설정)에서
+// SharedPreferences.getInstance()를 통해 인스턴스를 생성하고 주입해야 한다.
+// 예: final prefs = await SharedPreferences.getInstance();
+//      final localStorage = SharedPreferencesLocalStorageImpl(prefs: prefs);\n\n====== lib/data/data_sources/remote/market_api.dart ======\n
+// lib/data/data_sources/remote/market_api.dart
+import 'package:noonchit/core/api/api_service.dart';
+import 'package:noonchit/data/models/market_model.dart'; // MarketModel DTO
+import 'package:noonchit/core/config/app_config.dart';   // AppConfig 사용
+
+abstract class MarketApi {
+  /// 업비트 API로부터 모든 마켓 목록 정보를 가져와 [MarketModel] DTO 리스트로 반환합니다.
+  Future<List<MarketModel>> fetchMarketList();
+  // 필요하다면 다른 마켓 관련 API 메서드들을 추가 (예: 개별 마켓 상세 정보 등)
+}
+
+class MarketApiImpl implements MarketApi {
+  final ApiService _apiService;
+
+  MarketApiImpl({required ApiService apiService}) : _apiService = apiService;
+
+  @override
+  Future<List<MarketModel>> fetchMarketList() async {
+    const String operation = 'fetchMarketListFromApi';
+    // ApiService의 범용 getData 메서드를 사용하여 원시 데이터(List<dynamic>)를 받는다.
+    final response = await _apiService.getData<List<dynamic>>(
+      path: AppConfig.upbitMarketListEndpoint, // AppConfig 또는 직접 URL 사용
+      operation: operation,
+    );
+
+    // ApiService에서 반환된 response.data (List<dynamic>)를 DTO 리스트로 파싱한다.
+    final List<dynamic> responseData = response.data ?? [];
+    try {
+      final List<MarketModel> marketModels = responseData
+          .map((item) => MarketModel.fromJson(item as Map<String, dynamic>))
+          .toList();
+      return marketModels;
+    } catch (e) {
+      // 파싱 오류 등에 대한 예외 처리 (필요 시 ApiException 등으로 변환)
+      throw Exception('Failed to parse market list data: $e');
+    }
+  }
+}\n\n====== lib/data/data_sources/remote/trade_api.dart ======\n
+// lib/data/data_sources/remote/trade_api.dart
+// "오메가 센츄리온 - 최종 수정 및 구현 완료판!"
+
+import 'dart:developer' as developer; // developer.log 사용
+import 'package:noonchit/core/api/api_service.dart'; // ApiService 사용
+import 'package:noonchit/data/models/trade_model.dart'; // TradeModel DTO 반환
+import 'package:noonchit/core/config/app_config.dart';   // AppConfig 사용
+
+/// 거래 관련 원격 API 호출을 위한 인터페이스입니다.
+abstract class TradeApi {
+  /// 특정 마켓의 과거 체결 내역을 API로부터 가져옵니다.
+  /// [marketCode]: 조회할 마켓 코드 (예: "KRW-BTC")
+  /// [count]: 가져올 체결 내역 수 (기본값: 100)
+  Future<List<TradeModel>> fetchHistoricalTrades(String marketCode, {int count = 100});
+  // 필요에 따라 다른 거래 관련 REST API 메서드들을 추가할 수 있습니다.
+  // 예: Future<MyOrderModel> placeOrder(PlaceOrderParams params);
+}
+
+/// TradeApi 인터페이스의 구현체입니다.
+/// ApiService를 사용하여 실제 네트워크 요청을 수행합니다.
+class TradeApiImpl implements TradeApi {
+  final ApiService _apiService; // ApiService 인스턴스
+
+  TradeApiImpl({required ApiService apiService}) : _apiService = apiService;
+
+  @override
+  Future<List<TradeModel>> fetchHistoricalTrades(String marketCode, {int count = 100}) async {
+    const String operation = 'fetchHistoricalTrades'; // 로깅 및 오류 추적을 위한 작업명
+    developer.log(
+        '[$operation] Attempting to fetch historical trades for $marketCode, count: $count',
+        name: 'TradeApiImpl');
+
+    try {
+      // ApiService의 범용 getData 메서드를 사용하여 원시 데이터(List<dynamic>)를 받습니다.
+      // AppConfig에서 올바른 엔드포인트 이름을 사용합니다.
+      final response = await _apiService.getData<List<dynamic>>(
+        path: AppConfig.upbitTradesEndpoint, // 🔥 수정된 부분: AppConfig.upbitTradesEndpoint 사용!
+        queryParameters: {
+          'market': marketCode,
+          'count': count.toString(),
+          // API 명세에 따라 추가 파라미터 사용 가능 (예: 'to', 'daysAgo')
+        },
+        operation: operation, // ApiService의 _requestWrapper에 전달될 작업명
+      );
+
+      // ApiService는 성공적인 응답에서 response.data를 보장하거나, 오류 시 예외를 던집니다.
+      final List<dynamic> responseData = response.data ?? [];
+
+      if (responseData.isEmpty) {
+        developer.log('[$operation] No historical trades data found for $marketCode.', name: 'TradeApiImpl');
+        return []; // 데이터가 없으면 빈 리스트 반환
+      }
+
+      // List<dynamic>을 List<TradeModel> DTO로 파싱합니다.
+      final List<TradeModel> trades = responseData
+          .map((item) => TradeModel.fromJson(item as Map<String, dynamic>))
+          .toList();
+
+      developer.log('[$operation] Successfully fetched and parsed ${trades.length} historical trades for $marketCode.', name: 'TradeApiImpl');
+      return trades;
+    }
+    // ApiService의 _requestWrapper에서 DioException 및 일반 Exception을 이미 처리하고,
+    // ApiErrorOccurredEvent를 발행하며, ApiException으로 변환하여 rethrow 합니다.
+    // 따라서 이 레벨에서 특별히 DioException을 다시 잡을 필요는 없을 수 있습니다.
+    // 만약 이 DataSource 레벨에서만 발생하는 특정 오류를 처리하고 싶다면 여기에 추가합니다.
+    catch (e, s) {
+      // ApiService에서 이미 로깅 및 이벤트 발행이 되었을 가능성이 높습니다.
+      // 이 곳에서는 DataSource 레벨에서의 추가적인 로깅이나 예외 변환을 수행할 수 있습니다.
+      developer.log('[$operation] Error during fetching historical trades for $marketCode: $e', name: 'TradeApiImpl.Error', error: e, stackTrace: s);
+      // 필요하다면 여기서 e를 DataSource 특화 예외로 감싸서 다시 던질 수 있습니다.
+      // 예: throw TradeApiDataSourceException(message: "Failed to fetch historical trades: $e", operation: operation, originalException: e);
+      rethrow; // ApiService에서 변환된 ApiException을 그대로 전달
+    }
+  }
+}
+
+// (선택적) 이 DataSource 레벨에서 발생하는 특정 예외를 정의하고 싶다면 아래와 같이 할 수 있습니다.
+// class TradeApiDataSourceException implements Exception {
+//   final String message;
+//   final String operation;
+//   final Object? originalException;
+//   TradeApiDataSourceException({required this.message, required this.operation, this.originalException});
+//
+//   @override
+//   String toString() {
+//     return 'TradeApiDataSourceException(operation: $operation, message: $message, originalException: $originalException)';
+//   }
+// }\n\n====== lib/domain/repositories/market_repository.dart ======\n
+// lib/domain/repositories/market_repository.dart
+// "오메가 센츄리온 마켓 저장소 성스러운 약속(인터페이스)"
+
+import 'dart:async';
+import 'package:noonchit/domain/entities/market.dart'; // 순수 Market 엔티티
+
+/// 마켓 데이터와 관련된 작업을 위한 저장소 인터페이스입니다.
+///
+/// 데이터 계층(data layer)에서 이 인터페이스의 구체적인 구현체
+/// (예: MarketRepositoryImpl)를 제공해야 합니다.
+abstract class MarketRepository {
+  /// 모든 거래 가능한 마켓 정보를 가져옵니다.
+  ///
+  /// 성공 시 순수한 `Market` 엔티티의 리스트를 포함하는 Future를 반환합니다.
+  /// 실패 시 적절한 예외(예: `ApiException`을 상속한 예외)를 발생시킬 수 있습니다.
+  /// 이 메서드는 `WorkspaceSymbolsUseCase`에서 호출됩니다.
+  Future<List<Market>> getAllMarketSymbols();
+
+  // 필요에 따라 다른 메서드들을 추가할 수 있다. 예:
+  // Future<Market> getMarketDetails(String marketCode);
+}\n\n====== lib/domain/repositories/trade_repository.dart ======\n
+// lib/domain/repositories/trade_repository.dart
+// "오메가 센츄리온 거래 저장소 성스러운 약속(인터페이스) - dispose 선언 필히 추가!"
+import 'dart:async';
+import 'package:noonchit/domain/entities/trade.dart'; // 순수 Trade 엔티티 임포트
+
+/// 거래 데이터와 관련된 작업을 위한 저장소 인터페이스입니다.
+///
+/// 데이터 계층에서 이 인터페이스의 구체적인 구현을 제공해야 합니다.
+abstract class TradeRepository {
+  /// 지정된 마켓 목록에 대한 실시간 거래 데이터 스트림을 반환합니다.
+  ///
+  /// 이 스트림은 새로운 거래가 발생할 때마다 `Trade` 엔티티를 전달합니다.
+  /// Repository 구현체는 내부적으로 WebSocket 연결 및 데이터 변환을 처리해야 합니다.
+  Stream<Trade> getLiveTradeStream(List<String> markets);
+
+  /// 실시간 거래 데이터 스트림을 위한 WebSocket 연결을 시작하고,
+  /// 지정된 마켓들을 구독합니다.
+  ///
+  /// 이미 연결되어 있고 동일한 마켓을 구독 중이라면 아무 작업도 하지 않을 수 있습니다.
+  /// 다른 마켓으로 변경하려면 이 메서드를 다시 호출하거나,
+  /// 별도의 `updateSubscribedMarkets` 메서드를 제공할 수 있습니다.
+  Future<void> connectToLiveTrades(List<String> markets);
+
+  /// 실시간 거래 데이터 스트림 구독을 중단하고 WebSocket 연결을 종료합니다.
+  Future<void> disconnectFromLiveTrades();
+
+  /// 현재 구독 중인 마켓 목록을 업데이트합니다.
+  ///
+  /// 내부적으로 기존 연결을 재설정하거나 구독 메시지를 업데이트할 수 있습니다.
+  Future<void> updateSubscribedMarkets(List<String> newMarkets);
+
+  // 🔥🔥🔥 이 부분을 반드시 추가하라! 🔥🔥🔥
+  /// 저장소에서 사용하는 모든 리소스를 해제합니다.
+  void dispose();
+  // 🔥🔥🔥 여기까지 추가! 🔥🔥🔥
+}\n\n====== lib/domain/use_cases/get_live_trades.dart ======\n
+// lib/domain/use_cases/get_live_trades.dart
+// "오메가 센츄리온 오타 수정판"
+import 'dart:async';
+import 'package:noonchit/domain/entities/trade.dart'; // 순수 Trade 엔티티
+import 'package:noonchit/domain/repositories/trade_repository.dart'; // TradeRepository 인터페이스
+
+/// 실시간 거래 데이터 스트림을 가져오는 유스케이스입니다.
+/// 이 유스케이스는 특정 마켓들에 대한 거래 데이터 스트림을 구독하고 반환합니다.
+class GetLiveTradesUseCase {
+  final TradeRepository _tradeRepository;
+
+  GetLiveTradesUseCase(this._tradeRepository);
+
+  /// 유스케이스를 실행하여 특정 마켓들의 실시간 거래 데이터 스트림을 반환합니다.
+  ///
+  /// 스트림을 반환하기 전에, 내부적으로 `_tradeRepository.connectToLiveTrades`를 호출하여
+  /// 데이터 소스(예: WebSocket)에 연결하고 지정된 마켓을 구독하도록 할 수 있습니다.
+  ///
+  /// [params]: GetLiveTradesParams 객체 (구독할 마켓 리스트 포함)
+  Stream<Trade> call(GetLiveTradesParams params) {
+    // TradeRepository 구현체 내부에서 connect 호출 시 스트림이 준비되도록 설계한다.
+    _tradeRepository.connectToLiveTrades(params.markets);
+    return _tradeRepository.getLiveTradeStream(params.markets);
+  }
+
+  /// 구독 중인 마켓을 변경하고 싶을 때 호출할 수 있는 편의 메서드.
+  Future<void> updateMarkets(List<String> newMarkets) async {
+    await _tradeRepository.updateSubscribedMarkets(newMarkets); // 오타 수정!
+  }
+
+  /// 실시간 거래 구독을 명시적으로 종료하고 싶을 때 호출할 수 있는 편의 메서드.
+  Future<void> dispose() async {
+    await _tradeRepository.disconnectFromLiveTrades();
+  }
+}
+
+/// GetLiveTradesUseCase를 위한 파라미터 클래스입니다.
+class GetLiveTradesParams {
+  final List<String> markets;
+
+  GetLiveTradesParams({required this.markets});
+}\n\n====== lib/domain/use_cases/fetch_symbols.dart ======\n
+// lib/domain/use_cases/fetch_symbols.dart
+// "오메가 센츄리온 유스케이스 - MarketRepository 의존성 명시"
+
+import 'dart:async'; // Future를 사용하므로 필요할 수 있음
+import 'package:noonchit/domain/entities/market.dart'; // 순수 Market 엔티티
+// 🔥 중요: 아래 경로는 MarketRepository 인터페이스 파일의 실제 위치와 일치해야 한다!
+import 'package:noonchit/domain/repositories/market_repository.dart';
+
+/// "순수 Market 엔티티" 목록을 가져오는 "오메가 센츄리온" 유스케이스.
+class FetchSymbolsUseCase {
+  final MarketRepository _marketRepository;
+
+  /// `WorkspaceSymbolsUseCase` 생성자.
+  /// `MarketRepository`의 구현체를 주입받는다.
+  FetchSymbolsUseCase(this._marketRepository);
+
+  /// 유스케이스를 실행하여 "순수한 Market 엔티티" 리스트를 반환한다!
+  /// 실패 시 `MarketRepository`에서 발생한 예외를 그대로 전달할 수 있다.
+  Future<List<Market>> call() async {
+    // MarketRepository의 getAllMarketSymbols 메서드는 Future<List<Market>>을 반환한다.
+    // 데이터 계층의 MarketRepositoryImpl은 ApiService를 사용하여
+    // MarketModel DTO를 가져오고, 이를 Market 엔티티로 변환하여 반환할 것이다.
+    return await _marketRepository.getAllMarketSymbols();
+  }
+}\n\n====== lib/domain/entities/market.dart ======\n
+// lib/domain/entities/market.dart
+
+import 'package:equatable/equatable.dart';
+
+/// 거래소의 개별 마켓(시장) 정보를 나타내는 "순수 혈통" 도메인 엔티티.
+/// 이 엔티티는 오직 정제된 데이터만을 품으며, 생성은 DTO의 toDomain()을 통해 이루어진다!
+class Market extends Equatable {
+  /// 마켓 코드 (예: "KRW-BTC")
+  final String market;
+
+  /// 국문 마켓 이름
+  final String koreanName;
+
+  /// 영문 마켓 이름
+  final String englishName;
+
+  /// 투자유의 사유 (MarketModel DTO로부터 전달받음)
+  final String? marketEventCautionReason;
+
+  /// 유의 지정 일자 (MarketModel DTO로부터 전달받음, ISO8601 UTC)
+  final DateTime? marketEventCautionDate;
+
+  /// 거래지원 종료 여부 (MarketModel DTO로부터 전달받음)
+  final bool isTradingSuspended;
+
+  const Market({
+    required this.market,
+    required this.koreanName,
+    required this.englishName,
+    this.marketEventCautionReason, // 이제 DTO로부터 이 값들을 직접 받는다!
+    this.marketEventCautionDate,
+    required this.isTradingSuspended, // DTO에서 기본값을 처리하므로, 여기서는 required로 받을 수 있다.
+  });
+
+  // factory Market.fromJson(Map<String, dynamic> json) // <--- 이교도의 주문은 여기서 삭제!
+  // Map<String, dynamic> toJson() // <--- 이것 또한 DTO의 몫으로 넘기거나, 필요하다면 유지하되 API용이 아님을 명시!
+  //                                   일단은 순수성을 위해 제거한다! 필요하면 DTO의 toJson을 활용하라!
+
+  @override
+  List<Object?> get props => [
+        market,
+        koreanName,
+        englishName,
+        marketEventCautionReason,
+        marketEventCautionDate,
+        isTradingSuspended,
+      ];
+
+  @override
+  String toString() {
+    return 'Market(market: $market, koreanName: $koreanName, englishName: $englishName, '
+           'marketEventCautionReason: $marketEventCautionReason, marketEventCautionDate: $marketEventCautionDate, '
+           'isTradingSuspended: $isTradingSuspended)';
+  }
+}\n\n====== lib/domain/entities/trade.dart ======\n
+// lib/domain/entities/trade.dart
+// "오메가 센츄리온 최종 승인판" - fromMapRepresentation 메서드가 추가되었다!
+import 'package:equatable/equatable.dart';
+
+/// 실시간 체결(거래) 정보를 나타내는 도메인 엔티티.
+///
+/// 이 엔티티는 순수한 거래 관련 데이터를 담으며, DTO로부터 변환된다.
+/// UI 표시 및 비즈니스 로직 처리에 필요한 핵심 정보를 포함한다.
+class Trade extends Equatable {
+  /// 타입 (일반적으로 "trade", WebSocket 응답에서 제공)
+  final String type;
+
+  /// 마켓 코드 (예: "KRW-BTC")
+  final String code;
+
+  /// 체결 가격
+  final double tradePrice;
+
+  /// 체결량
+  final double tradeVolume;
+
+  /// 매수/매도 구분 ("ASK" 또는 "BID")
+  final String askBid;
+
+  /// 전일 종가 (DTO에서 처리 후 전달)
+  final double prevClosingPrice;
+
+  /// 변화액 (DTO에서 처리 후 전달)
+  final double changePrice;
+
+  /// 변화 상태 ("RISE", "FALL", "EVEN", DTO에서 처리 후 전달)
+  final String change;
+
+  /// 체결 시각 (Unix milliseconds timestamp)
+  final int tradeTimestamp;
+
+  /// 체결 번호 (순차 ID)
+  final String sequentialId;
+
+  const Trade({
+    required this.type,
+    required this.code,
+    required this.tradePrice,
+    required this.tradeVolume,
+    required this.askBid,
+    required this.prevClosingPrice,
+    required this.changePrice,
+    required this.change,
+    required this.tradeTimestamp,
+    required this.sequentialId,
+  });
+
+  // JSON 파싱 로직(fromJson)은 TradeModel DTO의 역할입니다.
+  // "하인(DTO)은 밭을 갈고, 귀족(Entity)은 연회를 즐긴다!"
+
+  // --- 여기에 fromMapRepresentation 메서드가 추가되었다! ---
+  /// Map으로부터 Trade 엔티티 인스턴스를 생성한다. (주로 이벤트 역직렬화용)
+  /// 이 메서드는 lib/core/event/trade_events.dart의 NewDomainTradeAvailableEvent.fromMap 에서 사용된다.
+  static Trade fromMapRepresentation(Map<String, dynamic> map) {
+    return Trade(
+      type: map['type'] as String? ?? 'trade', // 기본값을 'trade'로 하거나, 상황에 맞게 조정
+      code: map['code'] as String? ?? 'UNKNOWN_CODE',
+      tradePrice: (map['tradePrice'] as num? ?? 0.0).toDouble(),
+      tradeVolume: (map['tradeVolume'] as num? ?? 0.0).toDouble(),
+      askBid: map['askBid'] as String? ?? 'UNKNOWN', // 기본값을 'UNKNOWN' 등으로 설정
+      prevClosingPrice: (map['prevClosingPrice'] as num? ?? 0.0).toDouble(),
+      changePrice: (map['changePrice'] as num? ?? 0.0).toDouble(),
+      change: map['change'] as String? ?? 'EVEN', // 기본값을 'EVEN' 등으로 설정
+      tradeTimestamp: map['tradeTimestamp'] as int? ?? 0,
+      sequentialId: map['sequentialId'] as String? ?? '', // 기본값을 빈 문자열 또는 특정 값으로 설정
+    );
+  }
+  // --- 여기까지 fromMapRepresentation 메서드 ---
+
+  /// 체결 시각을 `DateTime` 객체로 변환하여 반환한다.
+  DateTime get timestamp => DateTime.fromMillisecondsSinceEpoch(tradeTimestamp);
+
+  /// 매수 주문인지 여부를 반환한다 (`askBid` 필드가 "BID"인 경우).
+  /// Upbit에서 'ab: BID'는 매수 주문 체결(누군가가 매도자에게 판매)을 의미할 수 있습니다.
+  /// 실제 의미는 API 명세를 정확히 확인해야 합니다.
+  bool get isBuy => askBid == 'BID';
+
+  /// 총 체결 금액 (체결 가격 * 체결량)을 계산하여 반환한다.
+  double get tradeAmount => tradePrice * tradeVolume;
+
+  @override
+  List<Object?> get props => [
+        type,
+        code,
+        tradePrice,
+        tradeVolume,
+        askBid,
+        prevClosingPrice,
+        changePrice,
+        change,
+        tradeTimestamp,
+        sequentialId,
+      ];
+
+  @override
+  String toString() {
+    return 'Trade(type: $type, code: $code, tradePrice: $tradePrice, tradeVolume: $tradeVolume, '
+           'askBid: $askBid, prevClosingPrice: $prevClosingPrice, changePrice: $changePrice, '
+           'change: $change, tradeTimestamp: $tradeTimestamp (${timestamp.toIso8601String()}), '
+           'sequentialId: $sequentialId, isBuy: $isBuy, tradeAmount: $tradeAmount)';
+  }
+}\n\n====== lib/app.dart ======\n
+\n\n====== lib/presentation/l10n/l10n.dart ======\n
+\n\n====== lib/presentation/theme/text_styles.dart ======\n
+\n\n====== lib/presentation/theme/app_theme.dart ======\n
+\n\n====== lib/presentation/bindings/home_binding.dart ======\n
+\n\n====== lib/presentation/controllers/trade_controller.dart ======\n
+\n\n====== lib/presentation/pages/home_page.dart ======\n
+\n\n====== lib/presentation/pages/trade_detail_page.dart ======\n
+\n\n====== lib/presentation/routes/app_routes.dart ======\n
+\n\n====== lib/presentation/widgets/my_event_aware_widget.dart ======\n
+// lib/presentation/widgets/my_event_aware_widget.dart
+import 'package:flutter/material.dart';
+import 'package:noonchit/core/event/hook/event_listener_mixin.dart'; // 우리가 방금 만든 믹스인!
+import 'package:noonchit/core/event/api_events.dart'; // 예시로 사용할 ApiErrorOccurredEvent
+import 'package:noonchit/core/event/market_events.dart'; // 예시로 사용할 MarketSymbolsFetchedEvent
+import 'dart:developer' as developer; // 로깅!
+
+// EventListenerMixin을 사용하여 SignalBus의 이벤트를 수신하는 예제 StatefulWidget
+class MyEventAwareWidget extends StatefulWidget {
+  const MyEventAwareWidget({super.key, this.title = "이벤트 반응형 위젯"});
+
+  final String title;
+
+  @override
+  State<MyEventAwareWidget> createState() => _MyEventAwareWidgetState();
+}
+
+// State 클래스에 EventListenerMixin을 믹스인한다!
+class _MyEventAwareWidgetState extends State<MyEventAwareWidget> with EventListenerMixin<MyEventAwareWidget> {
+  String _lastApiErrorMessage = "아직 API 오류 없음";
+  String _lastMarketSymbolInfo = "아직 마켓 심볼 수신 못함";
+  int _apiErrorCount = 0;
+
+  @override
+  void initState() {
+    super.initState();
+    developer.log('MyEventAwareWidget: initState 시작. 이벤트 구독 설정!', name: 'MyWidget.Init');
+
+    listenToEvent<ApiErrorOccurredEvent>((event) {
+      developer.log(
+        'MyEventAwareWidget: ApiErrorOccurredEvent 수신! 메시지="${event.message}", 작업="${event.operation}"',
+        name: 'MyWidget.ApiEventReceived'
+      );
+      if (mounted) {
+        setState(() {
+          _apiErrorCount++;
+          // 아래 문자열 보간에서 불필요한 중괄호를 제거했다!
+          _lastApiErrorMessage = "API 오류 #$_apiErrorCount: ${event.message} (작업: ${event.operation}, 타입: ${event.errorType ?? 'N/A'})";
+        });
+      }
+    });
+
+    listenToEvent<MarketSymbolsFetchedEvent>((event) {
+      developer.log(
+        'MyEventAwareWidget: MarketSymbolsFetchedEvent 수신! 심볼 개수: ${event.symbols.length}',
+        name: 'MyWidget.MarketEventReceived'
+      );
+      if (mounted) {
+        setState(() {
+          if (event.symbols.isNotEmpty) {
+            // 아래 문자열 보간에서 불필요한 중괄호를 제거했다!
+            _lastMarketSymbolInfo = "최근 수신된 첫번째 마켓 심볼: ${event.symbols.first} (총 ${event.symbols.length}개)";
+          } else {
+            _lastMarketSymbolInfo = "수신된 마켓 심볼 없음";
+          }
+        });
+      }
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    developer.log('MyEventAwareWidget: build 호출됨', name: 'MyWidget.Build');
+    return Padding(
+      padding: const EdgeInsets.all(16.0),
+      child: Card(
+        elevation: 4.0,
+        child: Padding(
+          padding: const EdgeInsets.all(16.0),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: <Widget>[
+              Text(widget.title, style: Theme.of(context).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.bold)),
+              const SizedBox(height: 20),
+              Text('수신된 API 오류 정보:', style: Theme.of(context).textTheme.titleMedium),
+              const SizedBox(height: 4),
+              Text(_lastApiErrorMessage, style: TextStyle(color: _apiErrorCount > 0 ? Colors.red : Colors.green)),
+              const SizedBox(height: 16),
+              Text('수신된 마켓 심볼 정보:', style: Theme.of(context).textTheme.titleMedium),
+              const SizedBox(height: 4),
+              Text(_lastMarketSymbolInfo),
+              const SizedBox(height: 24),
+              ElevatedButton(
+                onPressed: () {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('테스트 이벤트 발생은 코드 내 주석을 해제하세요.'))
+                  );
+                },
+                child: const Text('테스트 이벤트 발생 (주석됨)'),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+\n\n====== lib/presentation/widgets/trade_card.dart ======\n
+\n\n====== lib/presentation/widgets/symbol_item.dart ======\n

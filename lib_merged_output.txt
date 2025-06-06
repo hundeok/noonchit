@@ -1,0 +1,1663 @@
+\n\n// ====== lib/data/datasources/trade_cache_ds.dart ======\n
+// lib/features/trade/data/datasources/trade_cache_ds.dart
+
+import 'package:hive/hive.dart';
+import '../models/trade_dto.dart';
+import '../../domain/entities/trade.dart';
+
+/// Hive 기반 간단 거래 캐시 데이터소스
+class TradeCacheDataSource {
+  static const _boxName = 'trades';
+  static const _maxCacheSize = 1000;
+
+  /// 초기화: 박스 열기
+  Future<void> init() async {
+    if (!Hive.isBoxOpen(_boxName)) {
+      await Hive.openBox<TradeDto>(_boxName);
+    }
+  }
+
+  /// Trade를 DTO로 변환해 저장, 사이즈 초과 시 오래된 항목 제거
+  Future<void> cacheTrade(Trade trade) async {
+    final box = Hive.box<TradeDto>(_boxName);
+    final dto = TradeDto(
+      market: trade.market,
+      price: trade.price,
+      volume: trade.volume,
+      side: trade.side,
+      changePrice: trade.changePrice,
+      changeState: trade.changeState,
+      timestampMs: trade.timestampMs,
+      sequentialId: trade.sequentialId,
+    );
+    await box.put(trade.sequentialId, dto);
+    if (box.length > _maxCacheSize) {
+      final toRemove = box.keys.take(box.length - _maxCacheSize);
+      await box.deleteAll(toRemove);
+    }
+  }
+
+  /// 캐시된 Trade 전부 반환
+  List<Trade> getCachedTrades() {
+    final box = Hive.box<TradeDto>(_boxName);
+    return box.values.map((dto) => dto.toEntity()).toList();
+  }
+
+  /// 캐시 클리어
+  Future<void> clearCache() async {
+    await Hive.box<TradeDto>(_boxName).clear();
+  }
+
+  /// 박스 닫기
+  Future<void> dispose() async {
+    if (Hive.isBoxOpen(_boxName)) {
+      await Hive.box<TradeDto>(_boxName).close();
+    }
+  }
+}
+\n\n// ====== lib/data/datasources/trade_remote_ds.dart ======\n
+// lib/features/trade/data/datasources/trade_remote_ds.dart
+
+import 'dart:async';
+import 'dart:math';
+import 'package:flutter/foundation.dart';
+import '../../../core/bridge/signal_bus.dart';
+import '../../../core/event/app_event.dart';
+import '../../../core/network/websocket/trade_ws_client.dart';
+import '../models/trade_dto.dart';
+import '../../domain/entities/trade.dart';
+
+/// Fetches a live trade stream; on error falls back to synthetic data.
+class TradeRemoteDataSource {
+  final TradeWsClient _ws;
+  final SignalBus _signalBus;
+  final bool _useTestData;
+
+  StreamController<Trade>? _controller;
+  StreamSubscription<List<Map<String, dynamic>>>? _wsSub;
+
+  TradeRemoteDataSource(
+    this._ws,
+    this._signalBus, {
+    bool useTestData = false,
+  }) : _useTestData = useTestData;
+
+  /// Starts streaming trades for the given markets.
+  Stream<Trade> watch(List<String> markets) {
+    if (_useTestData) return _testStream();
+
+    // clean up any previous stream/subscription
+    _controller?.close();
+    _wsSub?.cancel();
+
+    _controller = StreamController<Trade>.broadcast(
+      onListen: () {
+        _start(markets);
+      },
+      onCancel: () {
+        _wsSub?.cancel();
+        _controller?.close();   // ← 추가됨
+      },
+    );
+
+    return _controller!.stream;
+  }
+
+  Future<void> _start(List<String> markets) async {
+    try {
+      await _ws.connect(markets);
+      _wsSub = _ws.stream.listen(
+        (rawBatch) {
+          for (final item in rawBatch) {
+            final dto = TradeDto.tryParse(item);
+            if (dto == null) continue;
+            final entity = dto.toEntity();
+            _controller!.add(entity);
+
+            // dispatch as AppEvent with metadata
+            final event = AppEvent.now(dto.toMap());
+            _signalBus.fireTradeEvent(event);
+          }
+        },
+        onError: (_, __) => _controller!.addStream(_testStream()),
+        onDone: () => _controller!.addStream(_testStream()),
+        cancelOnError: false,
+      );
+    } catch (e) {
+      debugPrint('WS connection failed: $e');
+      _controller!.addStream(_testStream());
+    }
+  }
+
+  /// Synthetic fallback stream for dev/test.
+  Stream<Trade> _testStream() async* {
+    final rnd = Random();
+    const symbols = [
+      'KRW-BTC', 'KRW-ETH', 'KRW-XRP',
+      'KRW-DOGE', 'KRW-SOL', 'KRW-ADA',
+      'KRW-LINK', 'KRW-DOT', 'KRW-AVAX',
+      'KRW-MATIC',
+    ];
+
+    while (true) {
+      await Future.delayed(const Duration(milliseconds: 500));
+      final nowMs = DateTime.now().millisecondsSinceEpoch;
+      final dto = TradeDto(
+        market: symbols[rnd.nextInt(symbols.length)],
+        price: (rnd.nextDouble() * 1000).roundToDouble(),
+        volume: rnd.nextDouble(),
+        side: rnd.nextBool() ? 'BID' : 'ASK',
+        changePrice: 0.0,
+        changeState: 'EVEN',
+        timestampMs: nowMs,
+        sequentialId: 'test-$nowMs-${rnd.nextInt(1000)}',
+      );
+      yield dto.toEntity();
+      _signalBus.fireTradeEvent(AppEvent.now(dto.toMap()));
+    }
+  }
+
+  /// Clean up resources when no longer needed.
+  Future<void> dispose() async {
+    await _wsSub?.cancel();
+    await _controller?.close();
+    // do not dispose shared ws client here
+  }
+}
+\n\n// ====== lib/data/datasources/settings_local_ds.dart ======\n
+import 'package:flutter/material.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import '../../domain/entities/app_settings.dart';
+
+class SettingsLocalDataSource {
+  final SharedPreferences prefs;
+  SettingsLocalDataSource(this.prefs);
+
+  // 테마 모드 관리
+  ThemeMode getThemeMode() {
+    final themeName = prefs.getString('themeMode') ?? 'system';
+    return switch (themeName) {
+      'light' => ThemeMode.light,
+      'dark' => ThemeMode.dark,
+      _ => ThemeMode.system,
+    };
+  }
+
+  Future<void> saveThemeMode(ThemeMode mode) async {
+    await prefs.setString('themeMode', mode.name);
+  }
+
+  // 화면 항상 켜기 관리
+  bool getKeepScreenOn() {
+    return prefs.getBool('keepScreenOn') ?? false;
+  }
+
+  Future<void> saveKeepScreenOn(bool value) async {
+    await prefs.setBool('keepScreenOn', value);
+  }
+
+  // 슬라이더 위치 관리 (enum)
+  SliderPosition getSliderPosition() {
+    final raw = prefs.getString('sliderPosition') ?? 'top';
+    return raw == 'bottom' ? SliderPosition.bottom : SliderPosition.top;
+  }
+
+  Future<void> saveSliderPosition(SliderPosition position) async {
+    await prefs.setString('sliderPosition', position.name);
+  }
+}
+\n\n// ====== lib/data/repositories/settings_repository_impl.dart ======\n
+import 'package:flutter/material.dart';
+import '../../domain/entities/app_settings.dart';
+import '../../domain/repositories/settings_repository.dart';
+import '../datasources/settings_local_ds.dart';
+
+class SettingsRepositoryImpl implements SettingsRepository {
+  final SettingsLocalDataSource dataSource;
+  SettingsRepositoryImpl(this.dataSource);
+
+  @override
+  Future<AppSettings> getSettings() async {
+    return AppSettings(
+      themeMode: dataSource.getThemeMode(),
+      keepScreenOn: dataSource.getKeepScreenOn(),
+      sliderPosition: dataSource.getSliderPosition(),
+    );
+  }
+
+  @override
+  Future<void> updateThemeMode(ThemeMode mode) async {
+    await dataSource.saveThemeMode(mode);
+  }
+
+  @override
+  Future<void> updateKeepScreenOn(bool value) async {
+    await dataSource.saveKeepScreenOn(value);
+  }
+
+  @override
+  Future<void> updateSliderPosition(SliderPosition position) async {
+    await dataSource.saveSliderPosition(position);
+  }
+}
+\n\n// ====== lib/data/repositories/surge_repository_impl.dart ======\n
+\n\n// ====== lib/data/repositories/volume_repository_impl.dart ======\n
+\n\n// ====== lib/data/repositories/trade_repository_impl.dart ======\n
+// ====== lib/features/trade/data/repositories/trade_repository_impl.dart ======
+import 'dart:async';
+import 'package:flutter/foundation.dart';
+import '../../../core/config/app_config.dart';
+import '../../domain/entities/trade.dart';
+import '../../domain/repositories/trade_repository.dart';
+import '../datasources/trade_cache_ds.dart';
+import '../datasources/trade_remote_ds.dart';
+import '../processors/trade_aggregator.dart';
+
+/// 예전 프로젝트 방식의 효율적인 배치 처리를 적용한 Repository
+class TradeRepositoryImpl implements TradeRepository {
+  final TradeRemoteDataSource _remote;
+  final TradeCacheDataSource _cache;
+  final TradeAggregator _aggregator;
+
+  // 📊 내부 상태 관리 (예전 프로젝트 TradeNotifier 방식)
+  final Map<double, List<Trade>> _filterLists = {};
+  final Set<String> _seenIds = {};
+  
+  // 🎯 배치 처리를 위한 컨트롤러들
+  final StreamController<List<Trade>> _filteredController = StreamController<List<Trade>>.broadcast();
+  final StreamController<Trade> _aggregatedController = StreamController<Trade>.broadcast();
+  
+  // 🔥 핵심: 단일 스트림 관리
+  Stream<Trade>? _masterStream;
+  StreamSubscription<Trade>? _masterSubscription;
+  Timer? _periodicFlushTimer;
+  Timer? _batchUpdateTimer;
+  
+  // 🎯 동적 임계값 관리
+  double _currentThreshold = 20000000.0; // 기본값: 2천만원
+  
+  // 성능 최적화 상수
+  static const int _maxTrades = 200;
+  static const int _maxCacheSize = 1000;
+  static const Duration _batchUpdateInterval = Duration(milliseconds: 100);
+
+  TradeRepositoryImpl(this._remote, this._cache)
+      : _aggregator = TradeAggregator() {
+    
+    // 필터 리스트 초기화
+    for (final filter in AppConfig.tradeFilters) {
+      _filterLists[filter] = [];
+    }
+    
+    // 주기적 플러시 타이머
+    _periodicFlushTimer = Timer.periodic(
+      AppConfig.globalResetInterval,
+      (_) => _aggregator.flushTrades(onTradeProcessed: _handleProcessedTrade),
+    );
+  }
+
+  /// 🔥 핵심: 마스터 스트림 초기화 (한 번만 호출)
+  void _initializeMasterStream(List<String> markets) {
+    if (_masterStream != null) return; // 이미 초기화됨
+    
+    debugPrint('TradeRepositoryImpl: initializing master stream for ${markets.length} markets');
+    
+    // 🎯 단일 스트림 생성
+    _masterStream = _remote.watch(markets).asBroadcastStream();
+    
+    // 🎯 단일 구독으로 모든 데이터 처리
+    _masterSubscription = _masterStream!.listen(
+      _processRawTrade,
+      onError: (error, stackTrace) {
+        debugPrint('Master stream error: $error');
+        debugPrint('StackTrace: $stackTrace');
+      },
+      onDone: () {
+        debugPrint('Master stream done');
+      },
+    );
+  }
+
+  @override
+  Stream<Trade> watchTrades(List<String> markets) {
+    debugPrint('TradeRepositoryImpl: watchTrades() - ${markets.length} markets');
+    
+    // 마스터 스트림 초기화
+    _initializeMasterStream(markets);
+    
+    // 마스터 스트림 반환 (추가 구독 없음)
+    return _masterStream!;
+  }
+
+  @override
+  Stream<List<Trade>> watchFilteredTrades(double threshold, List<String> markets) {
+    debugPrint('TradeRepositoryImpl: watchFilteredTrades() - threshold: $threshold');
+    
+    // 🎯 수정: 임계값 업데이트
+    _currentThreshold = threshold;
+    
+    // 마스터 스트림 초기화
+    _initializeMasterStream(markets);
+    
+    // 임계값이 변경되었으므로 즉시 재필터링
+    _scheduleBatchUpdate();
+    
+    // 배치 처리된 결과 스트림 반환
+    return _filteredController.stream;
+  }
+
+  @override
+  Stream<Trade> watchAggregatedTrades() {
+    return _aggregatedController.stream;
+  }
+
+  /// 🎯 새로 추가: 동적 임계값 업데이트
+  @override
+  void updateThreshold(double threshold) {
+    if (_currentThreshold != threshold) {
+      _currentThreshold = threshold;
+      debugPrint('🎯 Threshold updated to: ${threshold.toStringAsFixed(0)}');
+      
+      // 즉시 재필터링 실행
+      _scheduleBatchUpdate();
+    }
+  }
+  
+  /// 📥 원시 거래 데이터 처리 (예전 프로젝트 방식)
+  void _processRawTrade(Trade trade) async {
+    try {
+      final key = '${trade.market}/${trade.sequentialId}';
+
+      // 중복 처리 방지
+      if (!_seenIds.add(key)) return;
+
+      // 메모리 관리
+      if (_seenIds.length > _maxCacheSize) {
+        final removeCount = (_seenIds.length / 4).ceil();
+        final toRemove = _seenIds.take(removeCount).toList();
+        _seenIds.removeAll(toRemove);
+      }
+
+      // 캐시 저장
+      await _cache.cacheTrade(trade);
+
+      // 🔄 Aggregator를 통한 거래 처리
+      _aggregator.processTrade(
+        {
+          'market': trade.market,
+          'price': trade.price,
+          'volume': trade.volume,
+          'timestamp': trade.timestampMs,
+          'isBuy': trade.isBuy,
+          'sequential_id': trade.sequentialId,
+        },
+        onTradeProcessed: _handleProcessedTrade,
+      );
+      
+    } catch (e, stackTrace) {
+      debugPrint('_processRawTrade error: $e');
+      debugPrint('StackTrace: $stackTrace');
+    }
+  }
+  
+  /// 🎯 집계된 거래 처리 및 필터링 (핵심 로직)
+  void _handleProcessedTrade(Map<String, dynamic> processedTrade) {
+    try {
+      // Trade 엔티티로 변환
+      final trade = Trade(
+        market: processedTrade['market'] as String,
+        price: processedTrade['price'] as double,
+        volume: processedTrade['volume'] as double,
+        side: (processedTrade['isBuy'] as bool) ? 'BID' : 'ASK',
+        changePrice: 0.0,
+        changeState: 'EVEN',
+        timestampMs: processedTrade['timestamp'] as int,
+        sequentialId: processedTrade['sequential_id'] as String,
+      );
+      
+      // 집계된 거래 스트림에 추가
+      if (!_aggregatedController.isClosed) {
+        _aggregatedController.add(trade);
+      }
+      
+      final total = trade.total;
+      
+      // 📋 각 필터에 해당하는 거래 추가
+      for (final filter in AppConfig.tradeFilters) {
+        if (total >= filter) {
+          final list = _filterLists[filter]!;
+          list.insert(0, trade);
+          
+          // 최대 거래 수 유지
+          if (list.length > _maxTrades) {
+            list.removeLast();
+          }
+        }
+      }
+      
+      // 🚀 배치 업데이트 스케줄링 (과도한 UI 업데이트 방지)
+      _scheduleBatchUpdate();
+      
+    } catch (e, stackTrace) {
+      debugPrint('_handleProcessedTrade error: $e');
+      debugPrint('StackTrace: $stackTrace');
+    }
+  }
+  
+  /// ⏰ 배치 업데이트 스케줄링 (예전 프로젝트의 _updateFilteredTrades 방식)
+  void _scheduleBatchUpdate() {
+    // 이미 스케줄된 업데이트가 있으면 리셋
+    _batchUpdateTimer?.cancel();
+    
+    _batchUpdateTimer = Timer(_batchUpdateInterval, () {
+      _updateFilteredTrades();
+    });
+  }
+  
+  /// 📊 필터링된 거래 목록 업데이트 (UI 업데이트)
+  void _updateFilteredTrades() {
+    try {
+      // 🎯 수정: 동적 임계값 사용
+      final threshold = _currentThreshold;
+      
+      final merged = <Trade>[];
+      final seen = <String>{};
+
+      // 🔍 임계값 이상의 모든 필터에서 거래 수집
+      for (final filter in AppConfig.tradeFilters.where((f) => f >= threshold)) {
+        for (final trade in _filterLists[filter] ?? <Trade>[]) {
+          final id = '${trade.sequentialId}-${trade.timestampMs}';
+          if (trade.total >= threshold && seen.add(id)) {
+            merged.add(trade);
+          }
+        }
+      }
+
+      // 시간순 정렬 (최신 순)
+      merged.sort((a, b) => b.timestampMs.compareTo(a.timestampMs));
+      
+      // 최대 거래 수로 제한
+      final result = merged.take(_maxTrades).toList();
+      
+      // 🚀 UI에 업데이트 전송
+      if (!_filteredController.isClosed) {
+        _filteredController.add(result);
+        
+        if (kDebugMode && result.isNotEmpty) {
+          debugPrint('🎯 Batch update: ${result.length} filtered trades (threshold: ${threshold.toStringAsFixed(0)})');
+        }
+      }
+      
+    } catch (e, stackTrace) {
+      debugPrint('_updateFilteredTrades error: $e');
+      debugPrint('StackTrace: $stackTrace');
+    }
+  }
+
+  @override
+  Future<void> dispose() async {
+    debugPrint('TradeRepositoryImpl: dispose() called');
+    
+    // 타이머들 정리
+    _periodicFlushTimer?.cancel();
+    _batchUpdateTimer?.cancel();
+    
+    // 마스터 구독 정리
+    await _masterSubscription?.cancel();
+    _masterStream = null;
+    
+    // 컨트롤러들 정리
+    await _filteredController.close();
+    await _aggregatedController.close();
+    
+    // 데이터소스 정리
+    await _remote.dispose();
+    await _cache.dispose();
+    
+    // Aggregator 플러시
+    _aggregator.flushTrades(onTradeProcessed: (_) {});
+  }
+}\n\n// ====== lib/data/repositories/momentary_repository_impl.dart ======\n
+\n\n// ====== lib/data/models/momentary_dto.dart ======\n
+\n\n// ====== lib/data/models/trade_dto.g.dart ======\n
+// GENERATED CODE - DO NOT MODIFY BY HAND
+
+part of 'trade_dto.dart';
+
+// **************************************************************************
+// TypeAdapterGenerator
+// **************************************************************************
+
+class TradeDtoAdapter extends TypeAdapter<TradeDto> {
+  @override
+  final int typeId = 0;
+
+  @override
+  TradeDto read(BinaryReader reader) {
+    final numOfFields = reader.readByte();
+    final fields = <int, dynamic>{
+      for (int i = 0; i < numOfFields; i++) reader.readByte(): reader.read(),
+    };
+    return TradeDto(
+      market: fields[0] as String,
+      price: fields[1] as double,
+      volume: fields[2] as double,
+      side: fields[3] as String,
+      changePrice: fields[4] as double,
+      changeState: fields[5] as String,
+      timestampMs: fields[6] as int,
+      sequentialId: fields[7] as String,
+    );
+  }
+
+  @override
+  void write(BinaryWriter writer, TradeDto obj) {
+    writer
+      ..writeByte(8)
+      ..writeByte(0)
+      ..write(obj.market)
+      ..writeByte(1)
+      ..write(obj.price)
+      ..writeByte(2)
+      ..write(obj.volume)
+      ..writeByte(3)
+      ..write(obj.side)
+      ..writeByte(4)
+      ..write(obj.changePrice)
+      ..writeByte(5)
+      ..write(obj.changeState)
+      ..writeByte(6)
+      ..write(obj.timestampMs)
+      ..writeByte(7)
+      ..write(obj.sequentialId);
+  }
+
+  @override
+  int get hashCode => typeId.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is TradeDtoAdapter &&
+          runtimeType == other.runtimeType &&
+          typeId == other.typeId;
+}
+\n\n// ====== lib/data/models/volume_dto.dart ======\n
+\n\n// ====== lib/data/models/trade_dto.dart ======\n
+import 'dart:convert';
+import 'package:flutter/foundation.dart';
+import 'package:hive/hive.dart';
+import '../../domain/entities/trade.dart';
+
+part 'trade_dto.g.dart';
+
+@HiveType(typeId: 0)
+class TradeDto {
+  @HiveField(0)
+  final String market;
+  @HiveField(1)
+  final double price;
+  @HiveField(2)
+  final double volume;
+  @HiveField(3)
+  final String side;
+  @HiveField(4)
+  final double changePrice;
+  @HiveField(5)
+  final String changeState;
+  @HiveField(6)
+  final int timestampMs;
+  @HiveField(7)
+  final String sequentialId;
+
+  TradeDto({
+    required this.market,
+    required this.price,
+    required this.volume,
+    required this.side,
+    required this.changePrice,
+    required this.changeState,
+    required this.timestampMs,
+    required this.sequentialId,
+  });
+
+  Trade toEntity() => Trade(
+        market: market,
+        price: price,
+        volume: volume,
+        side: side,
+        changePrice: changePrice,
+        changeState: changeState,
+        timestampMs: timestampMs,
+        sequentialId: sequentialId,
+      );
+
+  Map<String, dynamic> toMap() => {
+        'market': market,
+        'price': price,
+        'volume': volume,
+        'side': side,
+        'change_price': changePrice,
+        'change_state': changeState,
+        'timestamp': timestampMs,
+        'sequential_id': sequentialId,
+      };
+
+  /// 다중 키 지원 파싱. 실패해도 null 반환.
+  static TradeDto? tryParse(Map<String, dynamic> m) {
+    try {
+      // 필수 데이터 검증
+      if (m.isEmpty) return null;
+      
+      if (kDebugMode) {
+        final preview = m.toString();
+        debugPrint('TradeDto.tryParse: ${preview.length > 100 ? '${preview.substring(0, 100)}…' : preview}');
+      }
+
+      String parseString(dynamic v, [String fallback = '']) =>
+          v != null ? v.toString() : fallback;
+
+      double parseDouble(dynamic v) {
+        if (v is num) return v.toDouble();
+        final str = v?.toString().trim() ?? '';
+        if (str.isEmpty) return 0.0;
+        return double.tryParse(str) ?? 0.0;
+      }
+
+      int parseInt(dynamic v) {
+        if (v is int) return v;
+        final str = v?.toString().trim() ?? '';
+        if (str.isEmpty) return DateTime.now().millisecondsSinceEpoch;
+        return int.tryParse(str) ?? DateTime.now().millisecondsSinceEpoch;
+      }
+
+      final market = parseString(m['market'] ?? m['code'] ?? m['symbol'], 'UNKNOWN');
+      final price = parseDouble(m['price'] ?? m['trade_price'] ?? m['tp']);
+      final volume = parseDouble(m['volume'] ?? m['trade_volume'] ?? m['tv']);
+      final side = parseString(m['side'] ?? m['ask_bid'] ?? m['ab'], 'UNKNOWN');
+      final changePrice = parseDouble(m['change_price'] ?? m['cp'] ?? 0);
+      final changeState = parseString(m['change_state'] ?? m['change'] ?? m['c'], 'EVEN').toUpperCase();
+      final timestamp = parseInt(m['timestamp'] ?? m['timestamp_ms'] ?? m['ttms']);
+      final sequentialId = parseString(m['sequential_id'] ?? m['sid'], timestamp.toString());
+
+      return TradeDto(
+        market: market,
+        price: price,
+        volume: volume,
+        side: side,
+        changePrice: changePrice,
+        changeState: changeState,
+        timestampMs: timestamp,
+        sequentialId: sequentialId,
+      );
+    } catch (e) {
+      if (kDebugMode) {
+        debugPrint('TradeDto.tryParse error name: wrong_format, message: format이 맞지않습니다 - $e');
+      }
+      return null;
+    }
+  }
+
+  String toJson() => json.encode(toMap());
+
+  factory TradeDto.fromJson(String src) =>
+      tryParse(json.decode(src) as Map<String, dynamic>) ??
+      TradeDto(
+        market: 'ERROR',
+        price: 0.0,
+        volume: 0.0,
+        side: 'UNKNOWN',
+        changePrice: 0.0,
+        changeState: 'UNKNOWN',
+        timestampMs: DateTime.now().millisecondsSinceEpoch,
+        sequentialId: 'ERROR',
+      );
+}\n\n// ====== lib/data/models/surge_dto.dart ======\n
+\n\n// ====== lib/data/processors/trade_aggregator.dart ======\n
+// ====== lib/features/trade/data/utils/trade_aggregator.dart ======
+import 'package:flutter/foundation.dart';
+import '../../../core/config/app_config.dart';
+
+/// 예전 프로젝트와 같이 효율적으로 작동하는 거래 집계기
+class TradeAggregator {
+  final Map<String, Map<String, dynamic>> _lastTrades = {};
+  final int mergeWindow = AppConfig.mergeWindowMs;
+  
+  /// 거래 처리 및 병합 로직
+  void processTrade(
+    Map<String, dynamic> trade, {
+    required Function(Map<String, dynamic>) onTradeProcessed,
+  }) {
+    try {
+      final market = trade['market'] as String;
+      final price = trade['price'] as double;
+      final volume = trade['volume'] as double;
+      final total = price * volume;
+      final timestamp = trade['timestamp'] as int;
+      final isBuy = trade['isBuy'] as bool;
+      final sequentialId = trade['sequential_id'] as String;
+
+      if (_lastTrades.containsKey(market)) {
+        final lastTrade = _lastTrades[market]!;
+        final lastTs = lastTrade['timestamp'] as int;
+        
+        // 시간 윈도우 내의 거래면 병합
+        if (timestamp - lastTs <= mergeWindow) {
+          final lastTotal = lastTrade['total'] as double;
+          final lastVolume = lastTrade['volume'] as double;
+          final newTotal = lastTotal + total;
+          final newVolume = lastVolume + volume;
+          
+          // 가중 평균 가격 계산
+          final avgPrice = newTotal / newVolume;
+          
+          // 병합된 거래 정보 업데이트
+          lastTrade['price'] = avgPrice;
+          lastTrade['volume'] = newVolume;
+          lastTrade['total'] = newTotal;
+          lastTrade['timestamp'] = timestamp; // 최신 시간으로 업데이트
+          lastTrade['sequential_id'] = sequentialId;
+          lastTrade['isBuy'] = isBuy; // 최신 거래의 방향 사용
+          
+          debugPrint(
+            'Merged trade: $market, total: ${newTotal.toStringAsFixed(0)}, avg_price: ${avgPrice.toStringAsFixed(2)}',
+          );
+        } else {
+          // 시간 윈도우를 벗어나면 이전 거래 처리하고 새 거래로 교체
+          onTradeProcessed(Map<String, dynamic>.from(lastTrade));
+          
+          _lastTrades[market] = {
+            'market': market,
+            'price': price,
+            'volume': volume,
+            'total': total,
+            'timestamp': timestamp,
+            'isBuy': isBuy,
+            'sequential_id': sequentialId,
+          };
+        }
+      } else {
+        // 새로운 마켓의 첫 거래
+        final newTrade = {
+          'market': market,
+          'price': price,
+          'volume': volume,
+          'total': total,
+          'timestamp': timestamp,
+          'isBuy': isBuy,
+          'sequential_id': sequentialId,
+        };
+        
+        _lastTrades[market] = newTrade;
+        
+        // 🔥 중요: 첫 거래도 바로 처리하여 UI에 반영
+        onTradeProcessed(Map<String, dynamic>.from(newTrade));
+      }
+    } catch (e, stackTrace) {
+      debugPrint('TradeAggregator processTrade error: $e');
+      debugPrint('StackTrace: $stackTrace');
+    }
+  }
+  
+  /// 대기 중인 모든 거래를 플러시
+  void flushTrades({
+    required Function(Map<String, dynamic>) onTradeProcessed,
+  }) {
+    try {
+      for (final trade in _lastTrades.values) {
+        onTradeProcessed(Map<String, dynamic>.from(trade));
+      }
+      _lastTrades.clear();
+      
+      if (kDebugMode) {
+        debugPrint('TradeAggregator: ${_lastTrades.length} trades flushed');
+      }
+    } catch (e, stackTrace) {
+      debugPrint('TradeAggregator flushTrades error: $e');
+      debugPrint('StackTrace: $stackTrace');
+    }
+  }
+  
+  /// 특정 마켓의 대기 중인 거래 가져오기 (디버깅용)
+  Map<String, dynamic>? getPendingTrade(String market) {
+    return _lastTrades[market] != null 
+        ? Map<String, dynamic>.from(_lastTrades[market]!)
+        : null;
+  }
+  
+  /// 현재 대기 중인 거래 수
+  int get pendingTradesCount => _lastTrades.length;
+  
+  /// 모든 대기 거래 클리어 (테스트/디버그용)
+  void clear() {
+    _lastTrades.clear();
+  }
+}\n\n// ====== lib/domain/repositories/surge_repository.dart ======\n
+\n\n// ====== lib/domain/repositories/momentary_repository.dart ======\n
+\n\n// ====== lib/domain/repositories/settings_repository.dart ======\n
+import 'package:flutter/material.dart';
+import '../entities/app_settings.dart';
+
+abstract class SettingsRepository {
+  /// 현재 앱 설정 가져오기
+  Future<AppSettings> getSettings();
+  
+  /// 테마 모드 업데이트
+  Future<void> updateThemeMode(ThemeMode mode);
+  
+  /// 화면 항상 켜기 설정 업데이트
+  Future<void> updateKeepScreenOn(bool value);
+  
+  /// 슬라이더 위치 업데이트
+  Future<void> updateSliderPosition(SliderPosition position);
+}
+\n\n// ====== lib/domain/repositories/trade_repository.dart ======\n
+// lib/domain/repositories/trade_repository.dart
+import '../entities/trade.dart';
+
+/// Provides streams of trade data and handles resource cleanup.
+abstract class TradeRepository {
+  /// Streams raw [Trade] events for the given list of market codes.
+  Stream<Trade> watchTrades(List<String> markets);
+  
+  /// Streams lists of [Trade] filtered by a minimum total trade value.
+  /// => markets 파라미터 추가
+  Stream<List<Trade>> watchFilteredTrades(double threshold, List<String> markets);
+  
+  /// Streams aggregated [Trade] events over a merge window.
+  Stream<Trade> watchAggregatedTrades();
+  
+  /// 🎯 새로 추가: 동적 임계값 업데이트
+  void updateThreshold(double threshold);
+  
+  /// Releases any held resources (e.g., WebSocket connections, Hive boxes).
+  Future<void> dispose();
+}\n\n// ====== lib/domain/repositories/volume_repository.dart ======\n
+\n\n// ====== lib/domain/usecases/momentary_usecase.dart ======\n
+\n\n// ====== lib/domain/usecases/settings_usecase.dart ======\n
+// lib/domain/usecases/settings_usecase.dart
+
+import 'package:flutter/material.dart';
+import '../entities/app_settings.dart';
+import '../repositories/settings_repository.dart';
+
+/// 앱 설정 관련 비즈니스 로직
+class SettingsUsecase {
+  final SettingsRepository _repo;
+  SettingsUsecase(this._repo);
+
+  Future<AppSettings> getSettings() {
+    return _repo.getSettings();
+  }
+
+  Future<void> updateThemeMode(ThemeMode mode) {
+    return _repo.updateThemeMode(mode);
+  }
+
+  Future<void> updateKeepScreenOn(bool on) {
+    return _repo.updateKeepScreenOn(on);
+  }
+
+  Future<void> updateSliderPosition(SliderPosition pos) {
+    return _repo.updateSliderPosition(pos);
+  }
+}
+\n\n// ====== lib/domain/usecases/volume_usecase.dart ======\n
+\n\n// ====== lib/domain/usecases/surge_usecase.dart ======\n
+\n\n// ====== lib/domain/usecases/trade_usecase.dart ======\n
+// lib/domain/usecases/trade_usecase.dart
+
+import 'dart:async';
+import '../../core/error/app_exception.dart';
+import '../../core/extensions/result.dart';
+import '../entities/trade.dart';
+import '../repositories/trade_repository.dart';
+
+/// Trade 관련 비즈니스 로직을 제공하는 UseCase
+class TradeUsecase {
+  final TradeRepository _repository;
+
+  TradeUsecase(this._repository);
+
+  /// threshold와 markets를 기준으로 필터링된 거래 목록 스트림 반환
+  Stream<Result<List<Trade>, AppException>> filterTrades(
+    double threshold,
+    List<String> markets,
+  ) {
+    return _repository
+        .watchFilteredTrades(threshold, markets)
+        .transform(_wrap<List<Trade>>('Filter trades failed'));
+  }
+
+  /// 집계된 거래 스트림 반환
+  Stream<Result<Trade, AppException>> aggregateTrades() {
+    return _repository
+        .watchAggregatedTrades()
+        .transform(_wrap<Trade>('Aggregate trades failed'));
+  }
+
+  StreamTransformer<T, Result<T, AppException>> _wrap<T>(String errorMsg) {
+    return StreamTransformer.fromHandlers(
+      handleData: (data, sink) => sink.add(Ok(data)),
+      handleError: (error, stack, sink) =>
+          sink.add(Err(AppException('$errorMsg: $error'))),
+    );
+  }
+}\n\n// ====== lib/domain/entities/app_settings.dart ======\n
+import 'package:flutter/material.dart';
+import 'package:equatable/equatable.dart';
+
+/// 슬라이더 위치를 표현하는 enum
+enum SliderPosition { top, bottom }
+
+class AppSettings extends Equatable {
+  final ThemeMode themeMode;
+  final bool keepScreenOn;
+  final SliderPosition sliderPosition;
+  
+  const AppSettings({
+    this.themeMode = ThemeMode.system,
+    this.keepScreenOn = false,
+    this.sliderPosition = SliderPosition.top,
+  });
+  
+  AppSettings copyWith({
+    ThemeMode? themeMode,
+    bool? keepScreenOn,
+    SliderPosition? sliderPosition,
+  }) =>
+      AppSettings(
+        themeMode: themeMode ?? this.themeMode,
+        keepScreenOn: keepScreenOn ?? this.keepScreenOn,
+        sliderPosition: sliderPosition ?? this.sliderPosition,
+      );
+  
+  @override
+  List<Object?> get props => [themeMode, keepScreenOn, sliderPosition];
+}
+\n\n// ====== lib/domain/entities/momentary.dart ======\n
+\n\n// ====== lib/domain/entities/trade.dart ======\n
+import 'package:equatable/equatable.dart';
+
+/// 순수 도메인 모델: 비즈니스 로직만 포함
+class Trade extends Equatable {
+  /// 시장 코드 (예: "KRW-BTC")
+  final String market;
+
+  /// 체결 단가
+  final double price;
+
+  /// 체결 수량
+  final double volume;
+
+  /// 'BID' 또는 'ASK'
+  final String side;
+
+  /// 가격 변동량
+  final double changePrice;
+
+  /// 변동 상태 ('RISE'/'FALL'/'EVEN')
+  final String changeState;
+
+  /// UTC 밀리초 타임스탬프
+  final int timestampMs;
+
+  /// 중복 제거용 고유 ID
+  final String sequentialId;
+
+  const Trade({
+    required this.market,
+    required this.price,
+    required this.volume,
+    required this.side,
+    required this.changePrice,
+    required this.changeState,
+    required this.timestampMs,
+    required this.sequentialId,
+  });
+
+  @override
+  List<Object?> get props => [
+        market,
+        price,
+        volume,
+        side,
+        changePrice,
+        changeState,
+        timestampMs,
+        sequentialId,
+      ];
+
+  /// 총 체결 금액
+  double get total => price * volume;
+
+  /// 매수 여부
+  bool get isBuy => side == 'BID';
+
+  /// DateTime 변환
+  DateTime get timestamp => DateTime.fromMillisecondsSinceEpoch(timestampMs);
+}
+\n\n// ====== lib/domain/entities/surge.dart ======\n
+\n\n// ====== lib/domain/entities/volume.dart ======\n
+\n\n// ====== lib/presentation/providers/trade_provider.dart ======\n
+\n\n// ====== lib/presentation/providers/volume_provider.dart ======\n
+\n\n// ====== lib/presentation/providers/market_providers.dart ======\n
+\n\n// ====== lib/presentation/providers/surge_provider.dart ======\n
+\n\n// ====== lib/presentation/providers/settings_provider.dart ======\n
+\n\n// ====== lib/presentation/providers/momentary_provider.dart ======\n
+\n\n// ====== lib/presentation/controllers/surge_controller.dart ======\n
+\n\n// ====== lib/presentation/controllers/main_controller.dart ======\n
+\n\n// ====== lib/presentation/controllers/settings_controller.dart ======\n
+// lib/presentation/controllers/settings_controller.dart
+
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../domain/entities/app_settings.dart';
+import '../../domain/usecases/settings_usecase.dart';
+import '../../core/di/settings_provider.dart'; // ← 이걸 추가
+
+
+/// Provider 선언
+final settingsControllerProvider =
+    StateNotifierProvider<SettingsController, AppSettings>((ref) {
+  final usecase = ref.watch(settingsUsecaseProvider);
+  return SettingsController(usecase);
+});
+
+/// StateNotifier: AppSettings 상태 관리
+class SettingsController extends StateNotifier<AppSettings> {
+  final SettingsUsecase _usecase;
+
+  SettingsController(this._usecase) : super(const AppSettings()) {
+    _load();
+  }
+
+  Future<void> _load() async {
+    final loaded = await _usecase.getSettings();
+    state = loaded;
+  }
+
+  Future<void> setThemeMode(ThemeMode m) async {
+    await _usecase.updateThemeMode(m);
+    state = state.copyWith(themeMode: m);
+  }
+
+  Future<void> setKeepScreenOn(bool on) async {
+    await _usecase.updateKeepScreenOn(on);
+    state = state.copyWith(keepScreenOn: on);
+  }
+
+  Future<void> setSliderPosition(SliderPosition pos) async {
+    await _usecase.updateSliderPosition(pos);
+    state = state.copyWith(sliderPosition: pos);
+  }
+}
+\n\n// ====== lib/presentation/controllers/momentary_controller.dart ======\n
+\n\n// ====== lib/presentation/controllers/volume_controller.dart ======\n
+\n\n// ====== lib/presentation/controllers/trade_controller.dart ======\n
+// lib/presentation/controllers/trade_controller.dart
+
+import 'dart:async';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../core/config/app_config.dart';
+import '../../core/di/trade_provider.dart'; // usecaseProvider, repoProvider
+import '../../core/error/app_exception.dart';
+import '../../core/extensions/result.dart';
+import '../../domain/entities/trade.dart';
+import '../../domain/usecases/trade_usecase.dart';
+
+/// 화면 상태를 캡슐화하는 immutable 모델
+class TradeState {
+  final List<Trade> trades;
+  final bool isLoading;
+  final bool isConnected;
+  final double threshold;
+  final int selectedIndex;
+  final String? errorMessage;
+
+  const TradeState({
+    this.trades = const [],
+    this.isLoading = false,
+    this.isConnected = false,
+    this.threshold = 20000000,
+    this.selectedIndex = 0,
+    this.errorMessage,
+  });
+
+  TradeState copyWith({
+    List<Trade>? trades,
+    bool? isLoading,
+    bool? isConnected,
+    double? threshold,
+    int? selectedIndex,
+    String? errorMessage,
+  }) {
+    return TradeState(
+      trades: trades ?? this.trades,
+      isLoading: isLoading ?? this.isLoading,
+      isConnected: isConnected ?? this.isConnected,
+      threshold: threshold ?? this.threshold,
+      selectedIndex: selectedIndex ?? this.selectedIndex,
+      errorMessage: errorMessage,
+    );
+  }
+}
+
+/// Trade 화면 전용 ViewModel
+class TradeController extends StateNotifier<TradeState> {
+  final TradeUsecase _usecase;
+  final Ref _ref;  // 🔥 추가: Repository 접근을 위한 ref
+  StreamSubscription<Result<List<Trade>, AppException>>? _subscription;
+
+  TradeController(this._usecase, this._ref) : super(const TradeState());  // 🔥 수정: ref 매개변수 추가
+
+  /// 임계값 및 인덱스 설정 후 스트림 구독
+  void setThreshold(double threshold, int index, List<String> markets) {
+    // 🔥 추가: Repository의 updateThreshold 호출 (핵심 누락 부분)
+    final repository = _ref.read(repoProvider);
+    repository.updateThreshold(threshold);
+    
+    state = state.copyWith(
+      threshold: threshold,
+      selectedIndex: index,
+      isLoading: true,
+      errorMessage: null,
+    );
+    _subscription?.cancel();
+    _subscription = _usecase
+        .filterTrades(threshold, markets)
+        .listen(_handleResult);
+  }
+
+  void _handleResult(Result<List<Trade>, AppException> result) {
+    result.when(
+      ok: (trades) {
+        state = state.copyWith(
+          trades: trades,
+          isLoading: false,
+          isConnected: true,
+          errorMessage: null,
+        );
+      },
+      err: (e) {
+        state = state.copyWith(
+          isLoading: false,
+          isConnected: false,
+          errorMessage: e.message,
+        );
+      },
+    );
+  }
+
+  /// 재연결/새로고침: markets만 받아서 내부적으로 setThreshold 호출
+  void refresh(List<String> markets) {
+    setThreshold(state.threshold, state.selectedIndex, markets);
+  }
+
+  /// 거래 목록 추가 필터 (시장명)
+  List<Trade> filterByMarket(String? marketFilter) {
+    if (marketFilter == null || marketFilter.isEmpty) {
+      return state.trades;
+    }
+    final upper = marketFilter.toUpperCase();
+    return state.trades.where((t) => t.market.contains(upper)).toList();
+  }
+
+  /// 거래 목록 정렬
+  void sortTrades(String field, bool ascending) {
+    final list = [...state.trades];
+    list.sort((a, b) {
+      dynamic aValue;
+      dynamic bValue;
+      switch (field) {
+        case 'market':
+          aValue = a.market;
+          bValue = b.market;
+          break;
+        case 'price':
+          aValue = a.price;
+          bValue = b.price;
+          break;
+        case 'volume':
+          aValue = a.volume;
+          bValue = b.volume;
+          break;
+        case 'total':
+          aValue = a.total;
+          bValue = b.total;
+          break;
+        case 'timestamp':
+          aValue = a.timestampMs;
+          bValue = b.timestampMs;
+          break;
+        default:
+          aValue = a.timestampMs;
+          bValue = b.timestampMs;
+      }
+      final cmp = aValue is Comparable && bValue is Comparable
+          ? aValue.compareTo(bValue)
+          : 0;
+      return ascending ? cmp : -cmp;
+    });
+    state = state.copyWith(trades: list);
+  }
+
+  /// 사용 가능한 임계값 옵션들
+  List<double> get availableThresholds =>
+    AppConfig.tradeFilters.where((f) => f >= 20000000).toList();
+
+  @override
+  void dispose() {
+    _subscription?.cancel();
+    super.dispose();
+  }
+}
+
+/// Provider 선언
+final tradeControllerProvider =
+    StateNotifierProvider<TradeController, TradeState>((ref) {
+  final usecase = ref.read(usecaseProvider);
+  return TradeController(usecase, ref);  // 🔥 수정: ref도 함께 전달
+});\n\n// ====== lib/presentation/pages/momentary_page.dart ======\n
+\n\n// ====== lib/presentation/pages/trade_page.dart ======\n
+// lib/presentation/pages/trade_page.dart
+
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../core/config/app_config.dart';
+import '../../core/di/trade_provider.dart';
+import '../controllers/trade_controller.dart';
+import '../widgets/trade_tile.dart';
+import '../../shared/widgets/common_app_bar.dart';
+
+class TradePage extends ConsumerWidget {
+  const TradePage({Key? key}) : super(key: key);
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    // Controller and state
+    final controller = ref.read(tradeControllerProvider.notifier);
+    final state = ref.watch(tradeControllerProvider);
+
+    // Markets list
+    final marketsAsync = ref.watch(marketsProvider);
+
+    // When markets load, trigger refresh
+    ref.listen<AsyncValue<List<String>>>(marketsProvider, (prev, next) {
+      next.whenData((markets) => controller.refresh(markets));
+    });
+
+    return Scaffold(
+      appBar: const CommonAppBar(title: '체결 포착'),
+      body: Column(
+        children: [
+          // Threshold slider
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  '최소 거래 금액: ${AppConfig.filterNames[state.threshold] ?? state.threshold.toStringAsFixed(0)}',
+                  style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                ),
+                Slider(
+                  value: state.selectedIndex.toDouble(),
+                  min: 0,
+                  max: (controller.availableThresholds.length - 1).toDouble(),
+                  divisions: controller.availableThresholds.length - 1,
+                  label: AppConfig.filterNames[state.threshold] ?? state.threshold.toStringAsFixed(0),
+                  activeColor: Colors.orange,
+                  inactiveColor: Colors.grey,
+                  onChanged: (v) {
+                    final idx = v.round();
+                    final thresh = controller.availableThresholds[idx];
+                    controller.setThreshold(thresh, idx, marketsAsync.value ?? []);
+                  },
+                ),
+              ],
+            ),
+          ),
+
+          // Trade list
+          Expanded(
+            child: state.isLoading
+                ? const Center(child: CircularProgressIndicator())
+                : state.trades.isEmpty
+                    ? Center(
+                        child: Text(
+                          '포착된 체결이 없습니다.\n(임계값: ${AppConfig.filterNames[state.threshold] ?? state.threshold.toStringAsFixed(0)})',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(color: Theme.of(context).hintColor, fontSize: 16),
+                        ),
+                      )
+                    : ListView.builder(
+                        padding: const EdgeInsets.all(16),
+                        itemCount: state.trades.length,
+                        itemBuilder: (_, i) => TradeTile(trade: state.trades[i]),
+                      ),
+          ),
+        ],
+      ),
+    );
+  }
+}\n\n// ====== lib/presentation/pages/volume_page.dart ======\n
+\n\n// ====== lib/presentation/pages/surge_page.dart ======\n
+\n\n// ====== lib/presentation/pages/settings_page.dart ======\n
+// lib/presentation/pages/settings_page.dart
+
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
+import '../controllers/settings_controller.dart';
+import '../widgets/theme_mode_segment.dart';
+import '../widgets/slider_position_segment.dart';
+import '../../../shared/widgets/common_app_bar.dart';
+
+class SettingsPage extends ConsumerStatefulWidget {
+  const SettingsPage({Key? key}) : super(key: key);
+  @override
+  ConsumerState<SettingsPage> createState() => _SettingsPageState();
+}
+
+class _SettingsPageState extends ConsumerState<SettingsPage> {
+  static const _pad = EdgeInsets.all(16);
+  static const _bold = TextStyle(fontSize:16, fontWeight: FontWeight.bold);
+
+  @override
+  void initState() {
+    super.initState();
+    // 초기 keep-on 상태 적용
+    final init = ref.read(settingsControllerProvider).keepScreenOn;
+    _applyKeepScreen(on: init);
+  }
+
+  void _applyKeepScreen({required bool on}) {
+    on ? WakelockPlus.enable() : WakelockPlus.disable();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final settings = ref.watch(settingsControllerProvider);
+    final ctrl = ref.read(settingsControllerProvider.notifier);
+
+    return Scaffold(
+      appBar: const CommonAppBar(title: '설정'),
+      body: ListView(
+        padding: _pad,
+        children: [
+          ListTile(
+            title: const Text('화면 모드', style: _bold),
+            trailing: ThemeModeSegment(
+              value: settings.themeMode,
+              onChanged: ctrl.setThemeMode,
+            ),
+          ),
+          SwitchListTile(
+            title: const Text('화면 항상 켜기', style: _bold),
+            value: settings.keepScreenOn,
+            onChanged: (v) {
+              ctrl.setKeepScreenOn(v);
+              _applyKeepScreen(on: v);
+            },
+            activeColor: Colors.orange,
+          ),
+          ListTile(
+            title: const Text('슬라이더 위치', style: _bold),
+            trailing: SliderPositionSegment(
+              value: settings.sliderPosition,
+              onChanged: ctrl.setSliderPosition,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+\n\n// ====== lib/presentation/widgets/momentary_tile.dart ======\n
+\n\n// ====== lib/presentation/widgets/slider_position_segment.dart ======\n
+import 'package:flutter/material.dart';
+import '../../domain/entities/app_settings.dart'; // SliderPosition enum
+
+class SliderPositionSegment extends StatelessWidget {
+  final SliderPosition value;
+  final ValueChanged<SliderPosition> onChanged;
+
+  const SliderPositionSegment({
+    super.key,
+    required this.value,
+    required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return SegmentedButton<SliderPosition>(
+      segments: [
+        ButtonSegment(
+          value: SliderPosition.top,
+          icon: _buildSliderIcon(isTop: true),
+          label: const Text('위'),
+        ),
+        ButtonSegment(
+          value: SliderPosition.bottom,
+          icon: _buildSliderIcon(isTop: false),
+          label: const Text('아래'),
+        ),
+      ],
+      selected: <SliderPosition>{value},
+      onSelectionChanged: (newSelection) {
+        onChanged(newSelection.first);
+      },
+    );
+  }
+
+  Widget _buildSliderIcon({required bool isTop}) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (isTop) ...[
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(width: 8, height: 8, decoration: const BoxDecoration(shape: BoxShape.circle, color: Colors.orange)),
+              const SizedBox(width: 2),
+              Container(width: 16, height: 2, color: Colors.orange),
+            ],
+          ),
+          const SizedBox(height: 4),
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: List.generate(4, (i) => Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 1),
+              child: Container(width: 4, height: 2, color: Colors.grey),
+            )),
+          ),
+        ] else ...[
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: List.generate(4, (i) => Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 1),
+              child: Container(width: 4, height: 2, color: Colors.grey),
+            )),
+          ),
+          const SizedBox(height: 4),
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(width: 8, height: 8, decoration: const BoxDecoration(shape: BoxShape.circle, color: Colors.orange)),
+              const SizedBox(width: 2),
+              Container(width: 16, height: 2, color: Colors.orange),
+            ],
+          ),
+        ],
+      ],
+    );
+  }
+}
+\n\n// ====== lib/presentation/widgets/trade_tile.dart ======\n
+import 'package:flutter/material.dart';
+import 'package:intl/intl.dart';
+import '../../domain/entities/trade.dart';
+
+class TradeTile extends StatelessWidget {
+  // 포맷터를 static으로 캐싱해 매번 새로 생성하지 않도록 최적화
+  static final _timeFormat = DateFormat('HH:mm:ss');
+  static final _integerFormat = NumberFormat('#,###'); // 정수용
+  static final _decimalFormat = NumberFormat('#,##0.######'); // 소수점용 (최대 6자리)
+  
+  final Trade trade;
+  
+  const TradeTile({Key? key, required this.trade}) : super(key: key);
+  
+  // 🎯 조건부 가격 포맷팅
+  String _formatPrice(double price) {
+    if (price < 1.0) {
+      return _decimalFormat.format(price); // 1원 미만: 소수점 최대 6자리
+    } else {
+      return _integerFormat.format(price); // 1원 이상: 정수 표시
+    }
+  }
+  
+  // 🎯 조건부 거래량 포맷팅
+  String _formatVolume(double volume) {
+    if (volume < 1.0) {
+      return _decimalFormat.format(volume); // 1개 미만: 소수점 최대 6자리
+    } else {
+      return _integerFormat.format(volume); // 1개 이상: 정수 표시
+    }
+  }
+  
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final onSurface = theme.colorScheme.onSurface;
+    final onSurface70 = onSurface.withAlpha((0.7 * 255).round());
+    
+    return Card(
+      elevation: 2,
+      margin: const EdgeInsets.symmetric(vertical: 4),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
+        child: Row(
+          children: [
+            // 🎯 시간 부분: flex 12 (1.2 비율, 17.1%)
+            Expanded(
+              flex: 12,
+              child: Text(
+                _timeFormat.format(trade.timestamp),
+                style: TextStyle(color: onSurface, fontSize: 11),
+                // 시간은 고정 형식이므로 overflow 방지 불필요
+              ),
+            ),
+            
+            // 🔧 티커 부분: flex 18 (1.8 비율, 25.7%)
+            Expanded(
+              flex: 18,
+              child: Text(
+                trade.market.replaceFirst('KRW-', ''),
+                style: TextStyle(
+                  fontWeight: FontWeight.bold,
+                  color: theme.colorScheme.primary,
+                  fontSize: 16,
+                ),
+                overflow: TextOverflow.ellipsis, // 긴 코인명 방지
+                maxLines: 1,
+              ),
+            ),
+            
+            // 🔧 가격/거래량 부분: flex 20 (2.0 비율, 28.6%)
+            Expanded(
+              flex: 20,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  Text(
+                    '${_formatPrice(trade.price)}원', // 🎯 조건부 가격 포맷
+                    style: TextStyle(color: onSurface, fontSize: 14),
+                    overflow: TextOverflow.ellipsis, // 큰 가격 방지
+                    maxLines: 1,
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    '${_formatVolume(trade.volume)} 개', // 🎯 조건부 거래량 포맷
+                    style: TextStyle(color: onSurface70, fontSize: 12),
+                    overflow: TextOverflow.ellipsis, // 큰 거래량 방지
+                    maxLines: 1,
+                  ),
+                ],
+              ),
+            ),
+            
+            // 🔧 총액 부분: flex 20 (2.0 비율, 28.6%)
+            Expanded(
+              flex: 20,
+              child: Align(
+                alignment: Alignment.centerRight,
+                child: Text(
+                  '${_integerFormat.format(trade.total / 10000)}만', // 총액은 항상 정수
+                  style: TextStyle(
+                    fontWeight: FontWeight.bold,
+                    color: trade.isBuy ? Colors.green : Colors.red,
+                    fontSize: 16,
+                  ),
+                  overflow: TextOverflow.ellipsis, // 큰 총액 방지
+                  maxLines: 1,
+                ),
+              ),
+            ),
+            
+            // 아이콘은 고정 크기이므로 변경 없음
+            Icon(
+              trade.isBuy ? Icons.arrow_upward : Icons.arrow_downward,
+              color: trade.isBuy ? Colors.green : Colors.red,
+              size: 16,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}\n\n// ====== lib/presentation/widgets/surge_tile.dart ======\n
+\n\n// ====== lib/presentation/widgets/common_app_bar.dart ======\n
+\n\n// ====== lib/presentation/widgets/volume_tile.dart ======\n
+\n\n// ====== lib/presentation/widgets/theme_mode_segment.dart ======\n
+import 'package:flutter/material.dart';
+
+class ThemeModeSegment extends StatelessWidget {
+  final ThemeMode value;
+  final ValueChanged<ThemeMode> onChanged;
+
+  const ThemeModeSegment({
+    super.key,
+    required this.value,
+    required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return SegmentedButton<ThemeMode>(
+      segments: const [
+        ButtonSegment(
+          value: ThemeMode.light,
+          icon: Icon(Icons.wb_sunny),
+          label: Text('라이트'),
+        ),
+        ButtonSegment(
+          value: ThemeMode.system,
+          icon: Icon(Icons.phone_iphone),
+          label: Text('시스템'),
+        ),
+        ButtonSegment(
+          value: ThemeMode.dark,
+          icon: Icon(Icons.nightlight_round),
+          label: Text('다크'),
+        ),
+      ],
+      selected: <ThemeMode>{value},
+      onSelectionChanged: (newSelection) {
+        onChanged(newSelection.first);
+      },
+    );
+  }
+}

@@ -1,0 +1,63 @@
+platform :ios, '13.0' # iOS 13.0 (Firebase 10.x+ 요구)
+
+ENV['COCOAPODS_DISABLE_STATS'] = 'true'
+
+project 'Runner', {
+  'Debug' => :debug,
+  'Profile' => :release,
+  'Release' => :release,
+}
+
+def flutter_root
+  generated_xcode_build_settings_path = File.expand_path(File.join('..', 'Flutter', 'Generated.xcconfig'), __FILE__)
+  unless File.exist?(generated_xcode_build_settings_path)
+    raise "#{generated_xcode_build_settings_path} must exist. If you're running pod install manually, make sure flutter pub get is executed first"
+  end
+  File.foreach(generated_xcode_build_settings_path) do |line|
+    matches = line.match(/FLUTTER_ROOT\=(.*)/)
+    return matches[1].strip if matches
+  end
+  raise "FLUTTER_ROOT not found in #{generated_xcode_build_settings_path}. Try deleting Generated.xcconfig, then run flutter pub get"
+end
+
+require File.expand_path(File.join('packages', 'flutter_tools', 'bin', 'podhelper'), flutter_root)
+
+flutter_ios_podfile_setup
+
+target 'Runner' do
+  use_frameworks!
+  flutter_install_all_ios_pods(File.dirname(File.realpath(__FILE__)))
+  # Firebase 모듈 (예전 프로젝트 참고, 모듈러 헤더 적용)
+  pod 'Firebase/Analytics', '~> 10.25.0', :modular_headers => true
+  pod 'Firebase/Crashlytics', '~> 10.25.0', :modular_headers => true
+  pod 'Firebase/Messaging', '~> 10.25.0', :modular_headers => true
+
+  target 'RunnerTests' do
+    inherit! :search_paths
+  end
+end
+
+post_install do |installer|
+  installer.pods_project.targets.each do |target|
+    flutter_additional_ios_build_settings(target)
+    target.build_configurations.each do |config|
+      config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '13.0'
+      config.build_settings['BUILD_LIBRARY_FOR_DISTRIBUTION'] = 'YES'
+      config.build_settings['DEFINES_MODULE'] = 'YES'
+      config.build_settings['GCC_PREPROCESSOR_DEFINITIONS'] ||= ['$(inherited)', 'FIRAnalyticsDebugEnabled=1']
+      config.build_settings['ENABLE_BITCODE'] = 'NO'
+      config.build_settings['OTHER_LDFLAGS'] ||= ['$(inherited)', '-framework', 'UserNotifications', '-framework', 'AdSupport']
+      # 예전 프로젝트 참고: 비모듈러 헤더 포함 허용
+      config.build_settings['CLANG_ALLOW_NON_MODULAR_INCLUDES_IN_FRAMEWORK_MODULES'] = 'YES'
+    end
+    # flutter_native_splash PrivacyInfo 제거
+    if target.name == 'Runner' && target.respond_to?(:resources_build_phase)
+      target.resources_build_phase.files.each do |file|
+        if file.respond_to?(:display_name) && file.display_name == 'PrivacyInfo.xcprivacy'
+          file.remove_from_project
+          puts "Removed PrivacyInfo.xcprivacy from #{target.name}"
+        end
+      end
+    end
+  end
+end

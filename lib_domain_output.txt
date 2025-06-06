@@ -1,0 +1,248 @@
+\n\n// ====== lib/domain/repositories/surge_repository.dart ======\n
+\n\n// ====== lib/domain/repositories/momentary_repository.dart ======\n
+\n\n// ====== lib/domain/repositories/settings_repository.dart ======\n
+import 'package:flutter/material.dart';
+import '../entities/app_settings.dart';
+
+abstract class SettingsRepository {
+  /// 현재 앱 설정 가져오기
+  Future<AppSettings> getSettings();
+
+  /// 테마 모드 업데이트
+  Future<void> updateThemeMode(ThemeMode mode);
+
+  /// 화면 항상 켜기 설정 업데이트
+  Future<void> updateKeepScreenOn(bool value);
+
+  /// 슬라이더 위치 업데이트
+  Future<void> updateSliderPosition(SliderPosition position);
+
+  /// 🆕 코인명 표시 방식 업데이트
+  Future<void> updateDisplayMode(DisplayMode mode);
+
+  /// 💰 금액 표시 방식 업데이트
+  Future<void> updateAmountDisplayMode(AmountDisplayMode mode);
+}\n\n// ====== lib/domain/repositories/trade_repository.dart ======\n
+// lib/domain/repositories/trade_repository.dart
+import '../entities/trade.dart';
+
+/// Provides streams of trade data and handles resource cleanup.
+abstract class TradeRepository {
+  /// Streams raw [Trade] events for the given list of market codes.
+  Stream<Trade> watchTrades(List<String> markets);
+  
+  /// Streams lists of [Trade] filtered by a minimum total trade value.
+  /// => markets 파라미터 추가
+  Stream<List<Trade>> watchFilteredTrades(double threshold, List<String> markets);
+  
+  /// Streams aggregated [Trade] events over a merge window.
+  Stream<Trade> watchAggregatedTrades();
+  
+  /// 🎯 새로 추가: 동적 임계값 업데이트
+  void updateThreshold(double threshold);
+  
+  /// Releases any held resources (e.g., WebSocket connections, Hive boxes).
+  Future<void> dispose();
+}\n\n// ====== lib/domain/repositories/volume_repository.dart ======\n
+\n\n// ====== lib/domain/usecases/momentary_usecase.dart ======\n
+\n\n// ====== lib/domain/usecases/settings_usecase.dart ======\n
+// lib/domain/usecases/settings_usecase.dart
+import 'package:flutter/material.dart';
+import '../entities/app_settings.dart';
+import '../repositories/settings_repository.dart';
+
+/// 앱 설정 관련 비즈니스 로직
+class SettingsUsecase {
+  final SettingsRepository _repo;
+
+  SettingsUsecase(this._repo);
+
+  Future<AppSettings> getSettings() {
+    return _repo.getSettings();
+  }
+
+  Future<void> updateThemeMode(ThemeMode mode) {
+    return _repo.updateThemeMode(mode);
+  }
+
+  Future<void> updateKeepScreenOn(bool on) {
+    return _repo.updateKeepScreenOn(on);
+  }
+
+  Future<void> updateSliderPosition(SliderPosition pos) {
+    return _repo.updateSliderPosition(pos);
+  }
+
+  /// 🆕 코인명 표시 방식 업데이트
+  Future<void> updateDisplayMode(DisplayMode mode) {
+    return _repo.updateDisplayMode(mode);
+  }
+
+  /// 💰 금액 표시 방식 업데이트
+  Future<void> updateAmountDisplayMode(AmountDisplayMode mode) {
+    return _repo.updateAmountDisplayMode(mode);
+  }
+}\n\n// ====== lib/domain/usecases/volume_usecase.dart ======\n
+\n\n// ====== lib/domain/usecases/surge_usecase.dart ======\n
+\n\n// ====== lib/domain/usecases/trade_usecase.dart ======\n
+// lib/domain/usecases/trade_usecase.dart
+
+import 'dart:async';
+import '../../core/error/app_exception.dart';
+import '../../core/extensions/result.dart';
+import '../entities/trade.dart';
+import '../repositories/trade_repository.dart';
+
+/// Trade 관련 비즈니스 로직을 제공하는 UseCase
+class TradeUsecase {
+  final TradeRepository _repository;
+
+  TradeUsecase(this._repository);
+
+  /// threshold와 markets를 기준으로 필터링된 거래 목록 스트림 반환
+  Stream<Result<List<Trade>, AppException>> filterTrades(
+    double threshold,
+    List<String> markets,
+  ) {
+    return _repository
+        .watchFilteredTrades(threshold, markets)
+        .transform(_wrap<List<Trade>>('Filter trades failed'));
+  }
+
+  /// 집계된 거래 스트림 반환
+  Stream<Result<Trade, AppException>> aggregateTrades() {
+    return _repository
+        .watchAggregatedTrades()
+        .transform(_wrap<Trade>('Aggregate trades failed'));
+  }
+
+  StreamTransformer<T, Result<T, AppException>> _wrap<T>(String errorMsg) {
+    return StreamTransformer.fromHandlers(
+      handleData: (data, sink) => sink.add(Ok(data)),
+      handleError: (error, stack, sink) =>
+          sink.add(Err(AppException('$errorMsg: $error'))),
+    );
+  }
+}\n\n// ====== lib/domain/services/trade_filter_service.dart ======\n
+\n\n// ====== lib/domain/entities/app_settings.dart ======\n
+import 'package:flutter/material.dart';
+import 'package:equatable/equatable.dart';
+
+/// 슬라이더 위치를 표현하는 enum
+enum SliderPosition { top, bottom }
+
+/// 🆕 코인명 표시 방식을 표현하는 enum
+enum DisplayMode {
+  ticker, // BTC, ETH, XRP
+  korean, // 비트코인, 이더리움, 리플
+  english, // Bitcoin, Ethereum, Ripple
+}
+
+/// 💰 금액 표시 방식을 표현하는 enum
+enum AmountDisplayMode {
+  number, // 1,234만 (숫자)
+  icon,   // 💵 (아이콘)
+}
+
+class AppSettings extends Equatable {
+  final ThemeMode themeMode;
+  final bool keepScreenOn;
+  final SliderPosition sliderPosition;
+  final DisplayMode displayMode; // 🆕 코인명 표시 방식 추가
+  final AmountDisplayMode amountDisplayMode; // 💰 금액 표시 방식 추가
+
+  const AppSettings({
+    this.themeMode = ThemeMode.system,
+    this.keepScreenOn = false,
+    this.sliderPosition = SliderPosition.top,
+    this.displayMode = DisplayMode.ticker, // 🆕 기본값: 티커
+    this.amountDisplayMode = AmountDisplayMode.number, // 💰 기본값: 숫자
+  });
+
+  AppSettings copyWith({
+    ThemeMode? themeMode,
+    bool? keepScreenOn,
+    SliderPosition? sliderPosition,
+    DisplayMode? displayMode, // 🆕 파라미터 추가
+    AmountDisplayMode? amountDisplayMode, // 💰 파라미터 추가
+  }) =>
+      AppSettings(
+        themeMode: themeMode ?? this.themeMode,
+        keepScreenOn: keepScreenOn ?? this.keepScreenOn,
+        sliderPosition: sliderPosition ?? this.sliderPosition,
+        displayMode: displayMode ?? this.displayMode, // 🆕 복사 로직 추가
+        amountDisplayMode: amountDisplayMode ?? this.amountDisplayMode, // 💰 복사 로직 추가
+      );
+
+  @override
+  List<Object?> get props => [
+        themeMode,
+        keepScreenOn,
+        sliderPosition,
+        displayMode, // 🆕 equality 비교에 추가
+        amountDisplayMode, // 💰 equality 비교에 추가
+      ];
+}\n\n// ====== lib/domain/entities/momentary.dart ======\n
+\n\n// ====== lib/domain/entities/trade.dart ======\n
+import 'package:equatable/equatable.dart';
+
+/// 순수 도메인 모델: 비즈니스 로직만 포함
+class Trade extends Equatable {
+  /// 시장 코드 (예: "KRW-BTC")
+  final String market;
+
+  /// 체결 단가
+  final double price;
+
+  /// 체결 수량
+  final double volume;
+
+  /// 'BID' 또는 'ASK'
+  final String side;
+
+  /// 가격 변동량
+  final double changePrice;
+
+  /// 변동 상태 ('RISE'/'FALL'/'EVEN')
+  final String changeState;
+
+  /// UTC 밀리초 타임스탬프
+  final int timestampMs;
+
+  /// 중복 제거용 고유 ID
+  final String sequentialId;
+
+  const Trade({
+    required this.market,
+    required this.price,
+    required this.volume,
+    required this.side,
+    required this.changePrice,
+    required this.changeState,
+    required this.timestampMs,
+    required this.sequentialId,
+  });
+
+  @override
+  List<Object?> get props => [
+        market,
+        price,
+        volume,
+        side,
+        changePrice,
+        changeState,
+        timestampMs,
+        sequentialId,
+      ];
+
+  /// 총 체결 금액
+  double get total => price * volume;
+
+  /// 매수 여부
+  bool get isBuy => side == 'BID';
+
+  /// DateTime 변환
+  DateTime get timestamp => DateTime.fromMillisecondsSinceEpoch(timestampMs);
+}
+\n\n// ====== lib/domain/entities/surge.dart ======\n
+\n\n// ====== lib/domain/entities/volume.dart ======\n

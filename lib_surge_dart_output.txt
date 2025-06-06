@@ -1,0 +1,498 @@
+\n\n// ====== lib/features/surge/domain/usecases/watch_surge.dart ======\n
+import 'dart:async';
+import '../../../../core/bridge/signal_bus.dart';
+import '../../../../core/config/app_config.dart';
+import '../entities/surge_item.dart';
+
+class WatchSurgeUseCase {
+  final SignalBus _signalBus;
+  final Duration window;
+  final double percentThreshold;
+  
+  WatchSurgeUseCase(
+    this._signalBus, {
+    this.window = const Duration(minutes: 1),
+    this.percentThreshold = 1.1, // +1.1%
+  });
+
+  Stream<SurgeItem> execute() {
+    final controller = StreamController<SurgeItem>.broadcast();
+    
+    // 코인별 최근 가격 기록 저장
+    final priceHistory = <String, List<_PricePoint>>{};
+    final detectedSurges = <String>{};
+    
+    // SignalBus로부터 Trade 이벤트 구독
+    final subscription = _signalBus.eventsOfType(SignalEventType.trade).listen((trade) {
+      try {
+        final market = trade['code'] as String? ?? trade['market'] as String?;
+        if (market == null) return;
+        
+        final priceRaw = trade['trade_price'] ?? trade['price'];
+        final price = priceRaw is num 
+          ? priceRaw.toDouble() 
+          : double.tryParse(priceRaw.toString()) ?? 0.0;
+        
+        if (price <= 0) return;
+        
+        final now = DateTime.now();
+        
+        // 이전 가격 데이터가 없으면 초기화
+        if (!priceHistory.containsKey(market)) {
+          priceHistory[market] = [];
+        }
+        
+        // 새 가격 추가
+        priceHistory[market]!.add(_PricePoint(price, now));
+        
+        // window 시간 외 데이터 제거
+        final cutoff = now.subtract(window);
+        priceHistory[market]!.removeWhere((p) => p.timestamp.isBefore(cutoff));
+        
+        // 가격 기록이 충분하지 않으면 건너뜀
+        if (priceHistory[market]!.length < 2) return;
+        
+        // 첫 가격과 현재 가격 비교
+        final basePrice = priceHistory[market]!.first.price;
+        final changePercent = ((price - basePrice) / basePrice) * 100;
+        
+        // 임계값 이상 변동이고, 아직 보고되지 않은 급등이면
+        final surgeKey = '$market-${now.minute}';
+        if (changePercent.abs() >= percentThreshold && !detectedSurges.contains(surgeKey)) {
+          detectedSurges.add(surgeKey);
+          
+          // SurgeItem 생성하여 스트림에 추가
+          final surgeItem = SurgeItem(
+            market: market,
+            currentPrice: price,
+            basePrice: basePrice,
+            changePercent: changePercent,
+            detectedAt: now,
+          );
+          
+          controller.add(surgeItem);
+          
+          // 오래된 감지 레코드 정리 (1시간 이상 된 것)
+          _cleanupDetectedSurges(detectedSurges, now);
+        }
+      } catch (e) {
+        // 오류 무시하고 계속 진행
+      }
+    });
+    
+    // 컨트롤러 닫힐 때 구독 취소
+    controller.onCancel = () {
+      subscription.cancel();
+      priceHistory.clear();
+      detectedSurges.clear();
+    };
+    
+    return controller.stream;
+  }
+  
+  // 오래된 감지 기록 정리
+  void _cleanupDetectedSurges(Set<String> detectedSurges, DateTime now) {
+    final hour = now.hour;
+    final toRemove = <String>[];
+    
+    for (final key in detectedSurges) {
+      final parts = key.split('-');
+      if (parts.length > 1) {
+        final minuteStr = parts.last;
+        final minute = int.tryParse(minuteStr);
+        if (minute != null && (minute + 60) % 60 == now.minute) {
+          toRemove.add(key);
+        }
+      }
+    }
+    
+    for (final key in toRemove) {
+      detectedSurges.remove(key);
+    }
+  }
+}
+
+// 내부용 가격 데이터 클래스
+class _PricePoint {
+  final double price;
+  final DateTime timestamp;
+  
+  _PricePoint(this.price, this.timestamp);
+}\n\n// ====== lib/features/surge/domain/entities/surge_item.dart ======\n
+import 'package:equatable/equatable.dart';
+
+class SurgeItem extends Equatable {
+  final String market;
+  final double currentPrice;
+  final double basePrice;
+  final double changePercent;
+  final DateTime detectedAt;
+  
+  // 거래방향 (급등/급락)
+  bool get isRising => changePercent > 0;
+  
+  const SurgeItem({
+    required this.market,
+    required this.currentPrice,
+    required this.basePrice,
+    required this.changePercent,
+    required this.detectedAt,
+  });
+  
+  @override
+  List<Object?> get props => [
+    market, 
+    currentPrice, 
+    basePrice, 
+    changePercent, 
+    detectedAt
+  ];
+  
+  // 복사 메서드
+  SurgeItem copyWith({
+    String? market,
+    double? currentPrice,
+    double? basePrice,
+    double? changePercent,
+    DateTime? detectedAt,
+  }) {
+    return SurgeItem(
+      market: market ?? this.market,
+      currentPrice: currentPrice ?? this.currentPrice,
+      basePrice: basePrice ?? this.basePrice,
+      changePercent: changePercent ?? this.changePercent,
+      detectedAt: detectedAt ?? this.detectedAt,
+    );
+  }
+}\n\n// ====== lib/features/surge/presentation/providers/surge_provider.dart ======\n
+import 'dart:async';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../../../core/bridge/signal_bus.dart';
+import '../../../../core/config/app_config.dart';
+import '../../domain/entities/surge_item.dart';
+import '../../domain/usecases/watch_surge.dart';
+
+// 급등 감지 임계값을 위한 Provider
+final surgeThresholdProvider = StateProvider<double>((ref) => 
+    AppConfig.surgeThresholdPercent);
+
+// SurgeUseCase Provider
+final surgeUseCaseProvider = Provider<WatchSurgeUseCase>((ref) {
+  final signalBus = SignalBus();
+  return WatchSurgeUseCase(
+    signalBus,
+    percentThreshold: ref.watch(surgeThresholdProvider),
+  );
+});
+
+// 급등 항목 상태 관리 Notifier
+class SurgeNotifier extends AutoDisposeAsyncNotifier<List<SurgeItem>> {
+  StreamSubscription<SurgeItem>? _subscription;
+  
+  @override
+  FutureOr<List<SurgeItem>> build() async {
+    ref.onDispose(() {
+      _subscription?.cancel();
+    });
+    
+    final useCase = ref.watch(surgeUseCaseProvider);
+    final items = <SurgeItem>[];
+    
+    _subscription = useCase.execute().listen(
+      (surgeItem) {
+        items.insert(0, surgeItem);
+        
+        // 최대 100개로 제한
+        if (items.length > 100) {
+          items.removeLast();
+        }
+        
+        state = AsyncData(List.unmodifiable(items));
+      },
+      onError: (error, stackTrace) {
+        state = AsyncError(error, stackTrace);
+      }
+    );
+    
+    return items;
+  }
+  
+  // 특정 코인의 급등 항목만 필터링
+  List<SurgeItem> getByMarket(String market) {
+    if (state.value == null) return [];
+    return state.value!.where((item) => item.market == market).toList();
+  }
+  
+  // 급등 임계값 변경
+  void setThreshold(double newThreshold) {
+    ref.read(surgeThresholdProvider.notifier).state = newThreshold;
+    
+    // 임계값 변경 시 UseCase 다시 빌드 (Provider 의존성에 의해 자동으로 처리됨)
+  }
+  
+  // 모든 데이터 지우기
+  void clear() {
+    state = const AsyncData([]);
+  }
+}
+
+// 급등 Provider
+final surgeProvider = 
+    AutoDisposeAsyncNotifierProvider<SurgeNotifier, List<SurgeItem>>(
+        SurgeNotifier.new);
+
+// 상승만 필터링한 Provider
+final risingProvider = Provider<List<SurgeItem>>((ref) {
+  final surgeAsync = ref.watch(surgeProvider);
+  return surgeAsync.maybeWhen(
+    data: (items) => items.where((item) => item.isRising).toList(),
+    orElse: () => [],
+  );
+});
+
+// 하락만 필터링한 Provider
+final fallingProvider = Provider<List<SurgeItem>>((ref) {
+  final surgeAsync = ref.watch(surgeProvider);
+  return surgeAsync.maybeWhen(
+    data: (items) => items.where((item) => !item.isRising).toList(),
+    orElse: () => [],
+  );
+});\n\n// ====== lib/features/surge/presentation/pages/surge_page.dart ======\n
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../../../shared/widgets/common_app_bar.dart';
+import '../providers/surge_provider.dart';
+import '../widgets/surge_tile.dart';
+
+class SurgePage extends ConsumerWidget {
+  const SurgePage({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final surgeAsync = ref.watch(surgeProvider);
+
+    return Scaffold(
+      appBar: const CommonAppBar(title: '급등락 포착'),
+      body: surgeAsync.when(
+        data: (items) {
+          if (items.isEmpty) {
+            return const Center(
+              child: Text(
+                '포착된 급등락이 없습니다.',
+                style: TextStyle(color: Colors.grey),
+              ),
+            );
+          }
+
+          return ListView.builder(
+            itemCount: items.length,
+            padding: const EdgeInsets.all(16.0),
+            itemBuilder: (context, index) => SurgeTile(
+              item: items[index],
+              key: ValueKey(items[index].market + items[index].detectedAt.toString()),
+            ),
+          );
+        },
+        loading: () => const Center(child: CircularProgressIndicator()),
+        error: (error, stack) => Center(
+          child: Padding(
+            padding: const EdgeInsets.all(16.0),
+            child: Text(
+              '오류가 발생했습니다: $error',
+              style: const TextStyle(color: Colors.red),
+              textAlign: TextAlign.center,
+            ),
+          ),
+        ),
+      ),
+      floatingActionButton: FloatingActionButton(
+        onPressed: () {
+          // 임계값 설정 다이얼로그 표시
+          _showThresholdDialog(context, ref);
+        },
+        child: const Icon(Icons.tune),
+        tooltip: '급등락 기준 설정',
+      ),
+    );
+  }
+  
+  // 임계값 설정 다이얼로그
+  Future<void> _showThresholdDialog(BuildContext context, WidgetRef ref) async {
+    final currentThreshold = ref.read(surgeThresholdProvider);
+    double newThreshold = currentThreshold;
+    
+    return showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('급등락 감지 기준 설정'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text('급등락 감지를 위한 변동률(%) 기준을 설정하세요.'),
+            const SizedBox(height: 16),
+            StatefulBuilder(
+              builder: (context, setState) => Column(
+                children: [
+                  Text('현재 값: ${newThreshold.toStringAsFixed(1)}%'),
+                  Slider(
+                    value: newThreshold,
+                    min: 0.5,
+                    max: 5.0,
+                    divisions: 45,
+                    label: '${newThreshold.toStringAsFixed(1)}%',
+                    onChanged: (value) {
+                      setState(() {
+                        newThreshold = value;
+                      });
+                    },
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('취소'),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              ref.read(surgeProvider.notifier).setThreshold(newThreshold);
+              Navigator.of(context).pop();
+            },
+            child: const Text('설정'),
+          ),
+        ],
+      ),
+    );
+  }
+}\n\n// ====== lib/features/surge/presentation/widgets/surge_tile.dart ======\n
+import 'package:flutter/material.dart';
+import 'package:intl/intl.dart';
+import '../../domain/entities/surge_item.dart';
+
+class SurgeTile extends StatelessWidget {
+  final SurgeItem item;
+  
+  const SurgeTile({
+    Key? key,
+    required this.item,
+  }) : super(key: key);
+  
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final numberFormat = NumberFormat('#,###');
+    
+    // 변동률에 따른 색상 결정
+    final changeColor = item.changePercent >= 0 ? Colors.green : Colors.red;
+    final changeIcon = item.changePercent >= 0 
+        ? const Icon(Icons.arrow_upward, size: 16, color: Colors.green)
+        : const Icon(Icons.arrow_downward, size: 16, color: Colors.red);
+    
+    return Card(
+      elevation: 2,
+      margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 0),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // 상단: 코인명 + 시간
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                Text(
+                  item.market,
+                  style: TextStyle(
+                    fontWeight: FontWeight.bold,
+                    fontSize: 16,
+                    color: theme.colorScheme.primary,
+                  ),
+                ),
+                Text(
+                  DateFormat('HH:mm:ss').format(item.detectedAt),
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: theme.colorScheme.onSurface.withOpacity(0.6),
+                  ),
+                ),
+              ],
+            ),
+            
+            const SizedBox(height: 8),
+            
+            // 하단: 가격 정보 + 변동률
+            Row(
+              children: [
+                // 기준가
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      '기준가',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                    Text(
+                      numberFormat.format(item.basePrice),
+                      style: const TextStyle(
+                        fontSize: 14,
+                      ),
+                    ),
+                  ],
+                ),
+                
+                const SizedBox(width: 12),
+                
+                // 현재가
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Text(
+                      '현재가',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                    Text(
+                      numberFormat.format(item.currentPrice),
+                      style: const TextStyle(
+                        fontSize: 14,
+                      ),
+                    ),
+                  ],
+                ),
+                
+                const Spacer(),
+                
+                // 변동률
+                Row(
+                  children: [
+                    changeIcon,
+                    const SizedBox(width: 4),
+                    Text(
+                      '${item.changePercent.abs().toStringAsFixed(2)}%',
+                      style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                        color: changeColor,
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}

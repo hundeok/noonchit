@@ -1,0 +1,111 @@
+Analyzing noonchit...                                           
+
+warning • Unused import: '../../domain/entities/app_settings.dart' • lib/core/di/trade_provider.dart:13:8 • unused_import
+   info • Unnecessary braces in a string interpolation • lib/core/di/trade_provider.dart:82:64 • unnecessary_brace_in_string_interps
+   info • Unnecessary braces in a string interpolation • lib/core/di/trade_provider.dart:128:23 • unnecessary_brace_in_string_interps
+  error • The name 'WsStatus' isn't a type, so it can't be used as a type argument • lib/core/di/websocket_provider.dart:59:40 • non_type_as_type_argument
+  error • Undefined name 'WsStatus' • lib/core/di/websocket_provider.dart:59:59 • undefined_identifier
+  error • The named parameter 'onStatusChange' isn't defined • lib/core/di/websocket_provider.dart:91:5 • undefined_named_parameter
+  error • Undefined name 'WsStatus' • lib/core/di/websocket_provider.dart:98:14 • undefined_identifier
+  error • Undefined name 'WsStatus' • lib/core/di/websocket_provider.dart:104:14 • undefined_identifier
+  error • Undefined name 'WsStatus' • lib/core/di/websocket_provider.dart:113:14 • undefined_identifier
+  error • Undefined name 'WsStatus' • lib/core/di/websocket_provider.dart:119:14 • undefined_identifier
+warning • Unused import: 'dart:async' • lib/core/navigation/app_router.dart:1:8 • unused_import
+warning • Unused import: 'package:firebase_messaging/firebase_messaging.dart' • lib/core/navigation/app_router.dart:5:8 • unused_import
+warning • Unused import: '../di/app_providers.dart' • lib/core/navigation/app_router.dart:8:8 • unused_import
+   info • The private field _period could be 'final' • lib/core/network/api_client.dart:166:12 • prefer_final_fields
+warning • The value of the local variable 'now' isn't used • lib/core/network/api_client.dart:265:11 • unused_local_variable
+   info • The constant name 'DEFAULT' isn't a lowerCamelCase identifier • lib/core/network/websocket/base_ws_client.dart:11:3 • constant_identifier_names
+   info • The constant name 'SIMPLE' isn't a lowerCamelCase identifier • lib/core/network/websocket/base_ws_client.dart:13:3 • constant_identifier_names
+  error • Undefined class 'AdaptiveBackoff' • lib/core/network/websocket/base_ws_client.dart:26:9 • undefined_class
+  error • The method 'AdaptiveBackoff' isn't defined for the type 'BaseWsClient' • lib/core/network/websocket/base_ws_client.dart:26:36 • undefined_method
+  error • The method 'pingDefault' isn't defined for the type 'WebSocket' • lib/core/network/websocket/base_ws_client.dart:133:21 • undefined_method
+  error • Missing concrete implementations of 'BaseWsClient.getSubscriptionType', 'BaseWsClient.getTicketPrefix', 'BaseWsClient.getWebSocketUrl', and 'BaseWsClient.processMessage' • lib/core/network/websocket/candle_ws_client.dart:9:7 • non_abstract_class_inherits_abstract_member
+  error • The type 'BaseWsClient' is declared with 0 type parameters, but 1 type arguments were given • lib/core/network/websocket/candle_ws_client.dart:9:30 • wrong_number_of_type_arguments
+  error • Undefined class 'WsStatus' • lib/core/network/websocket/candle_ws_client.dart:12:19 • undefined_class
+  error • The named parameter 'url' isn't defined • lib/core/network/websocket/candle_ws_client.dart:14:11 • undefined_named_parameter
+  error • The named parameter 'onStatusChange' isn't defined • lib/core/network/websocket/candle_ws_client.dart:15:11 • undefined_named_parameter
+  error • The named parameter 'decode' isn't defined • lib/core/network/websocket/candle_ws_client.dart:16:11 • undefined_named_parameter
+  error • The getter 'decodeJsonList' isn't defined for the type 'BaseWsClient' • lib/core/network/websocket/candle_ws_client.dart:16:32 • undefined_getter
+  error • The named parameter 'encodeSubscribe' isn't defined • lib/core/network/websocket/candle_ws_client.dart:17:11 • undefined_named_parameter
+  error • Missing concrete implementations of 'BaseWsClient.getSubscriptionType', 'BaseWsClient.getTicketPrefix', 'BaseWsClient.getWebSocketUrl', and 'BaseWsClient.processMessage' • lib/core/network/websocket/orderbook_ws_client.dart:8:7 • non_abstract_class_inherits_abstract_member
+  error • The type 'BaseWsClient' is declared with 0 type parameters, but 1 type arguments were given • lib/core/network/websocket/orderbook_ws_client.dart:8:33 • wrong_number_of_type_arguments
+  error • Undefined class 'WsStatus' • lib/core/network/websocket/orderbook_ws_client.dart:9:36 • undefined_class
+  error • The named parameter 'url' isn't defined • lib/core/network/websocket/orderbook_ws_client.dart:11:11 • undefined_named_parameter
+  error • The named parameter 'onStatusChange' isn't defined • lib/core/network/websocket/orderbook_ws_client.dart:12:11 • undefined_named_parameter
+  error • The named parameter 'decode' isn't defined • lib/core/network/websocket/orderbook_ws_client.dart:13:11 • undefined_named_parameter
+  error • The getter 'decodeJsonList' isn't defined for the type 'BaseWsClient' • lib/core/network/websocket/orderbook_ws_client.dart:13:32 • undefined_getter
+  error • The named parameter 'encodeSubscribe' isn't defined • lib/core/network/websocket/orderbook_ws_client.dart:14:11 • undefined_named_parameter
+  error • Missing concrete implementations of 'BaseWsClient.getSubscriptionType', 'BaseWsClient.getTicketPrefix', 'BaseWsClient.getWebSocketUrl', and 'BaseWsClient.processMessage' • lib/core/network/websocket/ticker_ws_client.dart:8:7 • non_abstract_class_inherits_abstract_member
+  error • The type 'BaseWsClient' is declared with 0 type parameters, but 1 type arguments were given • lib/core/network/websocket/ticker_ws_client.dart:8:30 • wrong_number_of_type_arguments
+  error • Undefined class 'WsStatus' • lib/core/network/websocket/ticker_ws_client.dart:9:33 • undefined_class
+  error • The named parameter 'url' isn't defined • lib/core/network/websocket/ticker_ws_client.dart:11:11 • undefined_named_parameter
+  error • The named parameter 'onStatusChange' isn't defined • lib/core/network/websocket/ticker_ws_client.dart:12:11 • undefined_named_parameter
+  error • The named parameter 'decode' isn't defined • lib/core/network/websocket/ticker_ws_client.dart:13:11 • undefined_named_parameter
+  error • The getter 'decodeJsonList' isn't defined for the type 'BaseWsClient' • lib/core/network/websocket/ticker_ws_client.dart:13:32 • undefined_getter
+  error • The named parameter 'encodeSubscribe' isn't defined • lib/core/network/websocket/ticker_ws_client.dart:14:11 • undefined_named_parameter
+warning • Unused import: 'dart:convert' • lib/core/network/websocket/trade_ws_client.dart:2:8 • unused_import
+   info • Unnecessary braces in a string interpolation • lib/core/network/websocket/trade_ws_client.dart:22:28 • unnecessary_brace_in_string_interps
+  error • The named parameter 'changeState' is required, but there's no corresponding argument • lib/core/network/websocket/trade_ws_client.dart:68:14 • missing_required_argument
+  error • The named parameter 'price' is required, but there's no corresponding argument • lib/core/network/websocket/trade_ws_client.dart:68:14 • missing_required_argument
+  error • The named parameter 'side' is required, but there's no corresponding argument • lib/core/network/websocket/trade_ws_client.dart:68:14 • missing_required_argument
+  error • The named parameter 'timestampMs' is required, but there's no corresponding argument • lib/core/network/websocket/trade_ws_client.dart:68:14 • missing_required_argument
+  error • The named parameter 'volume' is required, but there's no corresponding argument • lib/core/network/websocket/trade_ws_client.dart:68:14 • missing_required_argument
+  error • The named parameter 'tradeDateUtc' isn't defined • lib/core/network/websocket/trade_ws_client.dart:70:9 • undefined_named_parameter
+  error • The named parameter 'tradeTimeUtc' isn't defined • lib/core/network/websocket/trade_ws_client.dart:71:9 • undefined_named_parameter
+  error • The named parameter 'timestamp' isn't defined • lib/core/network/websocket/trade_ws_client.dart:72:9 • undefined_named_parameter
+  error • The named parameter 'tradePrice' isn't defined • lib/core/network/websocket/trade_ws_client.dart:73:9 • undefined_named_parameter
+  error • The named parameter 'tradeVolume' isn't defined • lib/core/network/websocket/trade_ws_client.dart:74:9 • undefined_named_parameter
+  error • The named parameter 'askBid' isn't defined • lib/core/network/websocket/trade_ws_client.dart:75:9 • undefined_named_parameter
+  error • The named parameter 'prevClosingPrice' isn't defined • lib/core/network/websocket/trade_ws_client.dart:76:9 • undefined_named_parameter
+  error • The named parameter 'change' isn't defined • lib/core/network/websocket/trade_ws_client.dart:77:9 • undefined_named_parameter
+  error • The named parameter 'changeRate' isn't defined • lib/core/network/websocket/trade_ws_client.dart:79:9 • undefined_named_parameter
+  error • The argument type 'int?' can't be assigned to the parameter type 'String'.  • lib/core/network/websocket/trade_ws_client.dart:81:23 • argument_type_not_assignable
+  error • The named parameter 'streamType' isn't defined • lib/core/network/websocket/trade_ws_client.dart:82:9 • undefined_named_parameter
+  error • The getter 'tradePrice' isn't defined for the type 'Trade' • lib/core/network/websocket/trade_ws_client.dart:103:75 • undefined_getter
+  error • The getter 'stream' isn't defined for the type 'TradeWsClient' • lib/data/datasources/trade_remote_ds.dart:60:20 • undefined_getter
+warning • The value of the local variable 'currentIndex' isn't used • lib/presentation/pages/main_page.dart:88:11 • unused_local_variable
+   info • The import of '../../domain/entities/app_settings.dart' is unnecessary because all of the used elements are also provided by the import of '../../core/di/app_providers.dart' • lib/presentation/pages/settings_page.dart:5:8 • unnecessary_import
+  error • Undefined class 'WsStatus' • lib/shared/widgets/ws_status_indicator.dart:32:64 • undefined_class
+  error • The body might complete normally, causing 'null' to be returned, but the return type, 'Widget', is a potentially non-nullable type • lib/shared/widgets/ws_status_indicator.dart:87:10 • body_might_complete_normally
+  error • Undefined class 'WsStatus' • lib/shared/widgets/ws_status_indicator.dart:87:25 • undefined_class
+  error • Undefined name 'WsStatus' • lib/shared/widgets/ws_status_indicator.dart:89:12 • undefined_identifier
+  error • Undefined name 'WsStatus' • lib/shared/widgets/ws_status_indicator.dart:98:12 • undefined_identifier
+  error • Undefined name 'WsStatus' • lib/shared/widgets/ws_status_indicator.dart:107:12 • undefined_identifier
+  error • Undefined name 'WsStatus' • lib/shared/widgets/ws_status_indicator.dart:116:12 • undefined_identifier
+  error • Undefined name 'WsStatus' • lib/shared/widgets/ws_status_indicator.dart:125:12 • undefined_identifier
+  error • Undefined name 'WsStatus' • lib/shared/widgets/ws_status_indicator.dart:134:12 • undefined_identifier
+  error • Undefined name 'WsStatus' • lib/shared/widgets/ws_status_indicator.dart:135:12 • undefined_identifier
+  error • Undefined name 'WsStatus' • lib/shared/widgets/ws_status_indicator.dart:139:45 • undefined_identifier
+  error • Undefined name 'WsStatus' • lib/shared/widgets/ws_status_indicator.dart:144:12 • undefined_identifier
+  error • Missing concrete implementations of 'BaseWsClient.getSubscriptionType', 'BaseWsClient.getTicketPrefix', 'BaseWsClient.getWebSocketUrl', and 'BaseWsClient.processMessage' • test/core/network/websocket/base_ws_client_test.dart:6:7 • non_abstract_class_inherits_abstract_member
+  error • The type 'BaseWsClient' is declared with 0 type parameters, but 1 type arguments were given • test/core/network/websocket/base_ws_client_test.dart:6:29 • wrong_number_of_type_arguments
+  error • The named parameter 'url' isn't defined • test/core/network/websocket/base_ws_client_test.dart:9:11 • undefined_named_parameter
+  error • The named parameter 'decode' isn't defined • test/core/network/websocket/base_ws_client_test.dart:10:11 • undefined_named_parameter
+  error • The named parameter 'encodeSubscribe' isn't defined • test/core/network/websocket/base_ws_client_test.dart:11:11 • undefined_named_parameter
+  error • The method 'encodeSubscribe' isn't defined for the type 'CandleWsClient' • test/core/network/websocket/candle_ws_client_test.dart:12:30 • undefined_method
+  error • The method 'encodeSubscribe' isn't defined for the type 'CandleWsClient' • test/core/network/websocket/candle_ws_client_test.dart:24:30 • undefined_method
+  error • The method 'decode' isn't defined for the type 'CandleWsClient' • test/core/network/websocket/candle_ws_client_test.dart:33:27 • undefined_method
+  error • The method 'decode' isn't defined for the type 'CandleWsClient' • test/core/network/websocket/candle_ws_client_test.dart:38:27 • undefined_method
+  error • The method 'encodeSubscribe' isn't defined for the type 'OrderbookWsClient' • test/core/network/websocket/orderbook_ws_client_test.dart:12:30 • undefined_method
+  error • The method 'encodeSubscribe' isn't defined for the type 'OrderbookWsClient' • test/core/network/websocket/orderbook_ws_client_test.dart:21:31 • undefined_method
+  error • The method 'decode' isn't defined for the type 'OrderbookWsClient' • test/core/network/websocket/orderbook_ws_client_test.dart:29:27 • undefined_method
+  error • The method 'decode' isn't defined for the type 'OrderbookWsClient' • test/core/network/websocket/orderbook_ws_client_test.dart:33:27 • undefined_method
+  error • The method 'encodeSubscribe' isn't defined for the type 'TickerWsClient' • test/core/network/websocket/ticker_ws_client_test.dart:12:30 • undefined_method
+  error • The method 'encodeSubscribe' isn't defined for the type 'TickerWsClient' • test/core/network/websocket/ticker_ws_client_test.dart:21:31 • undefined_method
+  error • The method 'decode' isn't defined for the type 'TickerWsClient' • test/core/network/websocket/ticker_ws_client_test.dart:29:27 • undefined_method
+  error • The method 'decode' isn't defined for the type 'TickerWsClient' • test/core/network/websocket/ticker_ws_client_test.dart:33:27 • undefined_method
+  error • The method 'encodeSubscribe' isn't defined for the type 'TradeWsClient' • test/core/network/websocket/trade_ws_client_test.dart:12:30 • undefined_method
+  error • The method 'encodeSubscribe' isn't defined for the type 'TradeWsClient' • test/core/network/websocket/trade_ws_client_test.dart:21:31 • undefined_method
+  error • The method 'decode' isn't defined for the type 'TradeWsClient' • test/core/network/websocket/trade_ws_client_test.dart:29:27 • undefined_method
+  error • The method 'decode' isn't defined for the type 'TradeWsClient' • test/core/network/websocket/trade_ws_client_test.dart:33:27 • undefined_method
+  error • The getter 'stream' isn't defined for the type 'MockTradeWsClient' • test/data/datasources/trade_remote_ds_test.dart:53:31 • undefined_getter
+  error • The getter 'stream' isn't defined for the type 'MockTradeWsClient' • test/data/datasources/trade_remote_ds_test.dart:71:31 • undefined_getter
+  error • The getter 'stream' isn't defined for the type 'MockTradeWsClient' • test/data/datasources/trade_remote_ds_test.dart:111:31 • undefined_getter
+  error • The getter 'stream' isn't defined for the type 'MockTradeWsClient' • test/data/datasources/trade_remote_ds_test.dart:134:31 • undefined_getter
+   info • Uses 'await' on an instance of 'void', which is not a subtype of 'Future' • test/integration/websocket_integration_test.dart:32:7 • await_only_futures
+  error • This expression has a type of 'void' so its value can't be used • test/integration/websocket_integration_test.dart:32:20 • use_of_void_result
+  error • The getter 'stream' isn't defined for the type 'TickerWsClient' • test/integration/websocket_integration_test.dart:47:20 • undefined_getter
+   info • Uses 'await' on an instance of 'void', which is not a subtype of 'Future' • test/integration/websocket_integration_test.dart:74:7 • await_only_futures
+  error • This expression has a type of 'void' so its value can't be used • test/integration/websocket_integration_test.dart:74:20 • use_of_void_result
+

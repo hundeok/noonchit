@@ -1,0 +1,521 @@
+\n\n// ====== lib/features/momentary/domain/usecases/watch_momentary.dart ======\n
+import 'dart:async';
+
+import '../../../../core/bridge/signal_bus.dart';
+import '../../../../core/config/app_config.dart';
+import '../entities/momentary_item.dart';
+
+class WatchMomentaryUseCase {
+  final SignalBus _signalBus;
+  final double threshold;
+  final int maxItems;
+  
+  // 내부 상태 저장용 레코드
+  final List<MomentaryItem> _recentTrades = [];
+  final Set<String> _processedIds = {};
+  
+  WatchMomentaryUseCase(
+    this._signalBus, {
+    this.threshold = 2000000.0, // 기본 2백만원
+    this.maxItems = 100,
+  });
+  
+  // 실시간 순간 거래 스트림
+  Stream<List<MomentaryItem>> execute() {
+    final controller = StreamController<List<MomentaryItem>>.broadcast();
+    
+    // 초기 데이터 전송
+    if (_recentTrades.isNotEmpty) {
+      controller.add(_getFilteredTrades());
+    }
+    
+    // 새로운 거래 이벤트 구독
+    final subscription = _signalBus.eventsOfType(SignalEventType.trade).listen(
+      (tradeData) {
+        _processTrade(tradeData);
+        controller.add(_getFilteredTrades());
+      }
+    );
+    
+    // 정리 작업
+    controller.onCancel = () {
+      subscription.cancel();
+    };
+    
+    return controller.stream;
+  }
+  
+  // 거래 데이터 처리
+  void _processTrade(Map<String, dynamic> tradeData) {
+    try {
+      final market = tradeData['code'] as String? ?? tradeData['market'] as String?;
+      if (market == null) return;
+      
+      final priceRaw = tradeData['trade_price'] ?? tradeData['price'];
+      final volumeRaw = tradeData['trade_volume'] ?? tradeData['volume'];
+      
+      // 값 변환
+      final price = priceRaw is num ? priceRaw.toDouble() : 
+                  double.tryParse(priceRaw.toString()) ?? 0.0;
+      final volume = volumeRaw is num ? volumeRaw.toDouble() : 
+                   double.tryParse(volumeRaw.toString()) ?? 0.0;
+      
+      // 거래대금 계산
+      final total = price * volume;
+      
+      // 임계값 이상만 처리
+      if (total < threshold) return;
+      
+      // 타임스탬프 추출
+      final timestampRaw = tradeData['timestamp'] ?? tradeData['timestamp_ms'];
+      final timestamp = timestampRaw is int 
+          ? DateTime.fromMillisecondsSinceEpoch(timestampRaw) 
+          : DateTime.now();
+      
+      // ID 중복 체크
+      final sequentialId = tradeData['sequential_id']?.toString() ?? timestamp.millisecondsSinceEpoch.toString();
+      final tradeKey = '$market-$sequentialId';
+      
+      if (_processedIds.contains(tradeKey)) return;
+      _processedIds.add(tradeKey);
+      
+      // 오래된 ID 정리
+      if (_processedIds.length > 1000) {
+        _processedIds.remove(_processedIds.first);
+      }
+      
+      // 거래 방향 확인
+      final isBuy = tradeData['isBuy'] as bool? ?? 
+                  (tradeData['ask_bid'] == 'BID' || tradeData['side'] == 'BID');
+      
+      // 순간 거래 항목 추가
+      final momentaryItem = MomentaryItem(
+        market: market,
+        price: price,
+        volume: volume,
+        total: total,
+        timestamp: timestamp,
+        isBuy: isBuy,
+        sequentialId: sequentialId,
+      );
+      
+      _recentTrades.insert(0, momentaryItem);
+      
+      // 최대 개수 유지
+      if (_recentTrades.length > maxItems) {
+        _recentTrades.removeLast();
+      }
+    } catch (e) {
+      // 오류 무시하고 계속 진행
+    }
+  }
+  
+  // 현재 임계값 기준 필터링된 거래 목록
+  List<MomentaryItem> _getFilteredTrades() {
+    return _recentTrades
+        .where((item) => item.total >= threshold)
+        .toList();
+  }
+  
+  // 임계값 변경
+  void setThreshold(double newThreshold) {
+    // 기존 데이터는 유지하고 필터링만 변경
+  }
+  
+  // 모든 데이터 삭제
+  void clear() {
+    _recentTrades.clear();
+    _processedIds.clear();
+  }
+}\n\n// ====== lib/features/momentary/domain/entities/momentary_item.dart ======\n
+import 'package:equatable/equatable.dart';
+
+class MomentaryItem extends Equatable {
+  final String market;
+  final double price;
+  final double volume;
+  final double total;
+  final DateTime timestamp;
+  final bool isBuy;
+  final String sequentialId;
+  
+  const MomentaryItem({
+    required this.market,
+    required this.price,
+    required this.volume,
+    required this.total,
+    required this.timestamp,
+    required this.isBuy,
+    required this.sequentialId,
+  });
+  
+  @override
+  List<Object?> get props => [
+    market,
+    price,
+    volume,
+    total,
+    timestamp,
+    isBuy,
+    sequentialId
+  ];
+  
+  // 복사 메서드
+  MomentaryItem copyWith({
+    String? market,
+    double? price,
+    double? volume,
+    double? total,
+    DateTime? timestamp,
+    bool? isBuy,
+    String? sequentialId,
+  }) {
+    return MomentaryItem(
+      market: market ?? this.market,
+      price: price ?? this.price,
+      volume: volume ?? this.volume,
+      total: total ?? this.total,
+      timestamp: timestamp ?? this.timestamp,
+      isBuy: isBuy ?? this.isBuy,
+      sequentialId: sequentialId ?? this.sequentialId,
+    );
+  }
+  
+  // Trade Map에서 변환
+  factory MomentaryItem.fromTradeMap(Map<String, dynamic> trade) {
+    final market = trade['code'] as String? ?? trade['market'] as String?;
+    final price = trade['price'] as double? ?? 0.0;
+    final volume = trade['volume'] as double? ?? 0.0;
+    final total = trade['total'] as double? ?? (price * volume);
+    final timestamp = trade['timestamp'] as DateTime? ?? DateTime.now();
+    final isBuy = trade['isBuy'] as bool? ?? false;
+    final sequentialId = trade['sequential_id'] as String? ?? '';
+    
+    return MomentaryItem(
+      market: market ?? '',
+      price: price,
+      volume: volume,
+      total: total,
+      timestamp: timestamp,
+      isBuy: isBuy,
+      sequentialId: sequentialId,
+    );
+  }
+  
+  // Map으로 변환
+  Map<String, dynamic> toMap() {
+    return {
+      'market': market,
+      'price': price,
+      'volume': volume,
+      'total': total,
+      'timestamp': timestamp,
+      'isBuy': isBuy,
+      'sequential_id': sequentialId,
+    };
+  }
+}\n\n// ====== lib/features/momentary/presentation/providers/momentary_provider.dart ======\n
+import 'dart:async';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../../../core/bridge/signal_bus.dart';
+import '../../../../core/config/app_config.dart';
+import '../../domain/entities/momentary_item.dart';
+import '../../domain/usecases/watch_momentary.dart';
+
+// 임계값 Provider
+final momentaryThresholdProvider = StateProvider<double>((ref) => 
+    AppConfig.tradeFilters[0]); // 기본값: 2백만원 (첫 번째 필터)
+
+// 임계값 인덱스 Provider
+final momentaryIndexProvider = StateProvider<int>((ref) => 0);
+
+// UseCase Provider
+final momentaryUseCaseProvider = Provider<WatchMomentaryUseCase>((ref) {
+  final signalBus = SignalBus();
+  final threshold = ref.watch(momentaryThresholdProvider);
+  
+  return WatchMomentaryUseCase(
+    signalBus,
+    threshold: threshold,
+  );
+});
+
+// 순간 거래 Notifier
+class MomentaryNotifier extends AutoDisposeAsyncNotifier<List<MomentaryItem>> {
+  StreamSubscription<List<MomentaryItem>>? _subscription;
+  
+  @override
+  FutureOr<List<MomentaryItem>> build() async {
+    ref.onDispose(() {
+      _subscription?.cancel();
+    });
+    
+    // 임계값 변경 감지
+    final threshold = ref.watch(momentaryThresholdProvider);
+    
+    // UseCase 인스턴스
+    final useCase = ref.watch(momentaryUseCaseProvider);
+    
+    // 구독 취소 후 재구독
+    _subscription?.cancel();
+    _subscription = useCase.execute().listen(
+      (trades) {
+        state = AsyncData(trades);
+      },
+      onError: (error, stack) {
+        state = AsyncError(error, stack);
+      }
+    );
+    
+    return [];
+  }
+  
+  // 임계값 변경
+  void setThreshold(double threshold, int index) {
+    if (index < 0 || index >= AppConfig.tradeFilters.length) {
+      return;
+    }
+    
+    ref.read(momentaryThresholdProvider.notifier).state = threshold;
+    ref.read(momentaryIndexProvider.notifier).state = index;
+  }
+  
+  // 모든 데이터 지우기
+  void clear() {
+    ref.read(momentaryUseCaseProvider).clear();
+    state = const AsyncData([]);
+  }
+}
+
+// 순간 거래 Provider
+final momentaryProvider = 
+    AutoDisposeAsyncNotifierProvider<MomentaryNotifier, List<MomentaryItem>>(
+        MomentaryNotifier.new);
+
+// 매수/매도 필터링된 Provider
+final buyTradesProvider = Provider<List<MomentaryItem>>((ref) {
+  final momentaryAsync = ref.watch(momentaryProvider);
+  return momentaryAsync.maybeWhen(
+    data: (items) => items.where((item) => item.isBuy).toList(),
+    orElse: () => [],
+  );
+});
+
+final sellTradesProvider = Provider<List<MomentaryItem>>((ref) {
+  final momentaryAsync = ref.watch(momentaryProvider);
+  return momentaryAsync.maybeWhen(
+    data: (items) => items.where((item) => !item.isBuy).toList(),
+    orElse: () => [],
+  );
+});\n\n// ====== lib/features/momentary/presentation/pages/momentary_page.dart ======\n
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../../../shared/widgets/common_app_bar.dart';
+import '../../../../core/config/app_config.dart';
+import '../../../../features/settings/presentation/providers/settings_provider.dart';
+import '../providers/momentary_provider.dart';
+import '../widgets/momentary_tile.dart';
+
+class MomentaryPage extends ConsumerWidget {
+  const MomentaryPage({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final momentaryAsync = ref.watch(momentaryProvider);
+    final settings = ref.watch(settingsProvider);
+    final momentaryIndex = ref.watch(momentaryIndexProvider);
+    final threshold = ref.watch(momentaryThresholdProvider);
+    
+    return Scaffold(
+      appBar: const CommonAppBar(title: '순간 거래대금'),
+      body: Column(
+        children: [
+          // 상단 슬라이더 (settings에 따라 위치 결정)
+          if (settings.sliderPosition == 'top') 
+            _buildThresholdSlider(context, ref, momentaryIndex),
+          
+          // 메인 거래 목록
+          Expanded(
+            child: momentaryAsync.when(
+              data: (trades) {
+                if (trades.isEmpty) {
+                  return Center(
+                    child: Column(
+                      mainAxisAlignment: MainAxisAlignment.center,
+                      children: [
+                        Text(
+                          '포착된 순간 거래가 없습니다.',
+                          style: TextStyle(
+                            color: Theme.of(context).hintColor,
+                            fontSize: 16,
+                          ),
+                        ),
+                        const SizedBox(height: 16),
+                        Text(
+                          '현재 임계값: ${AppConfig.filterNames[threshold] ?? '${(threshold / 10000).toStringAsFixed(0)}만원'}',
+                          style: const TextStyle(
+                            fontSize: 14,
+                          ),
+                        ),
+                      ],
+                    ),
+                  );
+                }
+                
+                return RefreshIndicator(
+                  onRefresh: () async {
+                    ref.read(momentaryProvider.notifier).clear();
+                  },
+                  child: ListView.builder(
+                    itemCount: trades.length,
+                    padding: const EdgeInsets.all(16.0),
+                    itemBuilder: (context, index) {
+                      final trade = trades[index];
+                      return MomentaryTile(item: trade);
+                    },
+                  ),
+                );
+              },
+              loading: () => const Center(child: CircularProgressIndicator()),
+              error: (error, stack) => Center(
+                child: Padding(
+                  padding: const EdgeInsets.all(16.0),
+                  child: Text(
+                    '오류가 발생했습니다: $error',
+                    style: const TextStyle(color: Colors.red),
+                    textAlign: TextAlign.center,
+                  ),
+                ),
+              ),
+            ),
+          ),
+          
+          // 하단 슬라이더 (settings에 따라 위치 결정)
+          if (settings.sliderPosition == 'bottom') 
+            _buildThresholdSlider(context, ref, momentaryIndex),
+        ],
+      ),
+    );
+  }
+  
+  // 임계값 슬라이더 위젯
+  Widget _buildThresholdSlider(BuildContext context, WidgetRef ref, int momentaryIndex) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            '최소 거래대금: ${AppConfig.filterNames[AppConfig.tradeFilters[momentaryIndex]]}',
+            style: const TextStyle(
+              fontSize: 16, 
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          Slider(
+            value: momentaryIndex.toDouble(),
+            min: 0,
+            max: (AppConfig.tradeFilters.length - 1).toDouble(),
+            divisions: AppConfig.tradeFilters.length - 1,
+            label: AppConfig.filterNames[AppConfig.tradeFilters[momentaryIndex]],
+            activeColor: Colors.orange,
+            onChanged: (value) {
+              final index = value.round();
+              final threshold = AppConfig.tradeFilters[index];
+              ref.read(momentaryProvider.notifier).setThreshold(threshold, index);
+            },
+          ),
+        ],
+      ),
+    );
+  }
+}\n\n// ====== lib/features/momentary/presentation/widgets/momentary_tile.dart ======\n
+import 'package:flutter/material.dart';
+import 'package:intl/intl.dart';
+import '../../domain/entities/momentary_item.dart';
+
+class MomentaryTile extends StatelessWidget {
+  final MomentaryItem item;
+  
+  const MomentaryTile({
+    Key? key,
+    required this.item,
+  }) : super(key: key);
+  
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final numberFormat = NumberFormat('#,###');
+    
+    return Card(
+      elevation: 2,
+      margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 0),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
+        child: Row(
+          children: [
+            // 시간
+            Expanded(
+              child: Text(
+                DateFormat('HH:mm:ss').format(item.timestamp),
+                style: TextStyle(
+                  color: theme.colorScheme.onSurface,
+                  fontSize: 12,
+                ),
+              ),
+            ),
+            
+            // 코인 코드
+            Expanded(
+              flex: 2,
+              child: Text(
+                item.market,
+                style: TextStyle(
+                  fontWeight: FontWeight.bold,
+                  color: theme.colorScheme.primary,
+                ),
+              ),
+            ),
+            
+            // 수량
+            Expanded(
+              child: Text(
+                NumberFormat('#,##0.####').format(item.volume),
+                style: TextStyle(
+                  color: theme.colorScheme.onSurface,
+                  fontSize: 12,
+                ),
+              ),
+            ),
+            
+            // 가격
+            Expanded(
+              child: Text(
+                numberFormat.format(item.price),
+                style: TextStyle(
+                  color: theme.colorScheme.onSurface,
+                  fontSize: 12,
+                ),
+              ),
+            ),
+            
+            // 총액
+            Expanded(
+              child: Text(
+                numberFormat.format(item.total),
+                style: TextStyle(
+                  color: item.isBuy ? Colors.green : Colors.red,
+                  fontWeight: FontWeight.bold,
+                ),
+                textAlign: TextAlign.end,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}

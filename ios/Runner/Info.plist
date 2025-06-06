@@ -1,0 +1,113 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+	<dict>
+		<!-- 비활성화된 최소 프레임 지속 시간 (성능 최적화) -->
+		<key>CADisableMinimumFrameDurationOnPhone</key>
+		<true/>
+		<!-- 개발 지역 설정 -->
+		<key>CFBundleDevelopmentRegion</key>
+		<string>$(DEVELOPMENT_LANGUAGE)</string>
+		<!-- 앱 표시 이름 -->
+		<key>CFBundleDisplayName</key>
+		<string>Noonchit</string>
+		<!-- 실행 파일 이름 -->
+		<key>CFBundleExecutable</key>
+		<string>$(EXECUTABLE_NAME)</string>
+		<!-- 앱 번들 ID -->
+		<key>CFBundleIdentifier</key>
+		<string>$(PRODUCT_BUNDLE_IDENTIFIER)</string>
+		<!-- Info.plist 버전 -->
+		<key>CFBundleInfoDictionaryVersion</key>
+		<string>6.0</string>
+		<!-- 앱 이름 -->
+		<key>CFBundleName</key>
+		<string>Noonchit</string>
+		<key>MinimumOSVersion</key>
+		<string>13.0</string>
+		<!-- 패키지 유형 -->
+		<key>CFBundlePackageType</key>
+		<string>APPL</string>
+		<!-- 앱 버전 (Flutter 빌드 이름) -->
+		<key>CFBundleShortVersionString</key>
+		<string>$(FLUTTER_BUILD_NAME)</string>
+		<!-- 앱 서명 -->
+		<key>CFBundleSignature</key>
+		<string>????</string>
+		<!-- 빌드 번호 (Flutter 빌드 번호) -->
+		<key>CFBundleVersion</key>
+		<string>$(FLUTTER_BUILD_NUMBER)</string>
+		<!-- Firebase Analytics 디버그 로깅 활성화 -->
+		<key>FIRAnalyticsDebugEnabled</key>
+		<true/>
+		<!-- Firebase App Delegate Proxy 비활성화 (수동 이벤트 로깅) -->
+		<key>FirebaseAppDelegateProxyEnabled</key>
+		<false/>
+		<!-- iPhone OS 필요 -->
+		<key>LSRequiresIPhoneOS</key>
+		<true/>
+		<!-- 로컬 네트워크 사용 설명 (예전 프로젝트 참고, 간결화) -->
+		<key>NSLocalNetworkUsageDescription</key>
+		<string>디버깅을 위해 로컬 네트워크 액세스가 필요합니다.</string>
+		<!-- 마이크 사용 설명 (오디오/햅틱 기능) -->
+		<key>NSMicrophoneUsageDescription</key>
+		<string>앱이 오디오 및 햅틱 기능을 사용하기 위해 마이크 접근이 필요합니다.</string>
+		<!-- 간접 입력 이벤트 지원 -->
+		<key>UIApplicationSupportsIndirectInputEvents</key>
+		<true/>
+		<!-- 백그라운드 모드 설정 -->
+		<key>UIBackgroundModes</key>
+		<array>
+			<string>audio</string>
+			<string>location</string>
+			<string>processing</string>
+			<string>fetch</string>
+			<string>remote-notification</string>
+		</array>
+		<!-- 🆕 백그라운드 작업 식별자 (TestFlight 에러 해결) -->
+		<key>BGTaskSchedulerPermittedIdentifiers</key>
+		<array>
+			<string>com.noonchit.refresh</string>
+			<string>com.noonchit.processing</string>
+			<string>com.noonchit.websocket</string>
+		</array>
+		<!-- 위치 사용 설명 -->
+		<key>NSLocationWhenInUseUsageDescription</key>
+		<string>앱이 백그라운드에서 위치 데이터를 사용합니다.</string>
+		<key>NSLocationAlwaysAndWhenInUseUsageDescription</key>
+		<string>앱이 항상 위치 데이터를 사용할 수 있습니다.</string>
+		<!-- 런치 스크린 이름 -->
+		<key>UILaunchStoryboardName</key>
+		<string>LaunchScreen</string>
+		<!-- 메인 스토리보드 파일 -->
+		<key>UIMainStoryboardFile</key>
+		<string>Main</string>
+		<!-- 지원되는 인터페이스 방향 (iPhone) -->
+		<key>UISupportedInterfaceOrientations</key>
+		<array>
+			<string>UIInterfaceOrientationPortrait</string>
+			<string>UIInterfaceOrientationLandscapeLeft</string>
+			<string>UIInterfaceOrientationLandscapeRight</string>
+		</array>
+		<!-- 지원되는 인터페이스 방향 (iPad) -->
+		<key>UISupportedInterfaceOrientations~ipad</key>
+		<array>
+			<string>UIInterfaceOrientationPortrait</string>
+			<string>UIInterfaceOrientationPortraitUpsideDown</string>
+			<string>UIInterfaceOrientationLandscapeLeft</string>
+			<string>UIInterfaceOrientationLandscapeRight</string>
+		</array>
+		<!-- 푸시 알림 환경 -->
+		<key>aps-environment</key>
+		<string>development</string>
+		<!-- 🔧 상태바 표시 (시계/배터리 보이게) -->
+		<key>UIStatusBarHidden</key>
+		<false/>
+		<!-- 🔧 상태바 스타일 기반 뷰 컨트롤러 비활성화 (Flutter 제어) -->
+		<key>UIViewControllerBasedStatusBarAppearance</key>
+		<false/>
+		<!-- Firebase Analytics 광고 기능 지원 -->
+		<key>NSAdvertisingAttributionReportEndpoint</key>
+		<string>https://firebaselogging-pa.googleapis.com</string>
+	</dict>
+</plist>

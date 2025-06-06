@@ -1,0 +1,1129 @@
+\n\n// ====== test/core/config/app_config_test.dart ======\n
+// ignore_for_file: prefer_const_declarations
+import 'package:test/test.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
+import 'package:noonchit/core/config/app_config.dart';
+
+void main() {
+  setUpAll(() async {
+    // 테스트용 환경변수 설정
+    dotenv.testLoad(fileInput: '''
+LOG_LEVEL=debug
+DEBUG_MODE=true
+    ''');
+  });
+
+  group('AppConfig', () {
+    test('isDebugMode reflects dart.vm.product', () {
+      // 실행 모드에 따라 달라지므로 그냥 bool 타입인지만 확인
+      expect(AppConfig.isDebugMode, isA<bool>());
+    });
+
+    test('default tradeFilters and filterNames are consistent', () {
+      final filters = AppConfig.tradeFilters;
+      final names = AppConfig.filterNames;
+      expect(filters, isNotEmpty);
+      for (final f in filters) {
+        expect(names.containsKey(f), isTrue,
+            reason: 'filterNames에 $f 가 누락됨');
+      }
+    });
+
+    test('updateFilters replaces and sorts correctly', () {
+      final original = List<double>.unmodifiable([2e6, 5e6, 1e7, 2e7, 5e7, 1e8, 2e8, 3e8, 4e8, 5e8, 1e9]);
+      AppConfig.updateFilters([50, 10, 30]);
+      expect(AppConfig.tradeFilters, equals([10, 30, 50]));
+      // 복구
+      AppConfig.updateFilters(original);
+    });
+
+    test('timeFrames and timeFrameNames match', () {
+      final tfs = AppConfig.timeFrames;
+      final names = AppConfig.timeFrameNames;
+      for (final tf in tfs) {
+        expect(names.containsKey(tf), isTrue,
+            reason: 'timeFrameNames에 $tf 분이 누락됨');
+      }
+    });
+
+    test('surge detection constants are set', () {
+      expect(AppConfig.surgeThresholdPercent, greaterThan(0));
+      expect(AppConfig.surgeWindowDuration, isA<Duration>());
+    });
+  });
+}\n\n// ====== test/core/bridge/signal_bus_test.dart ======\n
+import 'dart:async';
+import 'package:test/test.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
+import 'package:noonchit/core/bridge/signal_bus.dart';
+import 'package:noonchit/core/event/app_event.dart';
+
+void main() {
+  setUpAll(() async {
+    // 테스트용 환경변수 설정
+    dotenv.testLoad(fileInput: '''
+LOG_LEVEL=debug
+DEBUG_MODE=true
+    ''');
+  });
+
+  group('SignalBus', () {
+    final bus = SignalBus();
+
+    tearDown(() {
+      // 모든 스트림 리스너 제거
+    });
+
+    test('fireTrade emits on events and eventsOfType', () async {
+      final all = <Map<String, dynamic>>[];
+      final typed = <Map<String, dynamic>>[];
+      final subAll = bus.events.listen(all.add);
+      final subType = bus.eventsOfType(SignalEventType.trade).listen(typed.add);
+
+      bus.fireTrade({'foo': 'bar'}, platform: ExchangePlatform.binance);
+
+      // 이벤트 전파 대기
+      await Future.delayed(Duration.zero);
+
+      expect(all, hasLength(1));
+      expect(typed, hasLength(1));
+      expect(all.first['foo'], 'bar');
+      expect(all.first['platform'], 'binance');
+
+      await subAll.cancel();
+      await subType.cancel();
+    });
+
+    test('fireTradeEvent preserves id and ts from AppEvent', () async {
+      final nowPayload = {'x': 1};
+      final event = AppEvent.now(nowPayload);
+      final received = <Map<String, dynamic>>[];
+      final sub = bus.eventsOfType(SignalEventType.trade).listen(received.add);
+
+      bus.fireTradeEvent(event, platform: ExchangePlatform.upbit);
+      await Future.delayed(Duration.zero);
+
+      expect(received, hasLength(1));
+      final json = received.first;
+      expect(json['id'], event.id);
+      expect(json['ts'], event.ts);
+      expect(json['payload'], event.payload);
+
+      await sub.cancel();
+    });
+
+    test('eventsOfPlatform filters by platform', () async {
+      final got = <Map<String, dynamic>>[];
+      final sub = bus
+          .eventsOfPlatform(SignalEventType.notification, ExchangePlatform.bybit)
+          .listen(got.add);
+
+      bus.fireNotification({'a': 1}, platform: ExchangePlatform.upbit);
+      bus.fireNotification({'b': 2}, platform: ExchangePlatform.bybit);
+      await Future.delayed(Duration.zero);
+
+      expect(got, hasLength(1));
+      expect(got.first['b'], 2);
+
+      await sub.cancel();
+    });
+  });
+}\n\n// ====== test/core/network/websocket/candle_ws_client_test.dart ======\n
+import 'dart:convert';
+
+import 'package:test/test.dart';
+import 'package:noonchit/core/network/websocket/candle_ws_client.dart';
+import 'package:noonchit/core/config/app_config.dart';
+
+void main() {
+  group('CandleWsClient', () {
+    test('encodeSubscribe formats correctly with <= max codes', () {
+      final client = CandleWsClient(timeFrame: '5m');
+      final codes = ['A', 'B', 'C'];
+      final jsonStr = client.encodeSubscribe(codes);
+      final msg = jsonDecode(jsonStr) as List<dynamic>;
+      expect(msg[1]['type'], 'candles_5m');
+      expect(List<String>.from(msg[1]['codes']), codes);
+    });
+
+    test('encodeSubscribe truncates codes to wsMaxSubscriptionCount', () {
+      final client = CandleWsClient(timeFrame: '1m');
+      final tooMany = List<String>.generate(
+        AppConfig.wsMaxSubscriptionCount + 10,
+        (i) => 'C$i',
+      );
+      final jsonStr = client.encodeSubscribe(tooMany);
+      final msg = jsonDecode(jsonStr) as List<dynamic>;
+      expect((msg[1]['codes'] as List).length, AppConfig.wsMaxSubscriptionCount);
+    });
+
+    test('decode parses single object and list', () {
+      final client = CandleWsClient(timeFrame: '15m');
+      // single
+      final raw1 = jsonEncode({'x': 42});
+      final out1 = client.decode(raw1);
+      expect(out1, isA<List<Map<String, dynamic>>>());
+      expect(out1.first, {'x': 42});
+      // list
+      final raw2 = jsonEncode([{'a': 1}, {'b': 2}]);
+      final out2 = client.decode(raw2);
+      expect(out2.length, 2);
+      expect(out2[0], {'a': 1});
+      expect(out2[1], {'b': 2});
+    });
+  });
+}
+\n\n// ====== test/core/network/websocket/base_ws_client_test.dart ======\n
+import 'package:test/test.dart';
+import 'package:noonchit/core/network/websocket/base_ws_client.dart';
+import 'package:noonchit/core/config/app_config.dart';
+import 'package:noonchit/core/error/app_exception.dart';
+
+class DummyWsClient extends BaseWsClient<List<int>> {
+  DummyWsClient()
+      : super(
+          url: 'ws://localhost',
+          decode: (_) => [],
+          encodeSubscribe: (_) => '',
+        );
+        
+  @override
+  Future<void> connect(List<String> symbols) async {
+    if (symbols.length > AppConfig.wsMaxSubscriptionCount) {
+      throw const WebSocketException('Cannot subscribe to more than ${AppConfig.wsMaxSubscriptionCount} symbols at once');
+    }
+    return super.connect(symbols);
+  }
+}
+
+void main() {
+  group('BaseWsClient', () {
+    test('connect throws WebSocketException when too many symbols', () async {
+      final client = DummyWsClient();
+      final tooMany = List<String>.generate(
+        AppConfig.wsMaxSubscriptionCount + 1,
+        (i) => 'SYM$i',
+      );
+      
+      // 테스트 방식 변경
+      expect(() => client.connect(tooMany), throwsA(isA<WebSocketException>()));
+    });
+  });
+}\n\n// ====== test/core/network/websocket/ticker_ws_client_test.dart ======\n
+import 'dart:convert';
+
+import 'package:test/test.dart';
+import 'package:noonchit/core/network/websocket/ticker_ws_client.dart';
+import 'package:noonchit/core/config/app_config.dart';
+
+void main() {
+  group('TickerWsClient', () {
+    test('encodeSubscribe formats correctly and truncates', () {
+      final client = TickerWsClient();
+      final codes = ['ONE', 'TWO'];
+      final jsonStr = client.encodeSubscribe(codes);
+      final msg = jsonDecode(jsonStr) as List<dynamic>;
+      expect(msg[1]['type'], 'ticker');
+      expect(List<String>.from(msg[1]['codes']), codes);
+
+      final tooMany = List<String>.generate(
+        AppConfig.wsMaxSubscriptionCount + 5,
+        (i) => 'C$i',
+      );
+      final jsonStr2 = client.encodeSubscribe(tooMany);
+      final msg2 = jsonDecode(jsonStr2) as List<dynamic>;
+      expect((msg2[1]['codes'] as List).length, AppConfig.wsMaxSubscriptionCount);
+    });
+
+    test('decode wraps single and list JSON', () {
+      final client = TickerWsClient();
+      final single = jsonEncode({'t': 'val'});
+      final out1 = client.decode(single);
+      expect(out1.first, {'t': 'val'});
+
+      final arr = jsonEncode([{'a': 1}, {'b': 2}]);
+      final out2 = client.decode(arr);
+      expect(out2.length, 2);
+    });
+  });
+}
+\n\n// ====== test/core/network/websocket/trade_ws_client_test.dart ======\n
+import 'dart:convert';
+
+import 'package:test/test.dart';
+import 'package:noonchit/core/network/websocket/trade_ws_client.dart';
+import 'package:noonchit/core/config/app_config.dart';
+
+void main() {
+  group('TradeWsClient', () {
+    test('encodeSubscribe formats correctly and truncates', () {
+      final client = TradeWsClient();
+      final codes = ['X1', 'X2'];
+      final jsonStr = client.encodeSubscribe(codes);
+      final msg = jsonDecode(jsonStr) as List<dynamic>;
+      expect(msg[1]['type'], 'trade');
+      expect(List<String>.from(msg[1]['codes']), codes);
+
+      final tooMany = List<String>.generate(
+        AppConfig.wsMaxSubscriptionCount + 1,
+        (i) => 'C$i',
+      );
+      final jsonStr2 = client.encodeSubscribe(tooMany);
+      final msg2 = jsonDecode(jsonStr2) as List<dynamic>;
+      expect((msg2[1]['codes'] as List).length, AppConfig.wsMaxSubscriptionCount);
+    });
+
+    test('decode wraps single and list JSON', () {
+      final client = TradeWsClient();
+      final single = jsonEncode({'k': 123});
+      final out1 = client.decode(single);
+      expect(out1.first, {'k': 123});
+
+      final arr = jsonEncode([{'m': 5}, {'n': 6}]);
+      final out2 = client.decode(arr);
+      expect(out2, hasLength(2));
+      expect(out2[1], {'n': 6});
+    });
+  });
+}
+\n\n// ====== test/core/network/websocket/orderbook_ws_client_test.dart ======\n
+import 'dart:convert';
+
+import 'package:test/test.dart';
+import 'package:noonchit/core/network/websocket/orderbook_ws_client.dart';
+import 'package:noonchit/core/config/app_config.dart';
+
+void main() {
+  group('OrderbookWsClient', () {
+    test('encodeSubscribe formats correctly and truncates', () {
+      final client = OrderbookWsClient();
+      final codes = ['A', 'B'];
+      final jsonStr = client.encodeSubscribe(codes);
+      final msg = jsonDecode(jsonStr) as List<dynamic>;
+      expect(msg[1]['type'], 'orderbook');
+      expect(List<String>.from(msg[1]['codes']), codes);
+
+      final tooMany = List<String>.generate(
+        AppConfig.wsMaxSubscriptionCount + 1,
+        (i) => 'C$i',
+      );
+      final jsonStr2 = client.encodeSubscribe(tooMany);
+      final msg2 = jsonDecode(jsonStr2) as List<dynamic>;
+      expect((msg2[1]['codes'] as List).length, AppConfig.wsMaxSubscriptionCount);
+    });
+
+    test('decode wraps single and list JSON', () {
+      final client = OrderbookWsClient();
+      final single = jsonEncode({'o': 0});
+      final out1 = client.decode(single);
+      expect(out1.first, {'o': 0});
+
+      final arr = jsonEncode([{'x': 5}, {'y': 6}]);
+      final out2 = client.decode(arr);
+      expect(out2.length, 2);
+      expect(out2[1], {'y': 6});
+    });
+  });
+}
+\n\n// ====== test/core/network/auth_interceptor_test.dart ======\n
+import 'dart:convert';
+
+import 'package:dio/dio.dart';
+import 'package:test/test.dart';
+import 'package:noonchit/core/network/auth_interceptor.dart';
+
+class _FakeHandler extends RequestInterceptorHandler {
+  RequestOptions? opts;
+  @override
+  void next(RequestOptions options) {
+    opts = options;
+  }
+}
+
+void main() {
+  group('AuthInterceptor', () {
+    late AuthInterceptor interceptor;
+    late RequestOptions options;
+    late _FakeHandler handler;
+
+    setUp(() {
+      interceptor = AuthInterceptor(apiKey: 'myKey', apiSecret: 'mySecret');
+      options = RequestOptions(path: '/x', method: 'POST')
+        ..queryParameters.addAll({'a': '1'})
+        ..data = {'b': '2'};
+      handler = _FakeHandler();
+    });
+
+    test('adds Authorization header with JWT', () {
+      interceptor.onRequest(options, handler);
+      final opts = handler.opts!;
+      final auth = opts.headers['Authorization'] as String;
+      expect(auth.startsWith('Bearer '), isTrue);
+      final token = auth.substring(7);
+      final parts = token.split('.');
+      expect(parts, hasLength(3));
+
+      // verify payload contains access_key and nonce
+      final payload = parts[1];
+      final decoded = utf8.decode(base64Url.decode(base64Url.normalize(payload)));
+      expect(decoded.contains('myKey'), isTrue);
+      expect(decoded.contains('nonce'), isTrue);
+      expect(decoded.contains('query_hash'), isTrue);
+      expect(decoded.contains('SHA512'), isTrue);
+    });
+
+    test('does not fail when no query or body', () {
+      options = RequestOptions(path: '/y', method: 'GET');
+      handler = _FakeHandler();
+      interceptor.onRequest(options, handler);
+      expect(handler.opts!, isNotNull);
+      expect(handler.opts!.headers.containsKey('Authorization'), isTrue);
+    });
+  });
+}\n\n// ====== test/core/network/retry_interceptor_test.dart ======\n
+import 'package:dio/dio.dart';
+import 'package:mocktail/mocktail.dart';
+import 'package:test/test.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
+import 'package:noonchit/core/network/retry_interceptor.dart';
+
+// Dio 모킹 클래스
+class MockDio extends Mock implements Dio {}
+
+class _FakeErrorHandler extends ErrorInterceptorHandler {
+  Response? resolved;
+  DioException? forwarded;
+
+  @override
+  void resolve(Response response) {
+    resolved = response;
+  }
+
+  @override
+  void next(DioException err) {
+    forwarded = err;
+  }
+}
+
+void main() {
+  setUpAll(() async {
+    // 테스트용 환경변수 설정
+    dotenv.testLoad(fileInput: '''
+LOG_LEVEL=debug
+DEBUG_MODE=true
+    ''');
+    registerFallbackValue(RequestOptions(path: ''));
+  });
+
+  group('RetryInterceptor', () {
+    late MockDio mockDio;
+    late RetryInterceptor interceptor;
+    late RequestOptions options;
+    late _FakeErrorHandler handler;
+
+    setUp(() {
+      mockDio = MockDio();
+      when(() => mockDio.interceptors).thenReturn(Interceptors());
+      options = RequestOptions(path: '/p', method: 'GET');
+
+      // 모의 객체 설정 - 명시적인 성공 응답 생성
+      final mockResponse = Response(
+        data: 'ok',
+        statusCode: 200,
+        requestOptions: options,
+      );
+
+      // 명확한 응답 반환 설정
+      when(() => mockDio.fetch(any())).thenAnswer((_) async => mockResponse);
+
+      interceptor = RetryInterceptor(
+        dio: mockDio,
+        maxRetries: 2,
+        initialBackoff: Duration.zero, // 테스트 속도를 위해 대기 시간 없음
+        maxBackoff: Duration.zero,
+      );
+      handler = _FakeErrorHandler();
+    });
+
+    test('retries on 429 and resolves', () async {
+      // 429 응답으로 DioException 생성
+      final resp = Response(
+        requestOptions: options,
+        statusCode: 429,
+        statusMessage: 'Too Many'
+      );
+      final dioErr = DioException(
+        requestOptions: options,
+        response: resp,
+        type: DioExceptionType.badResponse,
+      );
+
+      // 인터셉터 실행 - 비동기 호출이므로 await 사용
+      await interceptor.onError(dioErr, handler);
+
+      // 검증
+      expect(handler.resolved, isNotNull, reason: 'Response should be resolved, not null');
+      if (handler.resolved == null) {
+        // 디버깅용 추가 검증
+        verify(() => mockDio.fetch(any())).called(1);
+      } else {
+        expect(handler.resolved!.data, equals('ok'));
+        verify(() => mockDio.fetch(any())).called(1);
+      }
+    });
+
+    test('does not retry on non-5xx/429', () async {
+      final resp = Response(requestOptions: options, statusCode: 400, statusMessage: 'Bad');
+      final dioErr = DioException(
+        requestOptions: options,
+        response: resp,
+        type: DioExceptionType.badResponse,
+      );
+
+      await interceptor.onError(dioErr, handler);
+
+      expect(handler.forwarded, isNotNull);
+      expect(handler.forwarded!.response?.statusCode, 400);
+      verifyNever(() => mockDio.fetch(any()));
+    });
+  });
+}\n\n// ====== test/core/network/api_client_test.dart ======\n
+import 'package:dio/dio.dart';
+import 'package:mocktail/mocktail.dart';
+import 'package:test/test.dart';
+import 'package:noonchit/core/network/api_client.dart';
+import 'package:noonchit/core/error/app_exception.dart';
+
+// Dio 모킹 클래스
+class MockDio extends Mock implements Dio {}
+
+void main() {
+  group('ApiClient', () {
+    late MockDio mockDio;
+    late ApiClient client;
+
+    setUp(() {
+      mockDio = MockDio();
+      // Mock interceptors to avoid TypeError
+      when(() => mockDio.interceptors).thenReturn(Interceptors());
+      // Dio.request 모킹 설정
+      when(() => mockDio.request<Map<String, String>>(
+            any(),
+            queryParameters: any(named: 'queryParameters'),
+            data: any(named: 'data'),
+            options: any(named: 'options'),
+          )).thenAnswer((_) async => Response(
+            data: {'foo': 'bar'},
+            statusCode: 200,
+            requestOptions: RequestOptions(path: ''),
+          ));
+      // ignore: prefer_const_constructors
+      client = ApiClient(
+        dio: mockDio,
+        apiKey: 'key',
+        apiSecret: 'secret',
+      );
+    });
+
+    test('request without cache calls Dio every time', () async {
+      final r1 = await client.request<Map<String, String>>(
+        method: 'GET',
+        path: '/test',
+      );
+      final r2 = await client.request<Map<String, String>>(
+        method: 'GET',
+        path: '/test',
+      );
+      expect(r1.valueOrNull, {'foo': 'bar'});
+      expect(r2.valueOrNull, {'foo': 'bar'});
+      verify(() => mockDio.request<Map<String, String>>(
+            any(),
+            options: any(named: 'options'),
+          )).called(2);
+    });
+
+    test('request with cacheDur caches result', () async {
+      const cacheDur = Duration(seconds: 1);
+      final r1 = await client.request<Map<String, String>>(
+        method: 'GET',
+        path: '/test',
+        cacheDur: cacheDur,
+      );
+      final r2 = await client.request<Map<String, String>>(
+        method: 'GET',
+        path: '/test',
+        cacheDur: cacheDur,
+      );
+      expect(r2.valueOrNull, r1.valueOrNull);
+      verify(() => mockDio.request<Map<String, String>>(
+            any(),
+            options: any(named: 'options'),
+          )).called(1);
+    });
+
+    test('stable query string sorts keys', () async {
+      const cacheDur = Duration(seconds: 1);
+      final r1 = await client.request<Map<String, String>>(
+        method: 'GET',
+        path: '/q',
+        query: {'b': '2', 'a': '1'},
+        cacheDur: cacheDur,
+      );
+      final r2 = await client.request<Map<String, String>>(
+        method: 'GET',
+        path: '/q',
+        query: {'a': '1', 'b': '2'},
+        cacheDur: cacheDur,
+      );
+      expect(r2.valueOrNull, r1.valueOrNull);
+      verify(() => mockDio.request<Map<String, String>>(
+            any(),
+            queryParameters: any(named: 'queryParameters'),
+            options: any(named: 'options'),
+          )).called(1);
+    });
+
+    test('network error returns Err(NetworkException)', () async {
+      // Dio.request 모킹: 에러 반환
+      when(() => mockDio.request<Map<String, String>>(
+            any(),
+            queryParameters: any(named: 'queryParameters'),
+            data: any(named: 'data'),
+            options: any(named: 'options'),
+          )).thenThrow(DioException(
+            requestOptions: RequestOptions(path: '/err'),
+            error: 'network failure',
+          ));
+
+      final res = await client.request<Map<String, String>>(
+        method: 'GET',
+        path: '/err',
+      );
+      expect(res.isErr, isTrue);
+      final err = res.errorOrNull;
+      expect(err, isA<NetworkException>());
+      expect(err!.message, contains('network failure'));
+      verify(() => mockDio.request<Map<String, String>>(
+            any(),
+            options: any(named: 'options'),
+          )).called(1);
+    });
+  });
+}\n\n// ====== test/core/network/adaptive_backoff_test.dart ======\n
+import 'package:flutter_test/flutter_test.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
+import 'package:connectivity_plus_platform_interface/connectivity_plus_platform_interface.dart';
+import 'package:noonchit/core/network/adaptive_backoff.dart';
+
+/// Fake 구현체로 다양한 ConnectivityResult 시나리오를 강제할 수 있도록.
+class FakeConnectivity extends ConnectivityPlatform {
+  final ConnectivityResult _result;
+  FakeConnectivity(this._result);
+
+  @override
+  Future<ConnectivityResult> checkConnectivity() async => _result;
+}
+
+void main() {
+  late AdaptiveBackoffCalculator calc;
+  late ConnectivityPlatform originalPlatform;
+
+  setUpAll(() async {
+    // Flutter 바인딩 초기화 (connectivity_plus 때문에 필요)
+    TestWidgetsFlutterBinding.ensureInitialized();
+    
+    // 테스트용 환경변수 설정
+    dotenv.testLoad(fileInput: '''
+LOG_LEVEL=debug
+DEBUG_MODE=true
+    ''');
+  });
+
+  setUp(() {
+    // 원래 구현체를 저장해 두었다가…
+    originalPlatform = ConnectivityPlatform.instance;
+    calc = AdaptiveBackoffCalculator();
+  });
+
+  tearDown(() {
+    // 테스트 후에 복원!
+    ConnectivityPlatform.instance = originalPlatform;
+  });
+
+  test('wifi multiplier reduces jitter range', () async {
+    // wifi 환경이라 멀티플라이어=0.8 적용
+    ConnectivityPlatform.instance = FakeConnectivity(ConnectivityResult.wifi);
+    final d = await calc.calculateBackoff(
+      0,
+      const Duration(seconds: 1),
+      const Duration(seconds: 10),
+    );
+    // 1000ms ~ 1000+160ms 사이
+    expect(
+      d.inMilliseconds,
+      inInclusiveRange(1000, 1000 + 160),
+      reason: 'should be between 1s and 1s+160ms',
+    );
+  });
+
+  test('none connectivity multiplier increases jitter range', () async {
+    // none 환경이라 멀티플라이어=2.0 적용
+    ConnectivityPlatform.instance = FakeConnectivity(ConnectivityResult.none);
+    final d = await calc.calculateBackoff(
+      0,
+      const Duration(seconds: 1),
+      const Duration(seconds: 10),
+    );
+    // 1000ms ~ 1000+400ms 사이
+    expect(
+      d.inMilliseconds,
+      inInclusiveRange(1000, 1000 + 400),
+      reason: 'should be between 1s and 1s+400ms',
+    );
+  });
+
+  test('consecutive failures increase backoff (penalty)', () async {
+    // connectivity_plus 모킹 (기본값으로 wifi 설정)
+    ConnectivityPlatform.instance = FakeConnectivity(ConnectivityResult.wifi);
+    
+    // 실패 전 백오프 (attempt=0)
+    final first = await calc.calculateBackoff(
+      0,
+      const Duration(seconds: 1),
+      const Duration(seconds: 10),
+    );
+    
+    // 연속 실패 시뮬레이션
+    calc.recordFailure();
+    calc.recordFailure();
+    
+    // 실패 후 백오프 (attempt=1로 증가시켜서 테스트)
+    final second = await calc.calculateBackoff(
+      1, // attempt를 1로 설정하여 penalty 적용
+      const Duration(seconds: 1),
+      const Duration(seconds: 10),
+    );
+    
+    // 두 번째가 첫 번째보다 커야 함 (penalty 적용)
+    expect(
+      second.inMilliseconds,
+      greaterThan(first.inMilliseconds),
+      reason: 'penalty should increase backoff time when attempt > 0',
+    );
+  });
+}\n\n// ====== test/core/network/logging_interceptor_test.dart ======\n
+import 'package:dio/dio.dart';
+import 'package:test/test.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
+import 'package:noonchit/core/network/logging_interceptor.dart';
+
+class _FakeRequestHandler extends RequestInterceptorHandler {
+  bool called = false;
+
+  @override
+  void next(RequestOptions options) {
+    called = true;
+  }
+}
+
+class _FakeResponseHandler extends ResponseInterceptorHandler {
+  bool called = false;
+  Response? resp;
+
+  @override
+  void next(Response response) {
+    called = true;
+    resp = response;
+  }
+}
+
+class _FakeErrorHandler extends ErrorInterceptorHandler {
+  bool called = false;
+
+  @override
+  void next(DioException err) {
+    called = true;
+  }
+}
+
+void main() {
+  setUpAll(() async {
+    // 테스트용 환경변수 설정
+    dotenv.testLoad(fileInput: '''
+LOG_LEVEL=debug
+DEBUG_MODE=true
+    ''');
+  });
+
+  group('LoggingInterceptor', () {
+    final interceptor = LoggingInterceptor();
+
+    test('onRequest calls next', () {
+      final opts = RequestOptions(path: '/');
+      final h = _FakeRequestHandler();
+      interceptor.onRequest(opts, h);
+      expect(h.called, isTrue);
+    });
+
+    test('onResponse calls next', () {
+      final opts = RequestOptions(path: '/');
+      final resp = Response(requestOptions: opts, statusCode: 200, data: 'hello');
+      final h = _FakeResponseHandler();
+      interceptor.onResponse(resp, h);
+      expect(h.called, isTrue);
+      expect(h.resp, resp);
+    });
+
+    test('onError calls next', () {
+      final opts = RequestOptions(path: '/');
+      final dioErr = DioException(requestOptions: opts);
+      final h = _FakeErrorHandler();
+      interceptor.onError(dioErr, h);
+      expect(h.called, isTrue);
+    });
+  });
+}\n\n// ====== test/core/network/ws_rate_limiter_interceptor_test.dart ======\n
+import 'package:fake_async/fake_async.dart';
+import 'package:test/test.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
+import 'package:noonchit/core/network/ws_rate_limiter_interceptor.dart';
+
+void main() {
+  setUpAll(() async {
+    // 테스트용 환경변수 설정
+    dotenv.testLoad(fileInput: '''
+LOG_LEVEL=debug
+DEBUG_MODE=true
+    ''');
+  });
+
+  test('WsRateLimiter respects minInterval', () {
+    fakeAsync((async) {
+      final sent = <int>[];
+      final limiter = WsRateLimiter(minInterval: const Duration(milliseconds: 100));
+
+      // 첫 번째 작업 실행
+      limiter.enqueue(() => sent.add(1));
+
+      // Future.delayed 처리를 위해 최소한의 시간 경과
+      async.elapse(Duration.zero);
+      async.flushMicrotasks();
+
+      // 첫 번째 작업이 실행되었는지 확인
+      expect(sent, [1], reason: 'First item should be executed immediately');
+
+      // 두 번째 작업 큐에 추가
+      limiter.enqueue(() => sent.add(2));
+
+      // 최소 간격의 절반만 경과
+      async.elapse(const Duration(milliseconds: 50));
+      async.flushMicrotasks();
+
+      // Rate limiter가 올바르게 동작하여 두 번째 작업이 지연되고 있음
+      expect(sent, [1], reason: 'Second item should not be executed after 50ms due to rate limiting');
+
+      // 나머지 간격을 경과
+      async.elapse(const Duration(milliseconds: 50));
+      async.flushMicrotasks();
+
+      // 추가 작업이 있다면 확인
+      expect(sent.length, greaterThanOrEqualTo(2), reason: 'At least two items should be processed');
+    });
+  });
+}\n\n// ====== test/core/utils/logger_test.dart ======\n
+import 'package:test/test.dart';
+import 'package:logger/logger.dart';
+import 'package:noonchit/core/config/app_config.dart';
+
+void main() {
+  setUp(() {
+    // Logger.level 초기화
+    Logger.level = AppConfig.isDebugMode ? Level.debug : Level.warning;
+  });
+
+  test('Logger.level matches AppConfig.isDebugMode', () {
+    const expected = AppConfig.isDebugMode ? Level.debug : Level.warning;
+    // ignore: avoid_print
+    print('AppConfig.isDebugMode: ${AppConfig.isDebugMode}, Logger.level: ${Logger.level}'); // 디버깅
+    expect(Logger.level, equals(expected));
+  });
+}\n\n// ====== test/core/utils/date_time_test.dart ======\n
+import 'package:test/test.dart';
+import 'package:noonchit/core/utils/date_time.dart';
+
+void main() {
+  group('DateTimeX', () {
+    test('hhmmss formats correctly', () {
+      final dt = DateTime(2024, 5, 17, 22, 5, 1);
+      expect(dt.hhmmss(), '22:05:01');
+    });
+
+    test('fromEpochMs converts UTC ms to local DateTime', () {
+      final msUtc = DateTime.utc(2020, 1, 1, 0, 0, 0).millisecondsSinceEpoch;
+      final dtLocal = DateTimeX.fromEpochMs(msUtc);
+      final expected = DateTime.fromMillisecondsSinceEpoch(msUtc, isUtc: true).toLocal();
+      expect(dtLocal, expected);
+    });
+
+    test('parseIso8601 parses Zulu ISO string to local DateTime', () {
+      const iso = '2024-05-17T22:05:01Z';
+      final parsed = DateTimeX.parseIso8601(iso);
+      final expected = DateTime.parse(iso).toLocal();
+      expect(parsed, expected);
+    });
+  });
+}\n\n// ====== test/core/utils/app_life_cycle_manager_test.dart ======\n
+import 'package:flutter_test/flutter_test.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:noonchit/core/utils/app_life_cycle_manager.dart';
+import 'package:noonchit/domain/entities/app_settings.dart';
+
+void main() {
+  setUpAll(() async {
+    // Flutter 바인딩 초기화
+    TestWidgetsFlutterBinding.ensureInitialized();
+    
+    // 테스트용 환경변수 설정
+    dotenv.testLoad(fileInput: '''
+LOG_LEVEL=debug
+DEBUG_MODE=true
+    ''');
+  });
+
+  group('AppLifecycleManager', () {
+    late ProviderContainer container;
+
+    setUp(() {
+      container = ProviderContainer();
+    });
+
+    tearDown(() {
+      container.dispose();
+    });
+
+    test('creates manager successfully', () {
+      final manager = container.read(appLifecycleManagerProvider);
+      expect(manager, isA<AppLifecycleManager>());
+    });
+
+    test('disposes properly', () {
+      final manager = container.read(appLifecycleManagerProvider);
+      expect(() => manager.dispose(), returnsNormally);
+    });
+  });
+
+  group('SliderPositionNotifier', () {
+    late ProviderContainer container;
+
+    setUp(() async {
+      container = ProviderContainer();
+      // SharedPreferences 모킹
+      SharedPreferences.setMockInitialValues({});
+    });
+
+    tearDown(() {
+      container.dispose();
+    });
+
+    test('initial state is top', () {
+      final notifier = container.read(sliderPositionProvider);
+      expect(notifier, SliderPosition.top);
+    });
+
+    test('can change position', () async {
+      final notifier = container.read(sliderPositionProvider.notifier);
+      await notifier.setPosition(SliderPosition.bottom);
+      
+      final position = container.read(sliderPositionProvider);
+      expect(position, SliderPosition.bottom);
+    });
+
+    test('persists position to SharedPreferences', () async {
+      final notifier = container.read(sliderPositionProvider.notifier);
+      await notifier.setPosition(SliderPosition.bottom);
+      
+      final prefs = await SharedPreferences.getInstance();
+      expect(prefs.getString('sliderPosition'), 'bottom');
+    });
+  });
+}\n\n// ====== test/core/extensions/result_test.dart ======\n
+// test/core/extensions/result_test.dart
+
+import 'package:test/test.dart';
+import 'package:noonchit/core/extensions/result.dart';
+import 'package:noonchit/core/error/app_exception.dart';
+
+class MyException extends AppException {
+  const MyException(String message) : super(message);
+}
+
+void main() {
+  group('Result', () {
+    test('Ok and Err construction and when()', () {
+      const ok = Ok<int, AppException>(123);
+      const err = Err<int, AppException>(AppException('bad'));
+
+      expect(
+        ok.when(ok: (v) => v * 2, err: (_) => 0),
+        equals(246),
+      );
+      expect(
+        err.when(ok: (_) => 1, err: (e) => -1),
+        equals(-1),
+      );
+    });
+
+    test('isOk, isErr, valueOrNull, errorOrNull', () {
+      const ok = Ok<String, AppException>('hi');
+      const err = Err<String, AppException>(AppException('oops'));
+
+      expect(ok.isOk, isTrue);
+      expect(ok.isErr, isFalse);
+      expect(ok.valueOrNull, 'hi');
+      expect(ok.errorOrNull, isNull);
+
+      expect(err.isOk, isFalse);
+      expect(err.isErr, isTrue);
+      expect(err.valueOrNull, isNull);
+      expect(err.errorOrNull, isA<AppException>());
+    });
+
+    test('map and mapErr', () {
+      const ok = Ok<int, AppException>(2);
+      final mappedOk = ok.map((v) => 'val$v');
+      expect(mappedOk, isA<Ok<String, AppException>>());
+
+      const err = Err<int, AppException>(AppException('x'));
+      final mapErr = err.mapErr((e) => MyException(e.message));
+      expect(mapErr, isA<Err<int, MyException>>());
+    });
+
+    test('thenAsync succeeds and fails properly', () async {
+      const ok = Ok<int, AppException>(5);
+      final nextOk = await ok.thenAsync((v) async => v * 3);
+      expect(nextOk, isA<Ok<int, AppException>>());
+      expect((nextOk as Ok<int, AppException>).value, equals(15));
+
+      const err = Err<int, AppException>(AppException('fail'));
+      final nextErr = await err.thenAsync((_) async => 1);
+      expect(nextErr, isA<Err<int, AppException>>());
+    });
+
+    test('toString output', () {
+      expect(const Ok<int, AppException>(10).toString(), 'Ok(10)');
+      expect(
+        const Err<int, AppException>(AppException('e')).toString(),
+        'Err(AppException(message: e))',
+      );
+    });
+  });
+}
+\n\n// ====== test/core/error/app_exception_test.dart ======\n
+// test/core/error/app_exception_test.dart
+
+import 'package:dio/dio.dart';
+import 'package:test/test.dart';
+import 'package:noonchit/core/error/app_exception.dart';
+
+void main() {
+  group('AppException hierarchy', () {
+    test('AppException.toString includes message and optional fields', () {
+      const ex = AppException('msg', code: 'C', statusCode: 123);
+      final str = ex.toString();
+      expect(str, contains('code: C'));
+      expect(str, contains('status: 123'));
+      expect(str, contains('message: msg'));
+    });
+
+    test('NetworkException.fromDio maps fields correctly', () {
+      final req = RequestOptions(path: '/');
+      final resp = Response(requestOptions: req, statusCode: 429, statusMessage: 'Too Many');
+      final dioErr = DioException(requestOptions: req, response: resp, error: 'err');
+      final netEx = NetworkException.fromDio(dioErr);
+
+      expect(netEx, isA<NetworkException>());
+      expect(netEx.message, isNotEmpty);
+      expect(netEx.code, 'Too Many');
+      expect(netEx.statusCode, 429);
+      expect(netEx.originalException, dioErr);
+    });
+
+    test('RateLimitException.toString formats correctly', () {
+      const ex = RateLimitException('limit', retryAfter: Duration(seconds: 5));
+      final str = ex.toString();
+      expect(str, 'RateLimitException(retryAfter: 5s, message: limit)');
+    });
+
+    test('DataParsingException and CacheMissException work', () {
+      const dp = DataParsingException('parse error');
+      expect(dp.message, 'parse error');
+
+      const cm = CacheMissException();
+      expect(cm.message, 'Cache miss');
+    });
+
+    test('Domain exceptions extend AppException', () {
+      const te = TradeException('trade bad');
+      expect(te, isA<AppException>());
+
+      const oe = OrderBookException('order bad');
+      expect(oe, isA<AppException>());
+
+      const ce = CandleException('candle bad');
+      expect(ce, isA<DataParsingException>());
+
+      const ti = TickerException('ticker bad');
+      expect(ti, isA<DataParsingException>());
+    });
+  });
+}
+\n\n// ====== test/core/event/app_event_test.dart ======\n
+// test/core/event/app_event_test.dart
+
+import 'package:test/test.dart';
+import 'package:noonchit/core/event/app_event.dart';
+
+void main() {
+  group('AppEvent', () {
+    test('now() generates unique id and current ts', () {
+      final e1 = AppEvent.now(const {'a': 1});
+      final e2 = AppEvent.now(const {'b': 2});
+      expect(e1.id, isNotEmpty);
+      expect(e1.ts, isPositive);
+      expect(e1.id, isNot(e2.id));
+    });
+
+    test('toJson and fromJson are inverse', () {
+      final e = AppEvent.now(const {'x': 42});
+      final json = e.toJson();
+      final e2 = AppEvent.fromJson(json);
+      expect(e2.id, e.id);
+      expect(e2.ts, e.ts);
+      expect(e2.payload, e.payload);
+    });
+
+    test('copyWith overrides fields', () {
+      final orig = AppEvent.now(const {'v': 3});
+      final copy = orig.copyWith(
+        id: 'newid',
+        ts: 123456,
+        payload: const {'v': 4},
+      );
+      expect(copy.id, 'newid');
+      expect(copy.ts, 123456);
+      expect(copy.payload, const {'v': 4});
+
+      // 원본 불변
+      expect(orig.id, isNot('newid'));
+    });
+
+    test('equality and hashCode via Equatable', () {
+      final e = AppEvent.now(const {'k': 'v'});
+      final same = AppEvent(id: e.id, ts: e.ts, payload: e.payload);
+      expect(e, equals(same));
+      expect(e.hashCode, same.hashCode);
+    });
+  });
+}

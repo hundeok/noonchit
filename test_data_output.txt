@@ -1,0 +1,1278 @@
+\n\n// ====== test/data/datasources/trade_cache_ds_test.dart ======\n
+// test/data/datasources/trade_cache_ds_test.dart
+import 'package:flutter_test/flutter_test.dart';
+import 'package:hive/hive.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
+import 'package:noonchit/data/datasources/trade_cache_ds.dart';
+import 'package:noonchit/data/models/trade_dto.dart';
+import 'package:noonchit/domain/entities/trade.dart';
+
+void main() {
+  late TradeCacheDataSource dataSource;
+
+  setUpAll(() async {
+    dotenv.testLoad(fileInput: '''
+LOG_LEVEL=debug
+DEBUG_MODE=true
+    ''');
+    
+    Hive.init('./test_hive');
+    
+    // TypeAdapter가 이미 등록되어 있는지 확인 후 등록
+    if (!Hive.isAdapterRegistered(0)) {
+      Hive.registerAdapter(TradeDtoAdapter());
+    }
+  });
+
+  setUp(() async {
+    dataSource = TradeCacheDataSource();
+    await dataSource.init();
+  });
+
+  tearDown(() async {
+    try {
+      await dataSource.clearCache();
+      await dataSource.dispose();
+    } catch (e) {
+      // 이미 닫혀있을 수 있으니 무시
+    }
+  });
+
+  tearDownAll(() async {
+    try {
+      await Hive.close();
+      await Hive.deleteFromDisk();
+    } catch (e) {
+      // 무시
+    }
+  });
+
+  group('TradeCacheDataSource', () {
+    const trade = Trade(
+      market: 'KRW-BTC',
+      price: 50000.0,
+      volume: 2.5,
+      side: 'BID',
+      changePrice: 0.0,
+      changeState: 'EVEN',
+      timestampMs: 1630000000000,
+      sequentialId: '12345',
+    );
+
+    test('init should open box', () async {
+      expect(Hive.isBoxOpen('trades'), true);
+    });
+
+    test('cacheTrade should store TradeDto in box', () async {
+      await dataSource.cacheTrade(trade);
+      
+      final result = dataSource.getCachedTrades();
+      expect(result.length, 1);
+      expect(result.first.market, 'KRW-BTC');
+      expect(result.first.sequentialId, '12345');
+    });
+
+    test('cacheTrade should handle max size limit', () async {
+      // Fill box to max size + 1
+      for (int i = 0; i < 1001; i++) {
+        final testTrade = Trade(
+          market: 'KRW-BTC',
+          price: 50000.0,
+          volume: 1.0,
+          side: 'BID',
+          changePrice: 0.0,
+          changeState: 'EVEN',
+          timestampMs: 1630000000000 + i,
+          sequentialId: i.toString(),
+        );
+        await dataSource.cacheTrade(testTrade);
+      }
+      
+      final box = Hive.box<TradeDto>('trades');
+      expect(box.length, lessThanOrEqualTo(1000));
+    });
+
+    test('getCachedTrades should return list of trades', () async {
+      await dataSource.cacheTrade(trade);
+      
+      final result = dataSource.getCachedTrades();
+      expect(result.length, 1);
+      expect(result.first.market, 'KRW-BTC');
+      expect(result.first.price, 50000.0);
+      expect(result.first.volume, 2.5);
+    });
+
+    test('getCachedTrades should return empty list when no cached data', () async {
+      final result = dataSource.getCachedTrades();
+      expect(result, isEmpty);
+    });
+
+    test('clearCache should clear the box', () async {
+      await dataSource.cacheTrade(trade);
+      expect(dataSource.getCachedTrades().length, 1);
+      
+      await dataSource.clearCache();
+      expect(dataSource.getCachedTrades(), isEmpty);
+    });
+
+    test('dispose should close the box', () async {
+      expect(Hive.isBoxOpen('trades'), true);
+      
+      await dataSource.dispose();
+      expect(Hive.isBoxOpen('trades'), false);
+    });
+  });
+}\n\n// ====== test/data/datasources/settings_local_ds_test.dart ======\n
+// test/data/datasources/settings_local_ds_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:mocktail/mocktail.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
+import 'package:noonchit/data/datasources/settings_local_ds.dart';
+import 'package:noonchit/domain/entities/app_settings.dart';
+
+class MockSharedPreferences extends Mock implements SharedPreferences {}
+
+void main() {
+  late SettingsLocalDataSource dataSource;
+  late MockSharedPreferences mockPrefs;
+
+  setUpAll(() async {
+    dotenv.testLoad(fileInput: '''
+LOG_LEVEL=debug
+DEBUG_MODE=true
+    ''');
+  });
+
+  setUp(() {
+    mockPrefs = MockSharedPreferences();
+    dataSource = SettingsLocalDataSource(mockPrefs);
+  });
+
+  group('SettingsLocalDataSource', () {
+    group('ThemeMode', () {
+      test('getThemeMode should return ThemeMode.dark for dark value', () {
+        when(() => mockPrefs.getString('themeMode')).thenReturn('dark');
+        expect(dataSource.getThemeMode(), ThemeMode.dark);
+        verify(() => mockPrefs.getString('themeMode')).called(1);
+      });
+
+      test('getThemeMode should return ThemeMode.light for light value', () {
+        when(() => mockPrefs.getString('themeMode')).thenReturn('light');
+        expect(dataSource.getThemeMode(), ThemeMode.light);
+        verify(() => mockPrefs.getString('themeMode')).called(1);
+      });
+
+      test('getThemeMode should return ThemeMode.system if not set', () {
+        when(() => mockPrefs.getString('themeMode')).thenReturn(null);
+        expect(dataSource.getThemeMode(), ThemeMode.system);
+        verify(() => mockPrefs.getString('themeMode')).called(1);
+      });
+
+      test('getThemeMode should return ThemeMode.system for unknown value', () {
+        when(() => mockPrefs.getString('themeMode')).thenReturn('unknown');
+        expect(dataSource.getThemeMode(), ThemeMode.system);
+        verify(() => mockPrefs.getString('themeMode')).called(1);
+      });
+
+      test('saveThemeMode should save light theme to preferences', () async {
+        when(() => mockPrefs.setString('themeMode', 'light')).thenAnswer((_) async => true);
+        await dataSource.saveThemeMode(ThemeMode.light);
+        verify(() => mockPrefs.setString('themeMode', 'light')).called(1);
+      });
+
+      test('saveThemeMode should save dark theme to preferences', () async {
+        when(() => mockPrefs.setString('themeMode', 'dark')).thenAnswer((_) async => true);
+        await dataSource.saveThemeMode(ThemeMode.dark);
+        verify(() => mockPrefs.setString('themeMode', 'dark')).called(1);
+      });
+
+      test('saveThemeMode should save system theme to preferences', () async {
+        when(() => mockPrefs.setString('themeMode', 'system')).thenAnswer((_) async => true);
+        await dataSource.saveThemeMode(ThemeMode.system);
+        verify(() => mockPrefs.setString('themeMode', 'system')).called(1);
+      });
+    });
+
+    group('KeepScreenOn', () {
+      test('getKeepScreenOn should return true when set to true', () {
+        when(() => mockPrefs.getBool('keepScreenOn')).thenReturn(true);
+        expect(dataSource.getKeepScreenOn(), true);
+        verify(() => mockPrefs.getBool('keepScreenOn')).called(1);
+      });
+
+      test('getKeepScreenOn should return false when set to false', () {
+        when(() => mockPrefs.getBool('keepScreenOn')).thenReturn(false);
+        expect(dataSource.getKeepScreenOn(), false);
+        verify(() => mockPrefs.getBool('keepScreenOn')).called(1);
+      });
+
+      test('getKeepScreenOn should return false if not set', () {
+        when(() => mockPrefs.getBool('keepScreenOn')).thenReturn(null);
+        expect(dataSource.getKeepScreenOn(), false);
+        verify(() => mockPrefs.getBool('keepScreenOn')).called(1);
+      });
+
+      test('saveKeepScreenOn should save true to preferences', () async {
+        when(() => mockPrefs.setBool('keepScreenOn', true)).thenAnswer((_) async => true);
+        await dataSource.saveKeepScreenOn(true);
+        verify(() => mockPrefs.setBool('keepScreenOn', true)).called(1);
+      });
+
+      test('saveKeepScreenOn should save false to preferences', () async {
+        when(() => mockPrefs.setBool('keepScreenOn', false)).thenAnswer((_) async => true);
+        await dataSource.saveKeepScreenOn(false);
+        verify(() => mockPrefs.setBool('keepScreenOn', false)).called(1);
+      });
+    });
+
+    group('SliderPosition', () {
+      test('getSliderPosition should return SliderPosition.bottom for bottom value', () {
+        when(() => mockPrefs.getString('sliderPosition')).thenReturn('bottom');
+        expect(dataSource.getSliderPosition(), SliderPosition.bottom);
+        verify(() => mockPrefs.getString('sliderPosition')).called(1);
+      });
+
+      test('getSliderPosition should return SliderPosition.top for top value', () {
+        when(() => mockPrefs.getString('sliderPosition')).thenReturn('top');
+        expect(dataSource.getSliderPosition(), SliderPosition.top);
+        verify(() => mockPrefs.getString('sliderPosition')).called(1);
+      });
+
+      test('getSliderPosition should return SliderPosition.top if not set', () {
+        when(() => mockPrefs.getString('sliderPosition')).thenReturn(null);
+        expect(dataSource.getSliderPosition(), SliderPosition.top);
+        verify(() => mockPrefs.getString('sliderPosition')).called(1);
+      });
+
+      test('getSliderPosition should return SliderPosition.top for unknown value', () {
+        when(() => mockPrefs.getString('sliderPosition')).thenReturn('unknown');
+        expect(dataSource.getSliderPosition(), SliderPosition.top);
+        verify(() => mockPrefs.getString('sliderPosition')).called(1);
+      });
+
+      test('saveSliderPosition should save bottom position to preferences', () async {
+        when(() => mockPrefs.setString('sliderPosition', 'bottom')).thenAnswer((_) async => true);
+        await dataSource.saveSliderPosition(SliderPosition.bottom);
+        verify(() => mockPrefs.setString('sliderPosition', 'bottom')).called(1);
+      });
+
+      test('saveSliderPosition should save top position to preferences', () async {
+        when(() => mockPrefs.setString('sliderPosition', 'top')).thenAnswer((_) async => true);
+        await dataSource.saveSliderPosition(SliderPosition.top);
+        verify(() => mockPrefs.setString('sliderPosition', 'top')).called(1);
+      });
+    });
+
+    group('Error Handling', () {
+      test('should handle SharedPreferences exceptions gracefully', () {
+        when(() => mockPrefs.getString('themeMode')).thenThrow(Exception('Storage error'));
+        
+        expect(() => dataSource.getThemeMode(), throwsException);
+      });
+    });
+  });
+}\n\n// ====== test/data/datasources/trade_remote_ds_test.dart ======\n
+// test/data/datasources/trade_remote_ds_test.dart
+import 'dart:async';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:mocktail/mocktail.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
+import 'package:noonchit/core/bridge/signal_bus.dart';
+import 'package:noonchit/core/network/websocket/trade_ws_client.dart';
+import 'package:noonchit/data/datasources/trade_remote_ds.dart';
+import 'package:noonchit/core/event/app_event.dart';
+import 'package:noonchit/domain/entities/trade.dart';
+
+class MockTradeWsClient extends Mock implements TradeWsClient {}
+class MockSignalBus extends Mock implements SignalBus {}
+
+void main() {
+  late TradeRemoteDataSource dataSource;
+  late MockTradeWsClient mockWsClient;
+  late MockSignalBus mockSignalBus;
+
+  setUpAll(() async {
+    dotenv.testLoad(fileInput: '''
+LOG_LEVEL=debug
+DEBUG_MODE=true
+    ''');
+    registerFallbackValue(AppEvent.now(const {}));
+  });
+
+  setUp(() {
+    mockWsClient = MockTradeWsClient();
+    mockSignalBus = MockSignalBus();
+    dataSource = TradeRemoteDataSource(mockWsClient, mockSignalBus);
+  });
+
+  tearDown(() async {
+    await dataSource.dispose();
+  });
+
+  group('TradeRemoteDataSource', () {
+    const tradeMap = {
+      'market': 'KRW-BTC',
+      'trade_price': 50000.0,
+      'trade_volume': 2.5,
+      'ask_bid': 'BID',
+      'cp': 0.0,
+      'change': 'EVEN',
+      'timestamp_ms': 1630000000000,
+      'sid': '12345',
+    };
+
+    test('watch should stream trades from WebSocket', () async {
+      final controller = StreamController<List<Map<String, dynamic>>>();
+      when(() => mockWsClient.connect(['KRW-BTC'])).thenAnswer((_) async => {});
+      when(() => mockWsClient.stream).thenAnswer((_) => controller.stream);
+      when(() => mockSignalBus.fireTradeEvent(any())).thenReturn(null);
+
+      final stream = dataSource.watch(['KRW-BTC']);
+      controller.add([tradeMap]);
+
+      final result = await stream.first;
+      expect(result.market, 'KRW-BTC');
+      expect(result.price, 50000.0);
+      expect(result.volume, 2.5);
+      expect(result.side, 'BID');
+
+      verify(() => mockSignalBus.fireTradeEvent(any())).called(1);
+      await controller.close();
+    });
+
+    test('watch should fallback to test stream on WebSocket error', () async {
+      when(() => mockWsClient.connect(['KRW-BTC'])).thenThrow(Exception('Connection failed'));
+      when(() => mockWsClient.stream).thenAnswer((_) => Stream.error('WS Error'));
+      when(() => mockSignalBus.fireTradeEvent(any())).thenReturn(null);
+
+      final testDataSource = TradeRemoteDataSource(
+        mockWsClient,
+        mockSignalBus,
+        useTestData: true,
+      );
+
+      final stream = testDataSource.watch(['KRW-BTC']);
+      final trade = await stream.first;
+
+      expect(trade.market, contains('KRW-'));
+      expect(['BID', 'ASK'].contains(trade.side), true);
+      expect(trade.price, greaterThan(0));
+
+      await testDataSource.dispose();
+    });
+
+    test('watch with useTestData should return synthetic stream', () async {
+      final testDataSource = TradeRemoteDataSource(
+        mockWsClient,
+        mockSignalBus,
+        useTestData: true,
+      );
+      when(() => mockSignalBus.fireTradeEvent(any())).thenReturn(null);
+
+      final stream = testDataSource.watch(['KRW-BTC']);
+      final trade = await stream.first;
+
+      expect(trade.market, contains('KRW-'));
+      expect(['BID', 'ASK'].contains(trade.side), true);
+      expect(trade.price, greaterThan(0));
+
+      await testDataSource.dispose();
+    });
+
+    test('watch should handle invalid trade data gracefully', () async {
+      final controller = StreamController<List<Map<String, dynamic>>>();
+      when(() => mockWsClient.connect(['KRW-BTC'])).thenAnswer((_) async => {});
+      when(() => mockWsClient.stream).thenAnswer((_) => controller.stream);
+
+      final stream = dataSource.watch(['KRW-BTC']);
+      controller.add([{'market': null, 'price': 'invalid'}]);
+      final tradesReceived = <Trade>[];
+      final subscription = stream.listen((trade) {
+        tradesReceived.add(trade);
+      });
+
+      await Future.delayed(const Duration(milliseconds: 100));
+      
+      // TradeDto.tryParse가 null을 반환하지 않고 기본값으로 Trade를 생성하므로
+      // 빈 리스트가 아닌 기본값이 포함된 Trade가 반환됨
+      expect(tradesReceived.length, 1);
+      expect(tradesReceived.first.market, 'UNKNOWN');
+
+      await subscription.cancel();
+      await controller.close();
+    });
+
+    test('dispose should clean up resources', () async {
+      final controller = StreamController<List<Map<String, dynamic>>>();
+      when(() => mockWsClient.connect(['KRW-BTC'])).thenAnswer((_) async => {});
+      when(() => mockWsClient.stream).thenAnswer((_) => controller.stream);
+
+      final stream = dataSource.watch(['KRW-BTC']);
+      final subscription = stream.listen((_) {});
+
+      await dataSource.dispose();
+
+      await subscription.cancel();
+      await controller.close();
+    });
+  });
+}\n\n// ====== test/data/repositories/trade_repository_impl_test.dart ======\n
+// test/data/repositories/trade_repository_impl_test.dart
+import 'dart:async';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:mocktail/mocktail.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
+import 'package:noonchit/data/datasources/trade_cache_ds.dart';
+import 'package:noonchit/data/datasources/trade_remote_ds.dart';
+import 'package:noonchit/data/repositories/trade_repository_impl.dart';
+import 'package:noonchit/domain/entities/trade.dart';
+
+class MockTradeRemoteDataSource extends Mock implements TradeRemoteDataSource {}
+class MockTradeCacheDataSource extends Mock implements TradeCacheDataSource {}
+
+void main() {
+  late TradeRepositoryImpl repository;
+  late MockTradeRemoteDataSource mockRemote;
+  late MockTradeCacheDataSource mockCache;
+
+  setUpAll(() async {
+    dotenv.testLoad(fileInput: '''
+LOG_LEVEL=debug
+DEBUG_MODE=true
+    ''');
+    registerFallbackValue(Trade(
+      market: 'KRW-BTC',
+      price: 0.0,
+      volume: 0.0,
+      side: 'BID',
+      changePrice: 0.0,
+      changeState: 'EVEN',
+      timestampMs: 0,
+      sequentialId: '',
+    ));
+  });
+
+  setUp(() {
+    mockRemote = MockTradeRemoteDataSource();
+    mockCache = MockTradeCacheDataSource();
+    repository = TradeRepositoryImpl(mockRemote, mockCache);
+    when(() => mockRemote.dispose()).thenAnswer((_) async => {});
+    when(() => mockCache.dispose()).thenAnswer((_) async => {});
+    when(() => mockCache.cacheTrade(any())).thenAnswer((_) async => {});
+  });
+
+  tearDown(() async {
+    await repository.dispose();
+  });
+
+  group('TradeRepositoryImpl', () {
+    final trade = Trade(
+      market: 'KRW-BTC',
+      price: 50000000.0, // 5천만원으로 설정 (필터 임계값 충족)
+      volume: 2.5,
+      side: 'BID',
+      changePrice: 0.0,
+      changeState: 'EVEN',
+      timestampMs: 1630000000000,
+      sequentialId: '12345',
+    );
+
+    test('watchTrades should stream raw trades', () async {
+      final controller = StreamController<Trade>.broadcast();
+      when(() => mockRemote.watch(['KRW-BTC'])).thenAnswer((_) => controller.stream);
+
+      final stream = repository.watchTrades(['KRW-BTC']);
+      controller.add(trade);
+
+      final result = await stream.first;
+      expect(result.market, trade.market);
+      expect(result.price, trade.price);
+
+      await controller.close();
+    });
+
+    test('watchTrades should initialize master stream only once', () async {
+      final controller = StreamController<Trade>.broadcast();
+      when(() => mockRemote.watch(any())).thenAnswer((_) => controller.stream);
+
+      final stream1 = repository.watchTrades(['KRW-BTC']);
+      final stream2 = repository.watchTrades(['KRW-ETH']);
+
+      expect(identical(stream1, stream2), true);
+      verify(() => mockRemote.watch(any())).called(1);
+
+      await controller.close();
+    });
+
+    test('watchFilteredTrades should stream filtered trades', () async {
+      final controller = StreamController<Trade>.broadcast();
+      when(() => mockRemote.watch(['KRW-BTC'])).thenAnswer((_) => controller.stream);
+      when(() => mockCache.cacheTrade(trade)).thenAnswer((_) async => {});
+
+      final stream = repository.watchFilteredTrades(100000000, ['KRW-BTC']); // 1억원 임계값
+
+      final tradesReceived = <List<Trade>>[];
+      final subscription = stream.listen((trades) {
+        tradesReceived.add(trades);
+      });
+
+      controller.add(trade);
+      await Future.delayed(const Duration(milliseconds: 200));
+
+      expect(tradesReceived.isNotEmpty, true);
+      if (tradesReceived.isNotEmpty) {
+        expect(tradesReceived.first, contains(trade));
+      }
+      verify(() => mockCache.cacheTrade(trade)).called(1);
+
+      await subscription.cancel();
+      await controller.close();
+    });
+
+    test('updateThreshold should trigger batch update', () async {
+      final controller = StreamController<Trade>.broadcast();
+      when(() => mockRemote.watch(['KRW-BTC'])).thenAnswer((_) => controller.stream);
+      when(() => mockCache.cacheTrade(trade)).thenAnswer((_) async => {});
+
+      final stream = repository.watchFilteredTrades(50000000, ['KRW-BTC']); // 5천만원 임계값
+
+      final tradesReceived = <List<Trade>>[];
+      final subscription = stream.listen((trades) {
+        tradesReceived.add(trades);
+      });
+
+      controller.add(trade);
+      await Future.delayed(const Duration(milliseconds: 200));
+
+      // 임계값을 높여서 기존 거래가 필터링되도록 함
+      repository.updateThreshold(200000000); // 2억원으로 상향
+      await Future.delayed(const Duration(milliseconds: 200));
+
+      expect(tradesReceived.length, greaterThanOrEqualTo(1));
+
+      await subscription.cancel();
+      await controller.close();
+    });
+
+    test('watchAggregatedTrades should stream aggregated trades', () async {
+      final controller = StreamController<Trade>.broadcast();
+      when(() => mockRemote.watch(any())).thenAnswer((_) => controller.stream);
+      when(() => mockCache.cacheTrade(trade)).thenAnswer((_) async => {});
+
+      final stream = repository.watchAggregatedTrades();
+
+      final tradesReceived = <Trade>[];
+      final subscription = stream.listen((trade) {
+        tradesReceived.add(trade);
+      });
+
+      // 마스터 스트림 초기화를 위해 watchTrades 호출
+      repository.watchTrades(['KRW-BTC']);
+      
+      controller.add(trade);
+      await Future.delayed(const Duration(milliseconds: 200));
+
+      expect(tradesReceived.isNotEmpty, true);
+
+      await subscription.cancel();
+      await controller.close();
+    });
+
+    test('should handle duplicate trades correctly', () async {
+      final controller = StreamController<Trade>.broadcast();
+      when(() => mockRemote.watch(['KRW-BTC'])).thenAnswer((_) => controller.stream);
+      when(() => mockCache.cacheTrade(trade)).thenAnswer((_) async => {});
+
+      final stream = repository.watchTrades(['KRW-BTC']);
+
+      final tradesReceived = <Trade>[];
+      final subscription = stream.listen((trade) {
+        tradesReceived.add(trade);
+      });
+
+      // 같은 거래를 여러번 전송
+      controller.add(trade);
+      controller.add(trade);
+      controller.add(trade);
+      await Future.delayed(const Duration(milliseconds: 200));
+
+      expect(tradesReceived.length, 3); // 스트림에서는 모두 받지만
+      verify(() => mockCache.cacheTrade(trade)).called(1); // 캐시에는 한번만 저장
+
+      await subscription.cancel();
+      await controller.close();
+    });
+
+    test('should handle errors in trade processing gracefully', () async {
+      final controller = StreamController<Trade>.broadcast();
+      when(() => mockRemote.watch(['KRW-BTC'])).thenAnswer((_) => controller.stream);
+      when(() => mockCache.cacheTrade(trade)).thenThrow(Exception('Cache error'));
+
+      final stream = repository.watchTrades(['KRW-BTC']);
+
+      final tradesReceived = <Trade>[];
+      final subscription = stream.listen((trade) {
+        tradesReceived.add(trade);
+      });
+
+      controller.add(trade);
+      await Future.delayed(const Duration(milliseconds: 200));
+
+      expect(tradesReceived.length, 1);
+      verify(() => mockCache.cacheTrade(trade)).called(1);
+
+      await subscription.cancel();
+      await controller.close();
+    });
+
+    test('dispose should clean up all resources', () async {
+      final controller = StreamController<Trade>.broadcast();
+      when(() => mockRemote.watch(['KRW-BTC'])).thenAnswer((_) => controller.stream);
+
+      final stream = repository.watchTrades(['KRW-BTC']);
+      final subscription = stream.listen((_) {});
+
+      await repository.dispose();
+
+      verify(() => mockRemote.dispose()).called(1);
+      verify(() => mockCache.dispose()).called(1);
+
+      await subscription.cancel();
+      await controller.close();
+    });
+  });
+}\n\n// ====== test/data/repositories/settings_repository_impl_test.dart ======\n
+// test/data/repositories/settings_repository_impl_test.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:mocktail/mocktail.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
+import 'package:noonchit/data/datasources/settings_local_ds.dart';
+import 'package:noonchit/data/repositories/settings_repository_impl.dart';
+import 'package:noonchit/domain/entities/app_settings.dart';
+
+class MockSettingsLocalDataSource extends Mock implements SettingsLocalDataSource {}
+
+void main() {
+  late SettingsRepositoryImpl repository;
+  late MockSettingsLocalDataSource mockDataSource;
+
+  setUpAll(() async {
+    dotenv.testLoad(fileInput: '''
+LOG_LEVEL=debug
+DEBUG_MODE=true
+    ''');
+    registerFallbackValue(ThemeMode.system);
+    registerFallbackValue(SliderPosition.top);
+  });
+
+  setUp(() {
+    mockDataSource = MockSettingsLocalDataSource();
+    repository = SettingsRepositoryImpl(mockDataSource);
+  });
+
+  group('SettingsRepositoryImpl', () {
+    group('getSettings', () {
+      test('should return AppSettings with all values from data source', () async {
+        when(() => mockDataSource.getThemeMode()).thenReturn(ThemeMode.dark);
+        when(() => mockDataSource.getKeepScreenOn()).thenReturn(true);
+        when(() => mockDataSource.getSliderPosition()).thenReturn(SliderPosition.bottom);
+
+        final result = await repository.getSettings();
+
+        expect(result.themeMode, ThemeMode.dark);
+        expect(result.keepScreenOn, true);
+        expect(result.sliderPosition, SliderPosition.bottom);
+        verify(() => mockDataSource.getThemeMode()).called(1);
+        verify(() => mockDataSource.getKeepScreenOn()).called(1);
+        verify(() => mockDataSource.getSliderPosition()).called(1);
+      });
+
+      test('should return AppSettings with default values when data source returns defaults', () async {
+        when(() => mockDataSource.getThemeMode()).thenReturn(ThemeMode.system);
+        when(() => mockDataSource.getKeepScreenOn()).thenReturn(false);
+        when(() => mockDataSource.getSliderPosition()).thenReturn(SliderPosition.top);
+
+        final result = await repository.getSettings();
+
+        expect(result.themeMode, ThemeMode.system);
+        expect(result.keepScreenOn, false);
+        expect(result.sliderPosition, SliderPosition.top);
+        verify(() => mockDataSource.getThemeMode()).called(1);
+        verify(() => mockDataSource.getKeepScreenOn()).called(1);
+        verify(() => mockDataSource.getSliderPosition()).called(1);
+      });
+
+      test('should return AppSettings with mixed values', () async {
+        when(() => mockDataSource.getThemeMode()).thenReturn(ThemeMode.light);
+        when(() => mockDataSource.getKeepScreenOn()).thenReturn(true);
+        when(() => mockDataSource.getSliderPosition()).thenReturn(SliderPosition.top);
+
+        final result = await repository.getSettings();
+
+        expect(result.themeMode, ThemeMode.light);
+        expect(result.keepScreenOn, true);
+        expect(result.sliderPosition, SliderPosition.top);
+      });
+    });
+
+    group('updateThemeMode', () {
+      test('should call data source with ThemeMode.light', () async {
+        when(() => mockDataSource.saveThemeMode(ThemeMode.light)).thenAnswer((_) async => {});
+
+        await repository.updateThemeMode(ThemeMode.light);
+
+        verify(() => mockDataSource.saveThemeMode(ThemeMode.light)).called(1);
+      });
+
+      test('should call data source with ThemeMode.dark', () async {
+        when(() => mockDataSource.saveThemeMode(ThemeMode.dark)).thenAnswer((_) async => {});
+
+        await repository.updateThemeMode(ThemeMode.dark);
+
+        verify(() => mockDataSource.saveThemeMode(ThemeMode.dark)).called(1);
+      });
+
+      test('should call data source with ThemeMode.system', () async {
+        when(() => mockDataSource.saveThemeMode(ThemeMode.system)).thenAnswer((_) async => {});
+
+        await repository.updateThemeMode(ThemeMode.system);
+
+        verify(() => mockDataSource.saveThemeMode(ThemeMode.system)).called(1);
+      });
+    });
+
+    group('updateKeepScreenOn', () {
+      test('should call data source with true', () async {
+        when(() => mockDataSource.saveKeepScreenOn(true)).thenAnswer((_) async => {});
+
+        await repository.updateKeepScreenOn(true);
+
+        verify(() => mockDataSource.saveKeepScreenOn(true)).called(1);
+      });
+
+      test('should call data source with false', () async {
+        when(() => mockDataSource.saveKeepScreenOn(false)).thenAnswer((_) async => {});
+
+        await repository.updateKeepScreenOn(false);
+
+        verify(() => mockDataSource.saveKeepScreenOn(false)).called(1);
+      });
+    });
+
+    group('updateSliderPosition', () {
+      test('should call data source with SliderPosition.bottom', () async {
+        when(() => mockDataSource.saveSliderPosition(SliderPosition.bottom)).thenAnswer((_) async => {});
+
+        await repository.updateSliderPosition(SliderPosition.bottom);
+
+        verify(() => mockDataSource.saveSliderPosition(SliderPosition.bottom)).called(1);
+      });
+
+      test('should call data source with SliderPosition.top', () async {
+        when(() => mockDataSource.saveSliderPosition(SliderPosition.top)).thenAnswer((_) async => {});
+
+        await repository.updateSliderPosition(SliderPosition.top);
+
+        verify(() => mockDataSource.saveSliderPosition(SliderPosition.top)).called(1);
+      });
+    });
+
+    group('Error Handling', () {
+      test('should propagate exceptions from getThemeMode', () async {
+        when(() => mockDataSource.getThemeMode()).thenThrow(Exception('Storage error'));
+        when(() => mockDataSource.getKeepScreenOn()).thenReturn(false);
+        when(() => mockDataSource.getSliderPosition()).thenReturn(SliderPosition.top);
+
+        expect(() async => await repository.getSettings(), throwsException);
+      });
+
+      test('should propagate exceptions from getKeepScreenOn', () async {
+        when(() => mockDataSource.getThemeMode()).thenReturn(ThemeMode.system);
+        when(() => mockDataSource.getKeepScreenOn()).thenThrow(Exception('Storage error'));
+        when(() => mockDataSource.getSliderPosition()).thenReturn(SliderPosition.top);
+
+        expect(() async => await repository.getSettings(), throwsException);
+      });
+
+      test('should propagate exceptions from getSliderPosition', () async {
+        when(() => mockDataSource.getThemeMode()).thenReturn(ThemeMode.system);
+        when(() => mockDataSource.getKeepScreenOn()).thenReturn(false);
+        when(() => mockDataSource.getSliderPosition()).thenThrow(Exception('Storage error'));
+
+        expect(() async => await repository.getSettings(), throwsException);
+      });
+
+      test('should propagate exceptions from saveThemeMode', () async {
+        when(() => mockDataSource.saveThemeMode(any())).thenThrow(Exception('Storage error'));
+
+        expect(() async => await repository.updateThemeMode(ThemeMode.light), throwsException);
+      });
+
+      test('should propagate exceptions from saveKeepScreenOn', () async {
+        when(() => mockDataSource.saveKeepScreenOn(any())).thenThrow(Exception('Storage error'));
+
+        expect(() async => await repository.updateKeepScreenOn(true), throwsException);
+      });
+
+      test('should propagate exceptions from saveSliderPosition', () async {
+        when(() => mockDataSource.saveSliderPosition(any())).thenThrow(Exception('Storage error'));
+
+        expect(() async => await repository.updateSliderPosition(SliderPosition.bottom), throwsException);
+      });
+    });
+  });
+}\n\n// ====== test/data/repositories/surge_repository_impl_test.dart ======\n
+\n\n// ====== test/data/repositories/momentary_repository_impl_test.dart ======\n
+\n\n// ====== test/data/repositories/volume_repository_impl_test.dart ======\n
+\n\n// ====== test/data/models/surge_dto_test.dart ======\n
+\n\n// ====== test/data/models/trade_dto.g_test.dart ======\n
+\n\n// ====== test/data/models/momentary_dto_test.dart ======\n
+\n\n// ====== test/data/models/trade_dto_test.dart ======\n
+// test/data/models/trade_dto_test.dart
+import 'dart:convert';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
+import 'package:noonchit/data/models/trade_dto.dart';
+import 'package:noonchit/domain/entities/trade.dart';
+
+void main() {
+  setUpAll(() async {
+    dotenv.testLoad(fileInput: '''
+LOG_LEVEL=debug
+DEBUG_MODE=true
+    ''');
+  });
+
+  group('TradeDto', () {
+    final tradeDto = TradeDto(
+      market: 'KRW-BTC',
+      price: 50000.0,
+      volume: 2.5,
+      side: 'BID',
+      changePrice: 100.0,
+      changeState: 'RISE',
+      timestampMs: 1630000000000,
+      sequentialId: '12345',
+    );
+
+    test('toEntity should convert to Trade', () {
+      final trade = tradeDto.toEntity();
+      expect(trade, isA<Trade>());
+      expect(trade.market, tradeDto.market);
+      expect(trade.price, tradeDto.price);
+      expect(trade.volume, tradeDto.volume);
+      expect(trade.side, tradeDto.side);
+      expect(trade.changePrice, tradeDto.changePrice);
+      expect(trade.changeState, tradeDto.changeState);
+      expect(trade.timestampMs, tradeDto.timestampMs);
+      expect(trade.sequentialId, tradeDto.sequentialId);
+    });
+
+    test('toMap should return correct map', () {
+      final map = tradeDto.toMap();
+      expect(map['market'], tradeDto.market);
+      expect(map['price'], tradeDto.price);
+      expect(map['volume'], tradeDto.volume);
+      expect(map['side'], tradeDto.side);
+      expect(map['change_price'], tradeDto.changePrice);
+      expect(map['change_state'], tradeDto.changeState);
+      expect(map['timestamp'], tradeDto.timestampMs);
+      expect(map['sequential_id'], tradeDto.sequentialId);
+    });
+
+    test('tryParse should parse valid JSON map with main keys', () {
+      final map = {
+        'market': 'KRW-BTC',
+        'price': 50000.0,
+        'volume': 2.5,
+        'side': 'BID',
+        'change_price': 100.0,
+        'change_state': 'RISE',
+        'timestamp': 1630000000000,
+        'sequential_id': '12345',
+      };
+      final dto = TradeDto.tryParse(map);
+      expect(dto, isNotNull);
+      expect(dto!.market, 'KRW-BTC');
+      expect(dto.price, 50000.0);
+      expect(dto.volume, 2.5);
+      expect(dto.side, 'BID');
+      expect(dto.changePrice, 100.0);
+      expect(dto.changeState, 'RISE');
+      expect(dto.timestampMs, 1630000000000);
+      expect(dto.sequentialId, '12345');
+    });
+
+    test('tryParse should parse valid JSON map with alternative keys', () {
+      final map = {
+        'code': 'KRW-BTC',
+        'trade_price': 50000.0,
+        'trade_volume': 2.5,
+        'ask_bid': 'BID',
+        'cp': 100.0,
+        'change': 'RISE',
+        'timestamp_ms': 1630000000000,
+        'sid': '12345',
+      };
+      final dto = TradeDto.tryParse(map);
+      expect(dto, isNotNull);
+      expect(dto!.market, 'KRW-BTC');
+      expect(dto.price, 50000.0);
+      expect(dto.volume, 2.5);
+      expect(dto.side, 'BID');
+      expect(dto.changePrice, 100.0);
+      expect(dto.changeState, 'RISE');
+      expect(dto.timestampMs, 1630000000000);
+      expect(dto.sequentialId, '12345');
+    });
+
+    test('tryParse should handle empty map', () {
+      final dto = TradeDto.tryParse({});
+      expect(dto, isNull);
+    });
+
+    test('tryParse should handle invalid data types gracefully', () {
+      final map = {
+        'market': 'KRW-BTC',
+        'price': 'invalid_price',
+        'volume': null,
+        'side': 123,
+      };
+      final dto = TradeDto.tryParse(map);
+      expect(dto, isNotNull);
+      expect(dto!.market, 'KRW-BTC');
+      expect(dto.price, 0.0);
+      expect(dto.volume, 0.0);
+      expect(dto.side, '123');
+      expect(dto.changePrice, 0.0);
+      expect(dto.changeState, 'EVEN');
+    });
+
+    test('tryParse should handle parsing exception gracefully', () {
+      final dto = TradeDto.tryParse({'invalid': 'data'});
+      expect(dto, isNotNull);
+      expect(dto!.market, 'UNKNOWN');
+      expect(dto.price, 0.0);
+      expect(dto.volume, 0.0);
+      expect(dto.side, 'UNKNOWN');
+      expect(dto.changePrice, 0.0);
+      expect(dto.changeState, 'EVEN');
+    });
+
+    test('fromJson should parse valid JSON string', () {
+      final json = jsonEncode(tradeDto.toMap());
+      final dto = TradeDto.fromJson(json);
+      expect(dto.market, tradeDto.market);
+      expect(dto.price, tradeDto.price);
+      expect(dto.volume, tradeDto.volume);
+      expect(dto.side, tradeDto.side);
+      expect(dto.changePrice, tradeDto.changePrice);
+      expect(dto.changeState, tradeDto.changeState);
+      expect(dto.timestampMs, tradeDto.timestampMs);
+      expect(dto.sequentialId, tradeDto.sequentialId);
+    });
+
+    test('fromJson should handle invalid JSON with fallback', () {
+      expect(
+        () => TradeDto.fromJson('invalid json'),
+        throwsA(isA<FormatException>()),
+      );
+    });
+
+    test('toJson should return valid JSON string', () {
+      final json = tradeDto.toJson();
+      final decoded = jsonDecode(json);
+      expect(decoded['market'], tradeDto.market);
+      expect(decoded['price'], tradeDto.price);
+      expect(decoded['volume'], tradeDto.volume);
+      expect(decoded['side'], tradeDto.side);
+      expect(decoded['change_price'], tradeDto.changePrice);
+      expect(decoded['change_state'], tradeDto.changeState);
+      expect(decoded['timestamp'], tradeDto.timestampMs);
+      expect(decoded['sequential_id'], tradeDto.sequentialId);
+    });
+
+    test('tryParse should handle minimal data', () {
+      final map = {
+        'market': 'KRW-BTC',
+        'price': 50000.0,
+      };
+      final dto = TradeDto.tryParse(map);
+      expect(dto, isNotNull);
+      expect(dto!.market, 'KRW-BTC');
+      expect(dto.price, 50000.0);
+      expect(dto.volume, 0.0);
+      expect(dto.side, 'UNKNOWN');
+    });
+
+    test('tryParse should handle string numbers', () {
+      final map = {
+        'market': 'KRW-BTC',
+        'price': '50000.5',
+        'volume': '2.5',
+        'timestamp': '1630000000000',
+      };
+      final dto = TradeDto.tryParse(map);
+      expect(dto, isNotNull);
+      expect(dto!.price, 50000.5);
+      expect(dto.volume, 2.5);
+      expect(dto.timestampMs, 1630000000000);
+    });
+
+    test('tryParse should handle mixed key formats in same map', () {
+      final map = {
+        'market': 'KRW-BTC',
+        'trade_price': 50000.0,
+        'volume': 2.5,
+        'ask_bid': 'BID',
+        'timestamp_ms': 1630000000000,
+      };
+      final dto = TradeDto.tryParse(map);
+      expect(dto, isNotNull);
+      expect(dto!.market, 'KRW-BTC');
+      expect(dto.price, 50000.0);
+      expect(dto.volume, 2.5);
+      expect(dto.side, 'BID');
+      expect(dto.timestampMs, 1630000000000);
+    });
+  });
+}\n\n// ====== test/data/models/volume_dto_test.dart ======\n
+\n\n// ====== test/data/processors/trade_aggregator_test.dart ======\n
+// test/data/processors/trade_aggregator_test.dart
+import 'package:flutter_test/flutter_test.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
+import 'package:noonchit/data/processors/trade_aggregator.dart';
+
+void main() {
+  late TradeAggregator aggregator;
+
+  setUpAll(() async {
+    dotenv.testLoad(fileInput: '''
+LOG_LEVEL=debug
+DEBUG_MODE=true
+    ''');
+  });
+
+  setUp(() {
+    aggregator = TradeAggregator();
+  });
+
+  group('TradeAggregator', () {
+    test('processTrade should store new trade and call onTradeProcessed', () {
+      final trade = {
+        'market': 'KRW-BTC',
+        'price': 50000.0,
+        'volume': 2.0,
+        'timestamp': 1630000000000,
+        'isBuy': true,
+        'sequential_id': '12345',
+      };
+
+      bool called = false;
+      Map<String, dynamic>? processedTrade;
+
+      aggregator.processTrade(trade, onTradeProcessed: (t) {
+        called = true;
+        processedTrade = t;
+      });
+
+      expect(called, true);
+      expect(processedTrade!['market'], 'KRW-BTC');
+      expect(processedTrade!['total'], 100000.0);
+      expect(aggregator.pendingTradesCount, 1);
+    });
+
+    test('processTrade should merge trades within merge window', () {
+      final trade1 = {
+        'market': 'KRW-BTC',
+        'price': 50000.0,
+        'volume': 2.0,
+        'timestamp': 1630000000000,
+        'isBuy': true,
+        'sequential_id': '12345',
+      };
+      final trade2 = {
+        'market': 'KRW-BTC',
+        'price': 60000.0,
+        'volume': 3.0,
+        'timestamp': 1630000001000, // 1초 후 (merge window 내)
+        'isBuy': true,
+        'sequential_id': '12346',
+      };
+
+      int processedCount = 0;
+      aggregator.processTrade(trade1, onTradeProcessed: (_) {
+        processedCount++;
+      });
+
+      aggregator.processTrade(trade2, onTradeProcessed: (_) {
+        processedCount++;
+      });
+
+      final pending = aggregator.getPendingTrade('KRW-BTC');
+      expect(pending, isNotNull);
+      expect(pending!['volume'], 5.0);
+      expect(pending['price'], 56000.0); // 가중평균: (50000*2 + 60000*3) / 5
+      expect(pending['total'], 280000.0);
+      expect(processedCount, 1); // 첫 번째만 처리됨
+    });
+
+    test('processTrade should process previous trade when outside merge window', () {
+      final trade1 = {
+        'market': 'KRW-BTC',
+        'price': 50000.0,
+        'volume': 2.0,
+        'timestamp': 1630000000000,
+        'isBuy': true,
+        'sequential_id': '12345',
+      };
+      final trade2 = {
+        'market': 'KRW-BTC',
+        'price': 60000.0,
+        'volume': 3.0,
+        'timestamp': 1630000060000, // 60초 후 (merge window 밖)
+        'isBuy': false,
+        'sequential_id': '12346',
+      };
+
+      final processedTrades = <Map<String, dynamic>>[];
+
+      aggregator.processTrade(trade1, onTradeProcessed: (t) {
+        processedTrades.add(Map<String, dynamic>.from(t));
+      });
+
+      aggregator.processTrade(trade2, onTradeProcessed: (t) {
+        processedTrades.add(Map<String, dynamic>.from(t));
+      });
+
+      expect(processedTrades.length, 2);
+      expect(processedTrades[0]['price'], 50000.0);
+      expect(processedTrades[0]['volume'], 2.0);
+      // 두 번째 거래는 아직 pending 상태이므로 처리되지 않음
+      expect(aggregator.pendingTradesCount, 1);
+    });
+
+    test('processTrade should handle different markets separately', () {
+      final btcTrade = {
+        'market': 'KRW-BTC',
+        'price': 50000.0,
+        'volume': 2.0,
+        'timestamp': 1630000000000,
+        'isBuy': true,
+        'sequential_id': '12345',
+      };
+      final ethTrade = {
+        'market': 'KRW-ETH',
+        'price': 3000.0,
+        'volume': 5.0,
+        'timestamp': 1630000001000,
+        'isBuy': false,
+        'sequential_id': '12346',
+      };
+
+      final processedTrades = <Map<String, dynamic>>[];
+
+      aggregator.processTrade(btcTrade, onTradeProcessed: (t) {
+        processedTrades.add(Map<String, dynamic>.from(t));
+      });
+
+      aggregator.processTrade(ethTrade, onTradeProcessed: (t) {
+        processedTrades.add(Map<String, dynamic>.from(t));
+      });
+
+      expect(processedTrades.length, 2);
+      expect(aggregator.pendingTradesCount, 2);
+      expect(aggregator.getPendingTrade('KRW-BTC'), isNotNull);
+      expect(aggregator.getPendingTrade('KRW-ETH'), isNotNull);
+    });
+
+    test('flushTrades should process all pending trades', () {
+      final trade1 = {
+        'market': 'KRW-BTC',
+        'price': 50000.0,
+        'volume': 2.0,
+        'timestamp': 1630000000000,
+        'isBuy': true,
+        'sequential_id': '12345',
+      };
+      final trade2 = {
+        'market': 'KRW-ETH',
+        'price': 3000.0,
+        'volume': 5.0,
+        'timestamp': 1630000001000,
+        'isBuy': false,
+        'sequential_id': '12346',
+      };
+
+      aggregator.processTrade(trade1, onTradeProcessed: (_) {});
+      aggregator.processTrade(trade2, onTradeProcessed: (_) {});
+      expect(aggregator.pendingTradesCount, 2);
+
+      final flushedTrades = <Map<String, dynamic>>[];
+      aggregator.flushTrades(onTradeProcessed: (t) {
+        flushedTrades.add(Map<String, dynamic>.from(t));
+      });
+
+      expect(flushedTrades.length, 2);
+      expect(aggregator.pendingTradesCount, 0);
+    });
+
+    test('getPendingTrade should return null for non-existent market', () {
+      final pending = aggregator.getPendingTrade('NON-EXISTENT');
+      expect(pending, isNull);
+    });
+
+    test('clear should remove all pending trades', () {
+      final trade = {
+        'market': 'KRW-BTC',
+        'price': 50000.0,
+        'volume': 2.0,
+        'timestamp': 1630000000000,
+        'isBuy': true,
+        'sequential_id': '12345',
+      };
+
+      aggregator.processTrade(trade, onTradeProcessed: (_) {});
+      expect(aggregator.pendingTradesCount, 1);
+
+      aggregator.clear();
+      expect(aggregator.pendingTradesCount, 0);
+    });
+
+    test('processTrade should handle missing fields gracefully', () {
+      final invalidTrade = {
+        'market': 'KRW-BTC',
+        'price': 50000.0,
+        'volume': 2.0,
+        // timestamp 누락
+        'isBuy': true,
+        'sequential_id': '12345',
+      };
+
+      bool errorOccurred = false;
+      aggregator.processTrade(invalidTrade, onTradeProcessed: (_) {});
+      
+      // 에러가 내부적으로 처리되므로 직접 확인하지 않음
+      expect(aggregator.pendingTradesCount, 0);
+    });
+
+    test('processTrade should handle null values gracefully', () {
+      final invalidTrade = {
+        'market': null,
+        'price': null,
+        'volume': null,
+        'timestamp': null,
+        'isBuy': null,
+        'sequential_id': null,
+      };
+
+      aggregator.processTrade(invalidTrade, onTradeProcessed: (_) {});
+      
+      // 에러가 내부적으로 처리되므로 직접 확인하지 않음
+      expect(aggregator.pendingTradesCount, 0);
+    });
+  });
+}

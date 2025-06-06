@@ -1,0 +1,1715 @@
+\n\n// ====== lib/core/config/app_config.dart ======\n
+// lib/core/config/app_config.dart
+
+import 'dart:collection';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
+import 'package:hive_flutter/hive_flutter.dart';
+import 'package:logger/logger.dart';
+import '../utils/logger.dart';
+import '../../features/trade/data/models/trade_dto.dart';
+
+/// Application-wide configuration and constants,
+/// optimized per Upbit REST & WebSocket specifications.
+class AppConfig {
+  AppConfig._();
+
+  /// Call once at startup to initialize dynamic config (env, Hive, etc.)
+  static Future<void> init({String? envPath}) async {
+    // 1) Load .env (optional custom path) + validate
+    try {
+      if (envPath != null && envPath.isNotEmpty) {
+        await dotenv.load(fileName: envPath);
+      } else {
+        await dotenv.load();
+      }
+      log.i('[AppConfig] .env loaded');
+      _loadEnv();
+    } catch (e, st) {
+      log.e('[AppConfig] ⚠️ Failed to load required env vars', e, st);
+      throw Exception('[AppConfig] ⚠️ Failed to load required env vars: $e');
+    }
+
+    // 2) Initialize Hive, register adapter, and open typed box
+    try {
+      await Hive.initFlutter();
+      if (!Hive.isAdapterRegistered(TradeDtoAdapter().typeId)) {
+        Hive.registerAdapter(TradeDtoAdapter());
+      }
+      if (!Hive.isBoxOpen(_cacheBox)) {
+        await Hive.openBox<TradeDto>(_cacheBox);
+      }
+      log.i('[AppConfig] Hive box "$_cacheBox" opened with TradeDto type');
+    } catch (e, st) {
+      log.w('[AppConfig] ⚠️ Hive init error: $e', e, st);
+    }
+
+    log.i('[AppConfig] initialized (debug=$isDebugMode)');
+  }
+
+  static void _loadEnv() {
+    const requiredKeys = ['UPBIT_API_KEY', 'UPBIT_API_SECRET'];
+    for (final key in requiredKeys) {
+      final value = dotenv.env[key];
+      if (value == null || value.isEmpty) {
+        throw Exception('[AppConfig] Missing required env var: $key');
+      }
+    }
+
+    upbitRestBase = dotenv.env['UPBIT_REST_URL']!.isNotEmpty
+        ? dotenv.env['UPBIT_REST_URL']!
+        : upbitRestBase;
+    upbitWsUrl = dotenv.env['UPBIT_WS_URL']!.isNotEmpty
+        ? dotenv.env['UPBIT_WS_URL']!
+        : upbitWsUrl;
+
+    _apiKey = dotenv.env['UPBIT_API_KEY']!;
+    _apiSecret = dotenv.env['UPBIT_API_SECRET']!;
+  }
+
+  // ─────────────────── API Credentials ───────────────────
+  static String _apiKey = '';
+  static String _apiSecret = '';
+  static String get apiKey => _apiKey;
+  static String get apiSecret => _apiSecret;
+
+  // ──────────────── Environment Flags ────────────────
+  /// `true` when not in Dart VM product mode.
+  static const bool isDebugMode = !bool.fromEnvironment('dart.vm.product');
+
+  // ──────────────── Logging Configuration ────────────────
+  /// 로그 레벨 설정 (개발 중 조절 가능)
+  static Level get logLevel {
+    if (!isDebugMode) return Level.warning; // 프로덕션: warning 이상만
+    
+    // 개발 모드에서 환경변수로 조절 가능
+    final envLevel = dotenv.env['LOG_LEVEL']?.toLowerCase();
+    switch (envLevel) {
+      case 'verbose': return Level.verbose;
+      case 'debug': return Level.debug;
+      case 'info': return Level.info;
+      case 'warning': return Level.warning;
+      case 'error': return Level.error;
+      default: return Level.debug; // 기본값
+    }
+  }
+  
+  /// 특정 모듈 로그 on/off
+  static bool get enableSignalBusLog => 
+      dotenv.env['ENABLE_SIGNAL_BUS_LOG']?.toLowerCase() != 'false';
+  static bool get enableWebSocketLog => 
+      dotenv.env['ENABLE_WEBSOCKET_LOG']?.toLowerCase() != 'false';
+  static bool get enableTradeLog => 
+      dotenv.env['ENABLE_TRADE_LOG']?.toLowerCase() != 'false';
+  static bool get enableAdaptiveBackoffLog => 
+      dotenv.env['ENABLE_ADAPTIVE_BACKOFF_LOG']?.toLowerCase() != 'false';
+
+  // ──────────────── REST Configuration ────────────────
+  static String upbitRestBase = 'https://api.upbit.com/v1';
+  static const int restRateLimitCount = 15;
+  static const Duration restRateLimitPeriod = Duration(seconds: 1);
+
+  // ──────────────── WebSocket Configuration ────────────────
+  static String upbitWsUrl = 'wss://api.upbit.com/websocket/v1';
+  static const int wsMaxSubscriptionCount = 200;
+
+  // Upbit 권장 타이밍으로 변경:
+  static const Duration wsPingInterval = Duration(seconds: 10);
+  static const Duration wsPongTimeout = Duration(seconds: 20);
+
+  static const int wsMaxRetryCount = 5;
+  static const Duration wsInitialBackoff = Duration(seconds: 1);
+  static const Duration wsMaxBackoff = Duration(seconds: 30);
+
+  // ──────────────── Aggregation ────────────────
+  static const int mergeWindowMs = 1000;
+  static const Duration globalResetInterval = Duration(seconds: 30);
+
+  // ──────────────── Dev/Test Flags ────────────────
+  static bool useTestDataInDev = false;
+
+  // ──────────────── Trade Filters ────────────────
+  static const String _cacheBox = 'trades';
+
+  static final List<double> _filters = [
+    2e6, 5e6, 1e7, 2e7, 5e7,
+    1e8, 2e8, 3e8, 4e8, 5e8,
+    1e9,
+  ];
+  static UnmodifiableListView<double> get tradeFilters =>
+      UnmodifiableListView(_filters);
+
+  /// Human-readable labels always in sync with `_filters`
+  static Map<double, String> get filterNames => Map.unmodifiable({
+        for (final f in _filters) f: _formatFilterLabel(f),
+      });
+
+  /// Update the trade filters at runtime (ensures positive & sorted)
+  static void updateFilters(List<double> newFilters) {
+    _filters
+      ..clear()
+      ..addAll(newFilters.where((f) => f > 0))
+      ..sort();
+    log.i('[AppConfig] filters updated → $_filters');
+  }
+
+  static String _formatFilterLabel(double f) {
+    if (f >= 1e8 && f % 1e8 == 0) return '${(f / 1e8).toInt()}억';
+    if (f >= 1e7 && f % 1e7 == 0) return '${(f / 1e7).toInt()}천만';
+    if (f >= 1e6 && f % 1e6 == 0) return '${(f / 1e6).toInt()}백만';
+    return f.toStringAsFixed(0);
+  }
+
+  // ──────────────── Candle Timeframes ────────────────
+  static const List<int> timeFrames = [
+    1, 5, 15, 30, 60, 120, 240, 480, 720, 1440
+  ];
+  static final Map<int, String> timeFrameNames = Map.unmodifiable({
+    1: '1분',
+    5: '5분',
+    15: '15분',
+    30: '30분',
+    60: '1시간',
+    120: '2시간',
+    240: '4시간',
+    480: '8시간',
+    720: '12시간',
+    1440: '1일',
+  });
+
+  // ──────────────── Surge Detection ────────────────
+  static const double surgeThresholdPercent = 1.1;
+  static const Duration surgeWindowDuration = Duration(minutes: 1);
+}\n\n// ====== lib/core/bridge/signal_bus.dart ======\n
+import 'dart:async';
+import '../event/app_event.dart'; // Json typedef
+import '../utils/logger.dart'; // log.d 사용
+
+/// Types of signals carried by the bus.
+enum SignalEventType { trade, orderBook, notification }
+
+/// Supported exchange platforms.
+enum ExchangePlatform { upbit, binance, bybit, bithumb }
+
+/// Global singleton event bus.
+/// Dispatches all AppEvent payloads by type & platform.
+///
+/// ⚠️ Remember to call `SignalBus().dispose()` on app shutdown or via
+/// Riverpod's `ref.onDispose` to clean up streams.
+class SignalBus {
+  SignalBus._();
+  static final SignalBus _instance = SignalBus._();
+  factory SignalBus() => _instance;
+
+  final StreamController<Json> _globalController = StreamController<Json>.broadcast();
+  final Map<SignalEventType, StreamController<Json>> _typeControllers = {};
+  final Map<String, StreamController<Json>> _platformControllers = {};
+  final StreamController<String> _errorController = StreamController<String>.broadcast();
+
+  /// All events as raw JSON maps.
+  Stream<Json> get events => _globalController.stream;
+
+  /// Events of a specific type.
+  Stream<Json> eventsOfType(SignalEventType type) =>
+      _typeControllers.putIfAbsent(type, () {
+        final ctrl = StreamController<Json>.broadcast();
+        log.d('Created type controller for $type');
+        return ctrl;
+      }).stream;
+
+  /// Events of a specific type and platform, cached for efficiency.
+  Stream<Json> eventsOfPlatform(SignalEventType type, ExchangePlatform platform) {
+    final key = '${type.name}_${platform.name}';
+    return _platformControllers.putIfAbsent(key, () {
+      final ctrl = StreamController<Json>.broadcast();
+      eventsOfType(type)
+          .where((m) => (m['platform'] as String? ?? '') == platform.name)
+          .listen(
+            ctrl.add,
+            onError: ctrl.addError,
+            onDone: () {
+              ctrl.close();
+              _platformControllers.remove(key);
+              log.d('Closed platform controller for $key');
+            },
+          );
+      log.d('Created platform controller for $key');
+      return ctrl;
+    }).stream;
+  }
+
+  /// Errors from bus internals.
+  Stream<String> get errors => _errorController.stream;
+
+  // ───────────────────────────────────────────────────────────────────────
+  // Emitters for raw payloads
+  // ───────────────────────────────────────────────────────────────────────
+
+  void fireTrade(Json data, {ExchangePlatform platform = ExchangePlatform.upbit}) =>
+      _fire(SignalEventType.trade, data, platform);
+
+  void fireOrderBook(Json data, {ExchangePlatform platform = ExchangePlatform.upbit}) =>
+      _fire(SignalEventType.orderBook, data, platform);
+
+  void fireNotification(Json data, {ExchangePlatform platform = ExchangePlatform.upbit}) =>
+      _fire(SignalEventType.notification, data, platform);
+
+  // ───────────────────────────────────────────────────────────────────────
+  // Emitters for AppEvent
+  // ───────────────────────────────────────────────────────────────────────
+
+  void fireTradeEvent(AppEvent event, {ExchangePlatform platform = ExchangePlatform.upbit}) =>
+      _fire(SignalEventType.trade, event.toJson(), platform);
+
+  void fireOrderBookEvent(AppEvent event, {ExchangePlatform platform = ExchangePlatform.upbit}) =>
+      _fire(SignalEventType.orderBook, event.toJson(), platform);
+
+  void fireNotificationEvent(AppEvent event, {ExchangePlatform platform = ExchangePlatform.upbit}) =>
+      _fire(SignalEventType.notification, event.toJson(), platform);
+
+  // ───────────────────────────────────────────────────────────────────────
+  // Internal dispatch logic
+  // ───────────────────────────────────────────────────────────────────────
+
+  void _fire(SignalEventType type, Json data, ExchangePlatform platform) {
+    try {
+      final enriched = <String, dynamic>{...data, 'platform': platform.name};
+
+      // Broadcast to global subscribers
+      if (!_globalController.isClosed) {
+        _globalController.add(enriched);
+      } else {
+        log.w('Global controller closed, skipping event: $type');
+      }
+
+      // Type-specific subscribers
+      final ctrl = _typeControllers[type];
+      if (ctrl != null && !ctrl.isClosed) {
+        ctrl.add(enriched);
+      } else if (ctrl != null) {
+        log.w('Type controller for $type closed, removing');
+        _typeControllers.remove(type);
+      }
+
+      // Debug preview (limited to 100 chars)
+      log.d(enriched.toString().length <= 100
+          ? 'SignalBus: $type @${platform.name} → $enriched'
+          : 'SignalBus: $type @${platform.name} → ${enriched.toString().substring(0, 100)}…');
+    } catch (e, st) {
+      final msg = 'SignalBus error: $e';
+      log.e(msg, e, st);
+      if (!_errorController.isClosed) {
+        _errorController.add(msg);
+      } else {
+        log.w('Error controller closed, error not dispatched: $msg');
+      }
+    }
+  }
+
+  /// Log current memory status for debugging.
+  void logMemoryStatus() {
+    log.d('SignalBus Memory Status:');
+    log.d('  - Type controllers: ${_typeControllers.length}');
+    log.d('  - Platform controllers: ${_platformControllers.length}');
+    log.d('  - Global controller active: ${_globalController.hasListener}');
+    log.d('  - Error controller active: ${_errorController.hasListener}');
+  }
+
+  /// Close all controllers to free resources and log cleanup.
+  void dispose() {
+    // Close type-specific controllers
+    _typeControllers.forEach((type, ctrl) {
+      if (!ctrl.isClosed) {
+        ctrl.close();
+        log.d('Closed type controller for $type');
+      }
+    });
+    _typeControllers.clear();
+
+    // Close platform-specific controllers
+    _platformControllers.forEach((key, ctrl) {
+      if (!ctrl.isClosed) {
+        ctrl.close();
+        log.d('Closed platform controller for $key');
+      }
+    });
+    _platformControllers.clear();
+
+    // Close global and error controllers
+    if (!_globalController.isClosed) {
+      _globalController.close();
+      log.d('Closed global controller');
+    }
+    if (!_errorController.isClosed) {
+      _errorController.close();
+      log.d('Closed error controller');
+    }
+
+    log.i('SignalBus fully disposed');
+  }
+}\n\n// ====== lib/core/network/websocket/ticker_ws_client.dart ======\n
+// lib/core/network/websocket/ticker_ws_client.dart
+
+import 'dart:convert';
+import '../../config/app_config.dart';
+import 'base_ws_client.dart';
+
+/// “현재가” 스트림: List<Map<String, dynamic>>
+class TickerWsClient extends BaseWsClient<List<Map<String, dynamic>>> {
+  TickerWsClient({void Function(WsStatus)? onStatusChange})
+      : super(
+          url: AppConfig.upbitWsUrl,
+          onStatusChange: onStatusChange,
+          decode: BaseWsClient.decodeJsonList,
+          encodeSubscribe: (markets) {
+            final codes = markets.take(AppConfig.wsMaxSubscriptionCount).toList();
+            return jsonEncode([
+              {
+                'ticket': 'ticker-${DateTime.now().millisecondsSinceEpoch}'
+              },
+              {
+                'type': 'ticker',
+                'codes': codes,
+              },
+              {'format': 'DEFAULT'},
+            ]);
+          },
+        );
+}
+\n\n// ====== lib/core/network/websocket/candle_ws_client.dart ======\n
+// lib/core/network/websocket/candle_ws_client.dart
+
+import 'dart:convert';
+import '../../config/app_config.dart';
+import 'base_ws_client.dart';
+
+/// “캔들” 스트림: List<Map<String, dynamic>>
+/// [timeFrame]: e.g. "1m", "5m", "15m", ...
+class CandleWsClient extends BaseWsClient<List<Map<String, dynamic>>> {
+  CandleWsClient({
+    required String timeFrame,
+    void Function(WsStatus)? onStatusChange,
+  }) : super(
+          url: AppConfig.upbitWsUrl,
+          onStatusChange: onStatusChange,
+          decode: BaseWsClient.decodeJsonList,
+          encodeSubscribe: (markets) {
+            final codes = markets.take(AppConfig.wsMaxSubscriptionCount).toList();
+            return jsonEncode([
+              {
+                'ticket':
+                    'candle-$timeFrame-${DateTime.now().millisecondsSinceEpoch}'
+              },
+              {
+                'type': 'candles_$timeFrame',
+                'codes': codes,
+              },
+              {'format': 'DEFAULT'},
+            ]);
+          },
+        );
+}
+\n\n// ====== lib/core/network/websocket/trade_ws_client.dart ======\n
+// lib/core/network/websocket/trade_ws_client.dart
+
+import 'dart:convert';
+import '../../config/app_config.dart';
+import 'base_ws_client.dart';
+
+/// “체결” 스트림: List<Map<String, dynamic>>
+class TradeWsClient extends BaseWsClient<List<Map<String, dynamic>>> {
+  TradeWsClient({void Function(WsStatus)? onStatusChange})
+      : super(
+          url: AppConfig.upbitWsUrl,
+          onStatusChange: onStatusChange,
+          decode: BaseWsClient.decodeJsonList,
+          encodeSubscribe: (markets) {
+            final codes = markets.take(AppConfig.wsMaxSubscriptionCount).toList();
+            return jsonEncode([
+              {
+                'ticket': 'trade-${DateTime.now().millisecondsSinceEpoch}'
+              },
+              {
+                'type': 'trade',
+                'codes': codes,
+              },
+              {'format': 'DEFAULT'},
+            ]);
+          },
+        );
+}
+\n\n// ====== lib/core/network/websocket/base_ws_client.dart ======\n
+import 'dart:async';
+import 'dart:convert';
+import 'package:flutter/foundation.dart';
+import 'package:web_socket_channel/web_socket_channel.dart';
+import '../../config/app_config.dart';
+import '../ws_rate_limiter_interceptor.dart';
+import '../../error/app_exception.dart';
+import '../adaptive_backoff.dart'; // AdaptiveBackoff 연동
+
+typedef DecodeFn<T> = T Function(dynamic json);
+typedef EncodeFn = String Function(List<String> symbols);
+
+/// WebSocket connection status notifications.
+enum WsStatus {
+  connecting,
+  connected,
+  failed,
+  disconnected,
+  error,
+  reconnecting,
+  pongTimeout,
+  maxRetryExceeded,
+}
+
+/// Common WebSocket client: connect, subscribe, reconnect, emit
+class BaseWsClient<T> {
+  /// Helper to decode a JSON list (or single object) into a List<Map<String, dynamic>>.
+  static List<Map<String, dynamic>> decodeJsonList(dynamic raw) {
+    final jsonObj = raw is String ? jsonDecode(raw) : raw;
+    final list = jsonObj is List ? jsonObj : [jsonObj];
+    return list
+        .cast<Map<String, dynamic>>()
+        .map((e) => Map<String, dynamic>.from(e))
+        .toList();
+  }
+
+  final String url;
+  final DecodeFn<T> decode;
+  final EncodeFn encodeSubscribe;
+  final void Function(WsStatus)? onStatusChange;
+  final WsRateLimiter _rateLimiter;
+  final AdaptiveBackoffCalculator _backoffCalculator = AdaptiveBackoffCalculator();
+  final Set<StreamSubscription> _activeSubscriptions = {};
+  Timer? _memoryCleanupTimer;
+
+  WebSocketChannel? _channel;
+  final _controller = StreamController<T>.broadcast();
+  List<String> _symbols = [];
+  Timer? _pingTimer;
+  Timer? _pongTimer;
+  bool _disposed = false;
+  bool _reconnecting = false;
+  int _retryCount = 0;
+
+  BaseWsClient({
+    required this.url,
+    required this.decode,
+    required this.encodeSubscribe,
+    this.onStatusChange,
+    WsRateLimiter? rateLimiter,
+  }) : _rateLimiter = rateLimiter ?? WsRateLimiter() {
+    _startMemoryCleanup();
+  }
+
+  /// Start periodic cleanup of inactive subscriptions.
+  void _startMemoryCleanup() {
+    _memoryCleanupTimer = Timer.periodic(const Duration(seconds: 30), (_) {
+      _cleanupInactiveSubscriptions();
+    });
+  }
+
+  /// Clean up paused subscriptions to prevent memory leaks.
+  void _cleanupInactiveSubscriptions() {
+    final toRemove = _activeSubscriptions.where((sub) => sub.isPaused).toList();
+    for (final sub in toRemove) {
+      sub.cancel();
+      _activeSubscriptions.remove(sub);
+    }
+    if (toRemove.isNotEmpty) {
+      debugPrint('WSClient: Cleaned up ${toRemove.length} inactive subscriptions');
+    }
+  }
+
+  /// Exposed stream of decoded messages.
+  Stream<T> get stream => _controller.stream;
+
+  /// Connect or reconnect with a new set of symbols.
+  Future<void> connect(List<String> symbols) async {
+    _notify(WsStatus.connecting);
+    if (_disposed) return;
+    _symbols = List.from(symbols);
+    await _channel?.sink.close();
+
+    try {
+      if (_symbols.length > AppConfig.wsMaxSubscriptionCount) {
+        throw const WebSocketException('Subscribe limit exceeded');
+      }
+      _channel = WebSocketChannel.connect(Uri.parse(url));
+      _setupPing();
+      _send(encodeSubscribe(_symbols));
+
+      final subscription = _channel!.stream.listen(
+        _handleData,
+        onDone: _handleDone,
+        onError: _handleError,
+        cancelOnError: true,
+      );
+      _activeSubscriptions.add(subscription);
+
+      _retryCount = 0;
+      _backoffCalculator.recordSuccess();
+      _notify(WsStatus.connected);
+    } catch (e) {
+      debugPrint('WS connect failed: $e');
+      _backoffCalculator.recordFailure();
+      _notify(WsStatus.failed);
+      _scheduleReconnect();
+    }
+  }
+
+  void _handleData(dynamic raw) {
+    _pongTimer?.cancel();
+    try {
+      final text = raw is List<int> ? utf8.decode(raw) : raw.toString();
+      final jsonObj = jsonDecode(text);
+      final data = decode(jsonObj);
+      _controller.add(data);
+    } catch (e, st) {
+      debugPrint('WS processing error: $e\n$st');
+    }
+  }
+
+  void _handleDone() {
+    debugPrint('WS closed');
+    _notify(WsStatus.disconnected);
+    _scheduleReconnect();
+  }
+
+  void _handleError(dynamic e) {
+    debugPrint('WS error: $e, details: ${e.toString()}');
+    _backoffCalculator.recordFailure();
+    _notify(WsStatus.error);
+    _scheduleReconnect();
+  }
+
+  void _send(String msg) => _rateLimiter.enqueue(() {
+        try {
+          _channel?.sink.add(msg);
+          debugPrint('WS ▶ $msg');
+        } catch (e, st) {
+          debugPrint('WS send error: $e\n$st');
+        }
+      });
+
+  void _setupPing() {
+    _pingTimer?.cancel();
+    _pongTimer?.cancel();
+    _pingTimer = Timer.periodic(AppConfig.wsPingInterval, (_) {
+      _send(jsonEncode({'type': 'ping'}));
+      _pongTimer = Timer(AppConfig.wsPongTimeout, () {
+        debugPrint('Pong timeout, reconnecting');
+        _notify(WsStatus.pongTimeout);
+        _scheduleReconnect();
+      });
+    });
+  }
+
+  /// Schedule reconnection with adaptive backoff.
+  void _scheduleReconnect() {
+    if (_disposed || _reconnecting) return;
+    _reconnecting = true;
+    _pingTimer?.cancel();
+    _pongTimer?.cancel();
+
+    _backoffCalculator
+        .calculateBackoff(
+          _retryCount,
+          AppConfig.wsInitialBackoff,
+          AppConfig.wsMaxBackoff,
+        )
+        .then((adaptiveDelay) {
+          if (_disposed) return;
+          Future.delayed(adaptiveDelay, () {
+            if (_disposed) return;
+            if (_retryCount < AppConfig.wsMaxRetryCount) {
+              _retryCount++;
+              debugPrint(
+                  'Reconnect attempt #$_retryCount after ${adaptiveDelay.inMilliseconds}ms');
+              _notify(WsStatus.reconnecting);
+              connect(_symbols).whenComplete(() => _reconnecting = false);
+            } else {
+              debugPrint('Max WS retries exceeded');
+              _notify(WsStatus.maxRetryExceeded);
+              _retryCount = 0;
+              _reconnecting = false;
+            }
+          });
+        });
+  }
+
+  void _notify(WsStatus status) => onStatusChange?.call(status);
+
+  /// Dispose resources: timers, rate limiter, channel, controller, and backoff calculator.
+  Future<void> dispose() async {
+    _disposed = true;
+    _pingTimer?.cancel();
+    _pongTimer?.cancel();
+    _memoryCleanupTimer?.cancel();
+
+    for (final sub in _activeSubscriptions) {
+      await sub.cancel();
+    }
+    _activeSubscriptions.clear();
+
+    _rateLimiter.dispose();
+    await _channel?.sink.close();
+    await _controller.close();
+    _backoffCalculator.recordSuccess(); // Reset backoff state
+    debugPrint('WSClient disposed');
+  }
+}\n\n// ====== lib/core/network/websocket/orderbook_ws_client.dart ======\n
+// lib/core/network/websocket/orderbook_ws_client.dart
+
+import 'dart:convert';
+import '../../config/app_config.dart';
+import 'base_ws_client.dart';
+
+/// “호가” 스트림: List<Map<String, dynamic>>
+class OrderbookWsClient extends BaseWsClient<List<Map<String, dynamic>>> {
+  OrderbookWsClient({void Function(WsStatus)? onStatusChange})
+      : super(
+          url: AppConfig.upbitWsUrl,
+          onStatusChange: onStatusChange,
+          decode: BaseWsClient.decodeJsonList,
+          encodeSubscribe: (markets) {
+            final codes = markets.take(AppConfig.wsMaxSubscriptionCount).toList();
+            return jsonEncode([
+              {
+                'ticket':
+                    'orderbook-${DateTime.now().millisecondsSinceEpoch}'
+              },
+              {
+                'type': 'orderbook',
+                'codes': codes,
+              },
+              {'format': 'DEFAULT'},
+            ]);
+          },
+        );
+}
+\n\n// ====== lib/core/network/auth_interceptor.dart ======\n
+// lib/core/network/auth_interceptor.dart
+
+import 'dart:convert';
+import 'package:crypto/crypto.dart';
+import 'package:dio/dio.dart';
+import '../utils/logger.dart';
+
+/// Upbit REST API 호출 시 JWT 방식의 인증 헤더를 붙여줍니다.
+/// - payload에 access_key, nonce, (query_hash, query_hash_alg)을 포함해야 합니다.
+/// - 알고리즘: HS256
+class AuthInterceptor extends Interceptor {
+  final String apiKey;
+  final String apiSecret;
+
+  AuthInterceptor({required this.apiKey, required this.apiSecret});
+
+  @override
+  void onRequest(RequestOptions options, RequestInterceptorHandler handler) {
+    try {
+      final nonce = DateTime.now().millisecondsSinceEpoch.toString();
+      final payload = <String, dynamic>{
+        'access_key': apiKey,
+        'nonce': nonce,
+      };
+
+      if (options.queryParameters.isNotEmpty || _hasRequestBody(options)) {
+        final raw = options.queryParameters.isNotEmpty
+            ? Uri(queryParameters: options.queryParameters).query
+            : jsonEncode(options.data);
+        payload['query_hash'] = sha512.convert(utf8.encode(raw)).toString();
+        payload['query_hash_alg'] = 'SHA512';
+      }
+
+      // JWT Header and Payload
+      const headerMap = {'alg': 'HS256', 'typ': 'JWT'};
+      final headerJson = jsonEncode(headerMap);
+      final payloadJson = jsonEncode(payload);
+      final headerSeg = _base64UrlEncode(headerJson);
+      final payloadSeg = _base64UrlEncode(payloadJson);
+
+      // Signature
+      final sigBytes = Hmac(sha256, utf8.encode(apiSecret))
+          .convert(utf8.encode('$headerSeg.$payloadSeg'))
+          .bytes;
+      final sigSeg = base64Url.encode(sigBytes).replaceAll('=', '');
+
+      options.headers['Authorization'] =
+          'Bearer $headerSeg.$payloadSeg.$sigSeg';
+    } catch (e, st) {
+      log.e('AuthInterceptor error', e, st);
+      return handler.reject(
+        DioException(requestOptions: options, error: e),
+      );
+    }
+
+    handler.next(options);
+  }
+
+  bool _hasRequestBody(RequestOptions options) {
+    final data = options.data;
+    if (data == null) return false;
+    if (data is String) return data.isNotEmpty;
+    if (data is Iterable || data is Map) return data.isNotEmpty;
+    if (data is FormData) return data.fields.isNotEmpty || data.files.isNotEmpty;
+    return true;
+  }
+
+  String _base64UrlEncode(String input) =>
+      base64Url.encode(utf8.encode(input)).replaceAll('=', '');
+}
+\n\n// ====== lib/core/network/adaptive_backoff.dart ======\n
+// lib/core/network/adaptive_backoff.dart
+
+import 'dart:math' as math;
+import 'package:connectivity_plus/connectivity_plus.dart';
+import '../utils/logger.dart';
+
+class AdaptiveBackoffCalculator {
+  final Connectivity _connectivity = Connectivity();
+  int _consecutiveFailures = 0;
+  DateTime? _lastFailureTime;
+  
+  // 네트워크별 기본 지터 계수 (connectivity_plus 연동)
+  static const Map<ConnectivityResult, double> _networkMultipliers = {
+    ConnectivityResult.wifi: 0.8,      // WiFi는 빠른 재연결
+    ConnectivityResult.mobile: 1.2,    // 모바일은 보수적
+    ConnectivityResult.ethernet: 0.6,  // 유선은 가장 빠름
+    ConnectivityResult.none: 2.0,      // 연결 없음은 매우 보수적
+  };
+
+  Future<Duration> calculateBackoff(int attempt, Duration baseDelay, Duration maxDelay) async {
+    final connectivityResult = await _connectivity.checkConnectivity();
+    final networkMultiplier = _networkMultipliers[connectivityResult] ?? 1.0; // 기본값
+    
+    final failurePenalty = _calculateFailurePenalty();
+    
+    final exponentialMs = baseDelay.inMilliseconds * (1 << attempt);
+    final cappedMs = math.min(exponentialMs, maxDelay.inMilliseconds);
+    
+    // 지터 범위 20%로 빠른 재연결 보장
+    final jitterRange = cappedMs * 0.2;
+    final random = math.Random();
+    final adaptiveJitter = random.nextDouble() * jitterRange * networkMultiplier * failurePenalty;
+    
+    final finalMs = math.max(0, cappedMs + adaptiveJitter.round());
+    
+    log.d('AdaptiveBackoff: attempt=$attempt, network=$connectivityResult, '
+          'base=${cappedMs}ms, jitter=${adaptiveJitter.round()}ms, final=${finalMs}ms');
+    
+    return Duration(milliseconds: finalMs);
+  }
+
+  double _calculateFailurePenalty() {
+    if (_lastFailureTime == null) return 1.0;
+    
+    final timeSinceLastFailure = DateTime.now().difference(_lastFailureTime!);
+    if (timeSinceLastFailure > const Duration(minutes: 5)) {
+      _consecutiveFailures = 0;
+      return 1.0;
+    }
+    
+    // 페널티 상한 1.5배로 조정 (그록의 수정사항 유지)
+    return math.min(1.5, 1.0 + (_consecutiveFailures * 0.2));
+  }
+
+  void recordFailure() {
+    _consecutiveFailures++;
+    _lastFailureTime = DateTime.now();
+  }
+
+  void recordSuccess() {
+    _consecutiveFailures = 0;
+    _lastFailureTime = null;
+  }
+}\n\n// ====== lib/core/network/retry_interceptor.dart ======\n
+// lib/core/network/retry_interceptor.dart
+
+import 'dart:async';
+import 'dart:math';
+import 'package:dio/dio.dart';
+import '../utils/logger.dart';
+
+/// 429 혹은 5xx 에러에 대해 지수 백오프 + 지터 방식으로 재시도합니다.
+class RetryInterceptor extends Interceptor {
+  final Dio dio;
+  final int maxRetries;
+  final Duration initialBackoff;
+  final Duration maxBackoff;
+  final double jitterFactor;
+
+  RetryInterceptor({
+    required this.dio,
+    this.maxRetries = 3,
+    this.initialBackoff = const Duration(milliseconds: 500),
+    this.maxBackoff = const Duration(seconds: 5),
+    this.jitterFactor = 0.2,
+  });
+
+  @override
+  Future<void> onError(DioException err, ErrorInterceptorHandler handler) async {
+    final options = err.requestOptions;
+    final retryCount = (options.extra['retry_count'] as int?) ?? 0;
+
+    if (_shouldRetry(err) && retryCount < maxRetries) {
+      final next = retryCount + 1;
+      options.extra['retry_count'] = next;
+      final delay = _computeBackoff(next);
+      log.i('Retry #\$next for [\${options.method} \${options.path}] in \${delay.inMilliseconds}ms');
+      await Future.delayed(delay);
+      try {
+        final response = await dio.fetch(options);
+        return handler.resolve(response);
+      } on DioException catch (e) {
+        return handler.next(e);
+      }
+    }
+
+    handler.next(err);
+  }
+
+  bool _shouldRetry(DioException err) {
+    final status = err.response?.statusCode;
+    return err.type == DioExceptionType.badResponse &&
+        (status == 429 || (status != null && status >= 500 && status < 600));
+  }
+
+  Duration _computeBackoff(int attempt) {
+    final expMs = initialBackoff.inMilliseconds * (1 << (attempt - 1));
+    final cap = min(expMs, maxBackoff.inMilliseconds);
+    final jitter = ((Random().nextDouble() * 2 - 1) * jitterFactor * cap).round();
+    final finalMs = max(0, cap + jitter);
+    return Duration(milliseconds: finalMs);
+  }
+}
+\n\n// ====== lib/core/network/ws_rate_limiter_interceptor.dart ======\n
+// lib/core/network/ws_rate_limiter_interceptor.dart
+
+import 'dart:async';
+import 'dart:collection';
+import 'package:flutter/foundation.dart';
+import '../utils/logger.dart';
+
+/// Upbit WebSocket 구독 메시지 발행 간 최소 간격 보장 유틸
+class WsRateLimiter {
+  final Duration minInterval;
+  final Queue<VoidCallback> _queue = Queue<VoidCallback>();
+  bool _isFlushing = false;
+  DateTime _lastSent = DateTime.fromMillisecondsSinceEpoch(0);
+
+  WsRateLimiter({this.minInterval = const Duration(milliseconds: 500)});
+
+  /// 메시지를 큐에 추가하고 즉시 전송 시도
+  void enqueue(VoidCallback send) {
+    _queue.add(send);
+    _flushNext();
+  }
+
+  void _flushNext() {
+    if (_isFlushing || _queue.isEmpty) return;
+    _isFlushing = true;
+
+    final now = DateTime.now();
+    final elapsed = now.difference(_lastSent);
+    final delay = elapsed >= minInterval ? Duration.zero : minInterval - elapsed;
+
+    Timer(delay, () {
+      final send = _queue.removeFirst();
+      try {
+        send();
+        _lastSent = DateTime.now();
+        log.d('WsRateLimiter sent, next after \${minInterval.inMilliseconds}ms');
+      } catch (e, st) {
+        log.e('WsRateLimiter send error', e, st);
+      } finally {
+        _isFlushing = false;
+        if (_queue.isNotEmpty) _flushNext();
+      }
+    });
+  }
+
+  /// 큐를 비우고 사용 중지
+  void dispose() {
+    _queue.clear();
+  }
+}
+\n\n// ====== lib/core/network/api_client.dart ======\n
+// lib/core/network/api_client.dart
+
+import 'dart:async';
+import 'dart:collection';
+import 'package:dio/dio.dart';
+import '../config/app_config.dart';
+import '../error/app_exception.dart';
+import '../extensions/result.dart';
+import '../utils/logger.dart';
+import 'auth_interceptor.dart';
+import 'retry_interceptor.dart';
+import 'logging_interceptor.dart';
+
+typedef Json = Map<String, dynamic>;
+
+/// Upbit REST API 초당 호출 제한을 관리하는 RateLimiter
+class _RateLimiter {
+  final int maxRequests;
+  final Duration period;
+  final Queue<DateTime> _timestamps = Queue<DateTime>();
+
+  _RateLimiter({required this.maxRequests, required this.period});
+
+  /// 호출 전 허용 여부를 확인하고, 필요 시 대기합니다.
+  Future<void> throttle() async {
+    final now = DateTime.now();
+    // 기간 초과된 기록 제거
+    while (_timestamps.isNotEmpty && now.difference(_timestamps.first) > period) {
+      _timestamps.removeFirst();
+    }
+    if (_timestamps.length >= maxRequests) {
+      final earliest = _timestamps.first;
+      final wait = period - now.difference(earliest);
+      await Future.delayed(wait);
+      // 대기 후 다시 오래된 기록 정리
+      final now2 = DateTime.now();
+      while (_timestamps.isNotEmpty && now2.difference(_timestamps.first) > period) {
+        _timestamps.removeFirst();
+      }
+    }
+    _timestamps.addLast(DateTime.now());
+  }
+}
+
+/// In-memory cache entry with timestamp.
+class _MemCacheEntry<T> {
+  final T data;
+  final DateTime ts;
+  _MemCacheEntry(this.data) : ts = DateTime.now();
+
+  bool fresh(Duration dur) => DateTime.now().difference(ts) < dur;
+}
+
+/// Simple LRU cache based on insertion order, with a maxEntries limit.
+class _MemCache {
+  final int maxEntries;
+  final Map<String, _MemCacheEntry<dynamic>> _box;
+
+  _MemCache({this.maxEntries = 100}) : _box = <String, _MemCacheEntry<dynamic>>{};
+
+  T? get<T>(String key, Duration dur) {
+    final entry = _box[key];
+    if (entry == null || !entry.fresh(dur)) return null;
+    return entry.data as T;
+  }
+
+  void put<T>(String key, T data) {
+    if (_box.length >= maxEntries) {
+      final oldestKey = _box.keys.first;
+      _box.remove(oldestKey);
+    }
+    _box[key] = _MemCacheEntry<T>(data);
+  }
+
+  void invalidate(String key) => _box.remove(key);
+
+  void clear() => _box.clear();
+}
+
+/// Converts a query map into a stable, sorted query string.
+/// Silently skips values that cannot be represented.
+String _stableQueryString(Json? query) {
+  if (query == null || query.isEmpty) return '';
+  try {
+    final entries = query.entries
+      .where((e) => e.value != null)
+      .toList()
+      ..sort((a, b) => a.key.compareTo(b.key));
+    final params = <String, String>{};
+    for (final e in entries) {
+      final v = e.value;
+      if (v is List) {
+        params[e.key] = v.join(',');
+      } else {
+        params[e.key] = v.toString();
+      }
+    }
+    return Uri(queryParameters: params).query;
+  } catch (e, st) {
+    log.e('StableQueryString failed', e, st);
+    return '';
+  }
+}
+
+/// REST 호출용 Dio 래퍼
+/// - Auth/Retry/Logging 인터셉터 자동 연결
+/// - Simple LRU-based in-memory cache 지원
+/// - Upbit REST API rate limit(초당 15회) 자동 관리
+class ApiClient {
+  final Dio _dio;
+  final _MemCache _cache;
+  final _RateLimiter _rateLimiter;
+
+  /// [apiKey], [apiSecret] 는 Upbit Open API 자격증명
+  ApiClient({
+    Dio? dio,
+    required String apiKey,
+    required String apiSecret,
+    int cacheSize = 100,
+  })  : _dio = dio ?? Dio(),
+        _cache = _MemCache(maxEntries: cacheSize),
+        _rateLimiter = _RateLimiter(
+          maxRequests: AppConfig.restRateLimitCount,
+          period: AppConfig.restRateLimitPeriod,
+        ) {
+    _dio.interceptors.addAll([
+      AuthInterceptor(apiKey: apiKey, apiSecret: apiSecret),
+      RetryInterceptor(dio: _dio),
+      LoggingInterceptor(),
+    ]);
+  }
+
+  /// [method]: GET, POST 등
+  /// [path]: 전체 URL 또는 baseUrl 이후 경로
+  /// [query]: URL 쿼리 파라미터
+  /// [body]: JSON 바디
+  /// [cacheDur]: null이 아닐 때 캐시 사용 (기간 지정)
+  Future<Result<R, NetworkException>> request<R>({
+    required String method,
+    required String path,
+    Json? query,
+    Json? body,
+    Duration? cacheDur,
+  }) async {
+    // Upbit REST rate limit 적용
+    await _rateLimiter.throttle();
+
+    String? cacheKey;
+    if (cacheDur != null) {
+      final qstr = _stableQueryString(query);
+      cacheKey = '\$method|\$path|\$qstr';
+      final cached = _cache.get<R>(cacheKey, cacheDur);
+      if (cached != null) {
+        return Ok(cached);
+      }
+    }
+
+    try {
+      final response = await _dio.request<R>(
+        path,
+        queryParameters: query,
+        data: body,
+        options: Options(method: method),
+      );
+
+      final data = response.data;
+      if (cacheKey != null && data != null) {
+        _cache.put<R>(cacheKey, data as R);
+      }
+
+      return Ok(data as R);
+    } on DioException catch (dioErr) {
+      return Err(NetworkException.fromDio(dioErr));
+    } catch (e, st) {
+      log.e('ApiClient unexpected error', e, st);
+      final ex = e is Exception ? e : Exception(e.toString());
+      return Err(NetworkException(e.toString(), originalException: ex));
+    }
+  }
+}\n\n// ====== lib/core/network/logging_interceptor.dart ======\n
+// lib/core/network/logging_interceptor.dart
+
+import 'dart:convert';
+import 'package:dio/dio.dart';
+import '../utils/logger.dart';
+
+/// 모든 REST 요청과 응답, 오류를 로깅합니다.
+class LoggingInterceptor extends Interceptor {
+  @override
+  void onRequest(RequestOptions options, RequestInterceptorHandler handler) {
+    log.i('--> ${options.method} ${options.uri}');
+    if (options.data != null && options.data is! String) {
+      try {
+        // 변수 없이 바로 inline해서 사용
+        log.d('Request Data:\n${const JsonEncoder.withIndent('  ').convert(options.data)}');
+      } catch (e, st) {
+        log.d('Request Data serialization failed', e, st);
+      }
+    }
+    handler.next(options);
+  }
+
+  @override
+  void onResponse(Response response, ResponseInterceptorHandler handler) {
+    log.i('<-- ${response.statusCode} ${response.requestOptions.uri}');
+    final text = response.data is String
+        ? response.data as String
+        : response.data.toString();
+    if (text.isNotEmpty) {
+      log.d(text.length > 500 ? '${text.substring(0, 500)}...' : text);
+    }
+    handler.next(response);
+  }
+
+  @override
+  void onError(DioException err, ErrorInterceptorHandler handler) {
+    // uri/status 직접 inline
+    log.e('<-- Error ${err.response?.statusCode} ${err.requestOptions.uri}', err, err.stackTrace);
+    handler.next(err);
+  }
+}
+\n\n// ====== lib/core/navigation/app_router.dart ======\n
+// lib/core/navigation/app_router.dart
+
+import 'dart:async';
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
+import 'package:firebase_messaging/firebase_messaging.dart';
+
+import '../config/app_config.dart';
+import '../../features/settings/presentation/pages/settings_page.dart';
+import '../../features/trade/presentation/pages/trade_page.dart';
+import '../../app.dart'; // scaffoldMessengerKeyProvider, selectedTabProvider
+
+/// Available application routes.
+enum AppRoute { trade, settings, notification }
+
+/// Extension to provide path and label for each route.
+extension AppRouteExtension on AppRoute {
+  String get path {
+    switch (this) {
+      case AppRoute.trade:
+        return '/';
+      case AppRoute.settings:
+        return '/settings';
+      case AppRoute.notification:
+        return '/notification';
+    }
+  }
+
+  String get label {
+    switch (this) {
+      case AppRoute.trade:
+        return '체결';
+      case AppRoute.settings:
+        return '설정';
+      case AppRoute.notification:
+        return '알림';
+    }
+  }
+}
+
+/// 전체 앱 라우터 및 FCM 핸들러 관리
+class AppRouter {
+  final WidgetRef ref;
+  final GlobalKey<NavigatorState> navigatorKey;
+  late final GoRouter router;
+
+  /// Bottom navigation routes
+  static const bottomRoutes = [AppRoute.trade, AppRoute.settings];
+
+  StreamSubscription<RemoteMessage>? _onMessageSub;
+  StreamSubscription<RemoteMessage>? _onMessageOpenedSub;
+
+  AppRouter(this.ref, this.navigatorKey) {
+    router = GoRouter(
+      navigatorKey: navigatorKey,
+      initialLocation: AppRoute.trade.path,
+      debugLogDiagnostics: AppConfig.isDebugMode,
+      routes: [
+        ShellRoute(
+          builder: (context, state, child) {
+            final idx = ref.watch(selectedTabProvider);
+            return Scaffold(
+              body: child,
+              bottomNavigationBar: BottomNavigationBar(
+                type: BottomNavigationBarType.fixed,
+                currentIndex: idx.clamp(0, bottomRoutes.length - 1),
+                onTap: (i) {
+                  ref.read(selectedTabProvider.notifier).state = i;
+                  context.go(bottomRoutes[i].path);
+                },
+                items: bottomRoutes.map((route) {
+                  return BottomNavigationBarItem(
+                    icon: Icon(
+                      route == AppRoute.trade
+                          ? Icons.show_chart
+                          : Icons.settings,
+                    ),
+                    label: route.label,
+                  );
+                }).toList(),
+              ),
+            );
+          },
+          routes: [
+            GoRoute(
+              path: AppRoute.trade.path,
+              name: AppRoute.trade.name,
+              builder: (context, state) => const TradePage(),
+            ),
+            GoRoute(
+              path: AppRoute.settings.path,
+              name: AppRoute.settings.name,
+              builder: (context, state) => const SettingsPage(),
+            ),
+          ],
+        ),
+        GoRoute(
+          path: AppRoute.notification.path,
+          name: AppRoute.notification.name,
+          builder: (context, state) {
+            final data = state.extra as Map<String, dynamic>?;
+            return Scaffold(
+              appBar: AppBar(title: const Text('알림 상세')),
+              body: Padding(
+                padding: const EdgeInsets.all(16),
+                child: Text(data?.toString() ?? '데이터 없음'),
+              ),
+            );
+          },
+        ),
+      ],
+    );
+  }
+
+  /// Register FCM listeners and keep subscriptions for cleanup.
+  void setupFCMListeners() {
+    final messenger = ref.read(scaffoldMessengerKeyProvider).currentState;
+
+    _onMessageSub = FirebaseMessaging.onMessage.listen((msg) {
+      final n = msg.notification;
+      if (n != null && messenger != null) {
+        messenger
+          ..hideCurrentSnackBar()
+          ..showSnackBar(SnackBar(content: Text('${n.title}: ${n.body}')));
+      }
+    });
+
+    // Initial message (cold start)
+    FirebaseMessaging.instance.getInitialMessage().then((msg) {
+      if (msg != null) {
+        router.go(AppRoute.notification.path, extra: msg.data);
+      }
+    });
+
+    _onMessageOpenedSub =
+        FirebaseMessaging.onMessageOpenedApp.listen((msg) {
+      router.go(AppRoute.notification.path, extra: msg.data);
+    });
+  }
+
+  /// Cleanup subscriptions when router is disposed.
+  void dispose() {
+    _onMessageSub?.cancel();
+    _onMessageOpenedSub?.cancel();
+  }
+}
+\n\n// ====== lib/core/utils/date_time.dart ======\n
+import 'package:intl/intl.dart';
+
+/// DateTime extension utilities for formatting and comparison.
+extension DateTimeX on DateTime {
+  /// `2024-05-17 22:05:01` → `22:05:01`
+  String hhmmss() => DateFormat('HH:mm:ss').format(this);
+
+  /// `2024-05-17` 형식의 날짜 문자열 반환
+  String yyyyMMdd() => DateFormat('yyyy-MM-dd').format(this);
+
+  /// `22:05` 형식의 시간 문자열 반환
+  String hhmm() => DateFormat('HH:mm').format(this);
+
+  /// `2024-05-17 22:05` 형식의 날짜+시간 문자열 반환
+  String yyyyMMddhhmm() => DateFormat('yyyy-MM-dd HH:mm').format(this);
+
+  /// 현재 시간과의 차이를 사람이 읽기 쉬운 형태로 표시
+  /// 예: '방금 전', '3분 전', '2시간 전', '어제', '3일 전', '2주 전', '5개월 전', '1년 전'
+  String timeAgo() {
+    final now = DateTime.now();
+    final diff = now.difference(this);
+
+    if (diff.inSeconds < 60) return '방금 전';
+    if (diff.inMinutes < 60) return '${diff.inMinutes}분 전';
+    if (diff.inHours < 24) return '${diff.inHours}시간 전';
+    if (diff.inDays < 2) return '어제';
+    if (diff.inDays < 7) return '${diff.inDays}일 전';
+    if (diff.inDays < 30) return '${(diff.inDays / 7).floor()}주 전';
+    if (diff.inDays < 365) return '${(diff.inDays / 30).floor()}개월 전';
+    return '${(diff.inDays / 365).floor()}년 전';
+  }
+
+  /// UTC 밀리초(ms)를 로컬 DateTime으로 변환
+  static DateTime fromEpochMs(int ms) =>
+      DateTime.fromMillisecondsSinceEpoch(ms, isUtc: true).toLocal();
+
+  /// ISO 8601 문자열을 로컬 DateTime으로 파싱
+  static DateTime parseIso8601(String iso) =>
+      DateTime.parse(iso).toLocal();
+
+  /// 동일한 날짜인지 확인
+  bool isSameDay(DateTime other) =>
+      year == other.year && month == other.month && day == other.day;
+
+  /// 오늘인지 확인
+  bool get isToday => isSameDay(DateTime.now());
+
+  /// 어제인지 확인
+  bool get isYesterday =>
+      isSameDay(DateTime.now().subtract(const Duration(days: 1)));
+}
+\n\n// ====== lib/core/utils/logger.dart ======\n
+import 'package:logger/logger.dart';
+import '../config/app_config.dart';
+
+/// 글로벌 Logger 인스턴스
+/// - 개발 모드: AppConfig.logLevel에 따라 동적 조절
+/// - 프로덕션모드: warning 이상 자동
+final Logger log = Logger(
+  printer: PrettyPrinter(
+    methodCount: 0,      // 스택 트레이스 라인 수
+    errorMethodCount: 5, // 오류 시 표시할 스택 트레이스 라인 수
+    lineLength: 120,     // 로그 한 줄 최대 길이
+    colors: true,        // 컬러 출력 (터미널)
+    printTime: true,     // 타임스탬프 포함
+  ),
+  level: AppConfig.logLevel, // 🔥 환경변수로 동적 조절 가능
+);\n\n// ====== lib/core/utils/app_life_cycle_manager.dart ======\n
+\n\n// ====== lib/core/extensions/result.dart ======\n
+import 'package:meta/meta.dart';
+import '../error/app_exception.dart';
+
+/// Either 스타일의 결과 타입.
+///
+/// - `Ok<T, E>`: 성공 시 데이터를 담습니다.
+/// - `Err<T, E>`: 실패 시 예외를 담습니다.
+@immutable
+sealed class Result<T, E extends AppException> {
+  const Result();
+
+  /// 성공/실패에 따라 분기 처리합니다.
+  R when<R>({
+    required R Function(T value) ok,
+    required R Function(E error) err,
+  }) {
+    if (this is Ok<T, E>) {
+      return ok((this as Ok<T, E>).value);
+    } else {
+      return err((this as Err<T, E>).error);
+    }
+  }
+
+  /// 성공 여부
+  bool get isOk => this is Ok<T, E>;
+
+  /// 실패 여부
+  bool get isErr => this is Err<T, E>;
+
+  /// 성공 값 (없으면 null)
+  T? get valueOrNull => isOk ? (this as Ok<T, E>).value : null;
+
+  /// 실패 예외 (없으면 null)
+  E? get errorOrNull => isErr ? (this is Err<T, E> ? (this as Err<T, E>).error : null) : null;
+
+  /// 성공 값을 매핑합니다.
+  Result<U, E> map<U>(U Function(T value) f) {
+    if (this is Ok<T, E>) {
+      return Ok<U, E>(f((this as Ok<T, E>).value));
+    } else {
+      return Err<U, E>((this as Err<T, E>).error);
+    }
+  }
+
+  /// 실패 예외를 다른 타입으로 매핑합니다.
+  /// 성공 시에도 새로운 에러 타입 F 를 사용하도록 합니다.
+  Result<T, F> mapErr<F extends AppException>(F Function(E error) f) {
+    if (this is Err<T, E>) {
+      return Err<T, F>(f((this as Err<T, E>).error));
+    }
+    // 성공 케이스에서는 기존 값을 그대로 사용
+    return Ok<T, F>((this as Ok<T, E>).value);
+  }
+
+  /// 성공 시 비동기 후속 작업을 수행합니다.
+  Future<Result<U, E>> thenAsync<U>(Future<U> Function(T value) f) async {
+    if (this is Ok<T, E>) {
+      final T value = (this as Ok<T, E>).value;
+      try {
+        final u = await f(value);
+        return Ok<U, E>(u);
+      } on AppException catch (e) {
+        // E 타입의 에러라면 그대로, 아니면 새로운 AppException 으로 래핑
+        final E errVal = e is E ? e : AppException(e.message) as E;
+        return Err<U, E>(errVal);
+      } catch (e) {
+        final E errVal = AppException(e.toString()) as E;
+        return Err<U, E>(errVal);
+      }
+    } else {
+      return Err<U, E>((this as Err<T, E>).error);
+    }
+  }
+
+  @override
+  String toString() {
+    if (this is Ok<T, E>) {
+      return 'Ok(${(this as Ok<T, E>).value})';
+    } else {
+      return 'Err(${(this as Err<T, E>).error})';
+    }
+  }
+}
+
+/// 성공 결과를 담습니다.
+class Ok<T, E extends AppException> extends Result<T, E> {
+  final T value;
+  const Ok(this.value);
+}
+
+/// 실패 결과를 담습니다.
+class Err<T, E extends AppException> extends Result<T, E> {
+  final E error;
+  const Err(this.error);
+}
+\n\n// ====== lib/core/error/app_exception.dart ======\n
+// lib/core/error/app_exception.dart
+
+import 'package:dio/dio.dart';
+
+/// 최상위 앱 예외
+/// - 모든 커스텀 예외는 이 클래스를 상속해주세요.
+class AppException implements Exception {
+  /// 사용자에게 노출할 메시지
+  final String message;
+
+  /// 내부 로깅 또는 식별용 코드 (nullable)
+  final String? code;
+
+  /// HTTP 상태 코드 등 추가 상태 정보
+  final int? statusCode;
+
+  /// 원본 예외(있는 경우)
+  final Exception? originalException;
+
+  const AppException(
+    this.message, {
+    this.code,
+    this.statusCode,
+    this.originalException,
+  });
+
+  @override
+  String toString() {
+    final parts = <String>[];
+    if (code != null) parts.add('code: $code');
+    if (statusCode != null) parts.add('status: $statusCode');
+    parts.add('message: $message');
+    return 'AppException(${parts.join(', ')})';
+  }
+}
+
+/// REST/HTTP 호출 중 발생한 예외
+class NetworkException extends AppException {
+  const NetworkException(
+    String message, {
+    String? code,
+    int? statusCode,
+    Exception? originalException,
+  }) : super(
+          message,
+          code: code,
+          statusCode: statusCode,
+          originalException: originalException,
+        );
+
+  /// DioException → NetworkException 변환 헬퍼
+  factory NetworkException.fromDio(DioException dioError) {
+    final msg = dioError.message ?? dioError.toString();
+    return NetworkException(
+      msg,
+      code: dioError.response?.statusMessage,
+      statusCode: dioError.response?.statusCode,
+      originalException: dioError,
+    );
+  }
+}
+
+/// WebSocket 연결/통신 중 발생한 예외
+class WebSocketException extends AppException {
+  /// WS 서버가 보낸 이유 문자열 (nullable)
+  final String? reason;
+
+  const WebSocketException(
+    String message, {
+    this.reason,
+    Exception? originalException,
+  }) : super(
+          message,
+          originalException: originalException,
+        );
+
+  @override
+  String toString() {
+    final parts = <String>[];
+    if (reason != null) parts.add('reason: $reason');
+    parts.add('message: $message');
+    return 'WebSocketException(${parts.join(', ')})';
+  }
+}
+
+/// 서버로부터 Rate Limit(HTTP 429 등) 응답을 받았을 때
+class RateLimitException extends AppException {
+  /// 재시도까지 대기해야 할 시간
+  final Duration retryAfter;
+
+  const RateLimitException(
+    String message, {
+    required this.retryAfter,
+    String? code,
+    int? statusCode,
+  }) : super(
+          message,
+          code: code,
+          statusCode: statusCode,
+        );
+
+  @override
+  String toString() =>
+      'RateLimitException(retryAfter: ${retryAfter.inSeconds}s, message: $message)';
+}
+
+/// JSON 파싱 또는 데이터 변환 중 발생한 예외
+class DataParsingException extends AppException {
+  const DataParsingException(
+    String message, {
+    Exception? originalException,
+  }) : super(
+          message,
+          originalException: originalException,
+        );
+}
+
+/// 인메모리 캐시에서 키를 찾지 못했을 때
+class CacheMissException extends AppException {
+  const CacheMissException([String message = 'Cache miss'])
+      : super(message);
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// 도메인 특화 예외
+// ──────────────────────────────────────────────────────────────────────────
+
+/// 체결(Trade) 데이터 유효성 검사 오류
+class TradeException extends AppException {
+  const TradeException(
+    String message, {
+    Exception? originalException,
+  }) : super(
+          message,
+          originalException: originalException,
+        );
+}
+
+/// 호가(Order Book) 데이터 오류
+class OrderBookException extends AppException {
+  const OrderBookException(
+    String message, {
+    Exception? originalException,
+  }) : super(
+          message,
+          originalException: originalException,
+        );
+}
+
+/// 캔들(Candle) 데이터 파싱 오류
+class CandleException extends DataParsingException {
+  const CandleException(
+    String message, {
+    Exception? originalException,
+  }) : super(
+          message,
+          originalException: originalException,
+        );
+}
+
+/// 현재가(Ticker) 데이터 파싱 오류
+class TickerException extends DataParsingException {
+  const TickerException(
+    String message, {
+    Exception? originalException,
+  }) : super(
+          message,
+          originalException: originalException,
+        );
+}
+\n\n// ====== lib/core/event/app_event.dart ======\n
+// lib/core/event/app_event.dart
+
+import 'package:equatable/equatable.dart';
+import 'package:uuid/uuid.dart';
+
+typedef Json = Map<String, dynamic>;
+
+/// 애플리케이션 전역 이벤트의 베이스 클래스
+/// - id     : UUID v4
+/// - ts     : UTC 밀리초 타임스탬프
+/// - payload: 자유 형태 JSON
+class AppEvent extends Equatable {
+  /// 고유 ID (UUID v4)
+  final String id;
+
+  /// UTC 밀리초 타임스탬프
+  final int ts;
+
+  /// 페이로드 데이터 (불변)
+  final Json payload;
+
+  const AppEvent({
+    required this.id,
+    required this.ts,
+    required this.payload,
+  });
+
+  /// 현재 시각을 기준으로 id·ts를 자동 생성합니다.
+  factory AppEvent.now(Json payload) {
+    final nowUtcMs = DateTime.now().toUtc().millisecondsSinceEpoch;
+    return AppEvent(
+      id: const Uuid().v4(),
+      ts: nowUtcMs,
+      payload: Map<String, dynamic>.of(payload), // 방어적 복사
+    );
+  }
+
+  /// UTC ms → 로컬 DateTime
+  DateTime get timestamp =>
+      DateTime.fromMillisecondsSinceEpoch(ts, isUtc: true).toLocal();
+
+  /// JSON 직렬화 (payload도 복사하여 노출)
+  Json toJson() => {
+        'id': id,
+        'ts': ts,
+        'payload': Map<String, dynamic>.of(payload),
+      };
+
+  /// JSON 역직렬화
+  factory AppEvent.fromJson(Json json) {
+    return AppEvent(
+      id: json['id'] as String,
+      ts: json['ts'] as int,
+      payload: Map<String, dynamic>.of(json['payload'] as Json),
+    );
+  }
+
+  /// 복사본 생성 (immutable 유지)
+  AppEvent copyWith({
+    String? id,
+    int? ts,
+    Json? payload,
+  }) =>
+      AppEvent(
+        id: id ?? this.id,
+        ts: ts ?? this.ts,
+        payload: payload != null ? Map<String, dynamic>.of(payload) : this.payload,
+      );
+
+  @override
+  List<Object?> get props => [id, ts, payload];
+}

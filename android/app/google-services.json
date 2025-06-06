@@ -1,0 +1,48 @@
+{
+  "project_info": {
+    "project_number": "316479388265",
+    "project_id": "com-hundeok-noonchit-f7330",
+    "storage_bucket": "com-hundeok-noonchit-f7330.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:316479388265:android:3dfc7ba10e5e04cd4c00f8",
+        "android_client_info": {
+          "package_name": "com.example.noonchit"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyD9Ribx6Jt36mH0pbcK-MAkotKGnaU9_8E"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:316479388265:android:d9e97a89668654044c00f8",
+        "android_client_info": {
+          "package_name": "com.hundeok.noonchit"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyD9Ribx6Jt36mH0pbcK-MAkotKGnaU9_8E"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

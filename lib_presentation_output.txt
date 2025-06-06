@@ -1,0 +1,622 @@
+\n\n// ====== lib/presentation/providers/trade_provider.dart ======\n
+\n\n// ====== lib/presentation/providers/volume_provider.dart ======\n
+\n\n// ====== lib/presentation/providers/market_providers.dart ======\n
+\n\n// ====== lib/presentation/providers/surge_provider.dart ======\n
+\n\n// ====== lib/presentation/providers/settings_provider.dart ======\n
+\n\n// ====== lib/presentation/providers/momentary_provider.dart ======\n
+\n\n// ====== lib/presentation/controllers/surge_controller.dart ======\n
+\n\n// ====== lib/presentation/controllers/main_controller.dart ======\n
+\n\n// ====== lib/presentation/controllers/settings_controller.dart ======\n
+// lib/presentation/controllers/settings_controller.dart
+
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../domain/entities/app_settings.dart';
+import '../../domain/usecases/settings_usecase.dart';
+import '../../core/di/settings_provider.dart'; // ← 이걸 추가
+
+
+/// Provider 선언
+final settingsControllerProvider =
+    StateNotifierProvider<SettingsController, AppSettings>((ref) {
+  final usecase = ref.watch(settingsUsecaseProvider);
+  return SettingsController(usecase);
+});
+
+/// StateNotifier: AppSettings 상태 관리
+class SettingsController extends StateNotifier<AppSettings> {
+  final SettingsUsecase _usecase;
+
+  SettingsController(this._usecase) : super(const AppSettings()) {
+    _load();
+  }
+
+  Future<void> _load() async {
+    final loaded = await _usecase.getSettings();
+    state = loaded;
+  }
+
+  Future<void> setThemeMode(ThemeMode m) async {
+    await _usecase.updateThemeMode(m);
+    state = state.copyWith(themeMode: m);
+  }
+
+  Future<void> setKeepScreenOn(bool on) async {
+    await _usecase.updateKeepScreenOn(on);
+    state = state.copyWith(keepScreenOn: on);
+  }
+
+  Future<void> setSliderPosition(SliderPosition pos) async {
+    await _usecase.updateSliderPosition(pos);
+    state = state.copyWith(sliderPosition: pos);
+  }
+}
+\n\n// ====== lib/presentation/controllers/momentary_controller.dart ======\n
+\n\n// ====== lib/presentation/controllers/volume_controller.dart ======\n
+\n\n// ====== lib/presentation/controllers/trade_controller.dart ======\n
+// lib/presentation/controllers/trade_controller.dart
+
+import 'dart:async';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../core/config/app_config.dart';
+import '../../core/di/trade_provider.dart'; // usecaseProvider, repoProvider
+import '../../core/error/app_exception.dart';
+import '../../core/extensions/result.dart';
+import '../../domain/entities/trade.dart';
+import '../../domain/usecases/trade_usecase.dart';
+
+/// 화면 상태를 캡슐화하는 immutable 모델
+class TradeState {
+  final List<Trade> trades;
+  final bool isLoading;
+  final bool isConnected;
+  final double threshold;
+  final int selectedIndex;
+  final String? errorMessage;
+
+  const TradeState({
+    this.trades = const [],
+    this.isLoading = false,
+    this.isConnected = false,
+    this.threshold = 20000000,
+    this.selectedIndex = 0,
+    this.errorMessage,
+  });
+
+  TradeState copyWith({
+    List<Trade>? trades,
+    bool? isLoading,
+    bool? isConnected,
+    double? threshold,
+    int? selectedIndex,
+    String? errorMessage,
+  }) {
+    return TradeState(
+      trades: trades ?? this.trades,
+      isLoading: isLoading ?? this.isLoading,
+      isConnected: isConnected ?? this.isConnected,
+      threshold: threshold ?? this.threshold,
+      selectedIndex: selectedIndex ?? this.selectedIndex,
+      errorMessage: errorMessage,
+    );
+  }
+}
+
+/// Trade 화면 전용 ViewModel
+class TradeController extends StateNotifier<TradeState> {
+  final TradeUsecase _usecase;
+  final Ref _ref;  // 🔥 추가: Repository 접근을 위한 ref
+  StreamSubscription<Result<List<Trade>, AppException>>? _subscription;
+
+  TradeController(this._usecase, this._ref) : super(const TradeState());  // 🔥 수정: ref 매개변수 추가
+
+  /// 임계값 및 인덱스 설정 후 스트림 구독
+  void setThreshold(double threshold, int index, List<String> markets) {
+    // 🔥 추가: Repository의 updateThreshold 호출 (핵심 누락 부분)
+    final repository = _ref.read(repoProvider);
+    repository.updateThreshold(threshold);
+    
+    state = state.copyWith(
+      threshold: threshold,
+      selectedIndex: index,
+      isLoading: true,
+      errorMessage: null,
+    );
+    _subscription?.cancel();
+    _subscription = _usecase
+        .filterTrades(threshold, markets)
+        .listen(_handleResult);
+  }
+
+  void _handleResult(Result<List<Trade>, AppException> result) {
+    result.when(
+      ok: (trades) {
+        state = state.copyWith(
+          trades: trades,
+          isLoading: false,
+          isConnected: true,
+          errorMessage: null,
+        );
+      },
+      err: (e) {
+        state = state.copyWith(
+          isLoading: false,
+          isConnected: false,
+          errorMessage: e.message,
+        );
+      },
+    );
+  }
+
+  /// 재연결/새로고침: markets만 받아서 내부적으로 setThreshold 호출
+  void refresh(List<String> markets) {
+    setThreshold(state.threshold, state.selectedIndex, markets);
+  }
+
+  /// 거래 목록 추가 필터 (시장명)
+  List<Trade> filterByMarket(String? marketFilter) {
+    if (marketFilter == null || marketFilter.isEmpty) {
+      return state.trades;
+    }
+    final upper = marketFilter.toUpperCase();
+    return state.trades.where((t) => t.market.contains(upper)).toList();
+  }
+
+  /// 거래 목록 정렬
+  void sortTrades(String field, bool ascending) {
+    final list = [...state.trades];
+    list.sort((a, b) {
+      dynamic aValue;
+      dynamic bValue;
+      switch (field) {
+        case 'market':
+          aValue = a.market;
+          bValue = b.market;
+          break;
+        case 'price':
+          aValue = a.price;
+          bValue = b.price;
+          break;
+        case 'volume':
+          aValue = a.volume;
+          bValue = b.volume;
+          break;
+        case 'total':
+          aValue = a.total;
+          bValue = b.total;
+          break;
+        case 'timestamp':
+          aValue = a.timestampMs;
+          bValue = b.timestampMs;
+          break;
+        default:
+          aValue = a.timestampMs;
+          bValue = b.timestampMs;
+      }
+      final cmp = aValue is Comparable && bValue is Comparable
+          ? aValue.compareTo(bValue)
+          : 0;
+      return ascending ? cmp : -cmp;
+    });
+    state = state.copyWith(trades: list);
+  }
+
+  /// 사용 가능한 임계값 옵션들
+  List<double> get availableThresholds =>
+    AppConfig.tradeFilters.where((f) => f >= 20000000).toList();
+
+  @override
+  void dispose() {
+    _subscription?.cancel();
+    super.dispose();
+  }
+}
+
+/// Provider 선언
+final tradeControllerProvider =
+    StateNotifierProvider<TradeController, TradeState>((ref) {
+  final usecase = ref.read(usecaseProvider);
+  return TradeController(usecase, ref);  // 🔥 수정: ref도 함께 전달
+});\n\n// ====== lib/presentation/pages/momentary_page.dart ======\n
+\n\n// ====== lib/presentation/pages/trade_page.dart ======\n
+// lib/presentation/pages/trade_page.dart
+
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../core/config/app_config.dart';
+import '../../core/di/trade_provider.dart';
+import '../controllers/trade_controller.dart';
+import '../widgets/trade_tile.dart';
+import '../../shared/widgets/common_app_bar.dart';
+
+class TradePage extends ConsumerWidget {
+  const TradePage({Key? key}) : super(key: key);
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    // Controller and state
+    final controller = ref.read(tradeControllerProvider.notifier);
+    final state = ref.watch(tradeControllerProvider);
+
+    // Markets list
+    final marketsAsync = ref.watch(marketsProvider);
+
+    // When markets load, trigger refresh
+    ref.listen<AsyncValue<List<String>>>(marketsProvider, (prev, next) {
+      next.whenData((markets) => controller.refresh(markets));
+    });
+
+    return Scaffold(
+      appBar: const CommonAppBar(title: '체결 포착'),
+      body: Column(
+        children: [
+          // Threshold slider
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  '최소 거래 금액: ${AppConfig.filterNames[state.threshold] ?? state.threshold.toStringAsFixed(0)}',
+                  style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                ),
+                Slider(
+                  value: state.selectedIndex.toDouble(),
+                  min: 0,
+                  max: (controller.availableThresholds.length - 1).toDouble(),
+                  divisions: controller.availableThresholds.length - 1,
+                  label: AppConfig.filterNames[state.threshold] ?? state.threshold.toStringAsFixed(0),
+                  activeColor: Colors.orange,
+                  inactiveColor: Colors.grey,
+                  onChanged: (v) {
+                    final idx = v.round();
+                    final thresh = controller.availableThresholds[idx];
+                    controller.setThreshold(thresh, idx, marketsAsync.value ?? []);
+                  },
+                ),
+              ],
+            ),
+          ),
+
+          // Trade list
+          Expanded(
+            child: state.isLoading
+                ? const Center(child: CircularProgressIndicator())
+                : state.trades.isEmpty
+                    ? Center(
+                        child: Text(
+                          '포착된 체결이 없습니다.\n(임계값: ${AppConfig.filterNames[state.threshold] ?? state.threshold.toStringAsFixed(0)})',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(color: Theme.of(context).hintColor, fontSize: 16),
+                        ),
+                      )
+                    : ListView.builder(
+                        padding: const EdgeInsets.all(16),
+                        itemCount: state.trades.length,
+                        itemBuilder: (_, i) => TradeTile(trade: state.trades[i]),
+                      ),
+          ),
+        ],
+      ),
+    );
+  }
+}\n\n// ====== lib/presentation/pages/volume_page.dart ======\n
+\n\n// ====== lib/presentation/pages/surge_page.dart ======\n
+\n\n// ====== lib/presentation/pages/settings_page.dart ======\n
+// lib/presentation/pages/settings_page.dart
+
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
+import '../controllers/settings_controller.dart';
+import '../widgets/theme_mode_segment.dart';
+import '../widgets/slider_position_segment.dart';
+import '../../../shared/widgets/common_app_bar.dart';
+
+class SettingsPage extends ConsumerStatefulWidget {
+  const SettingsPage({Key? key}) : super(key: key);
+  @override
+  ConsumerState<SettingsPage> createState() => _SettingsPageState();
+}
+
+class _SettingsPageState extends ConsumerState<SettingsPage> {
+  static const _pad = EdgeInsets.all(16);
+  static const _bold = TextStyle(fontSize:16, fontWeight: FontWeight.bold);
+
+  @override
+  void initState() {
+    super.initState();
+    // 초기 keep-on 상태 적용
+    final init = ref.read(settingsControllerProvider).keepScreenOn;
+    _applyKeepScreen(on: init);
+  }
+
+  void _applyKeepScreen({required bool on}) {
+    on ? WakelockPlus.enable() : WakelockPlus.disable();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final settings = ref.watch(settingsControllerProvider);
+    final ctrl = ref.read(settingsControllerProvider.notifier);
+
+    return Scaffold(
+      appBar: const CommonAppBar(title: '설정'),
+      body: ListView(
+        padding: _pad,
+        children: [
+          ListTile(
+            title: const Text('화면 모드', style: _bold),
+            trailing: ThemeModeSegment(
+              value: settings.themeMode,
+              onChanged: ctrl.setThemeMode,
+            ),
+          ),
+          SwitchListTile(
+            title: const Text('화면 항상 켜기', style: _bold),
+            value: settings.keepScreenOn,
+            onChanged: (v) {
+              ctrl.setKeepScreenOn(v);
+              _applyKeepScreen(on: v);
+            },
+            activeColor: Colors.orange,
+          ),
+          ListTile(
+            title: const Text('슬라이더 위치', style: _bold),
+            trailing: SliderPositionSegment(
+              value: settings.sliderPosition,
+              onChanged: ctrl.setSliderPosition,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+\n\n// ====== lib/presentation/widgets/momentary_tile.dart ======\n
+\n\n// ====== lib/presentation/widgets/slider_position_segment.dart ======\n
+import 'package:flutter/material.dart';
+import '../../domain/entities/app_settings.dart'; // SliderPosition enum
+
+class SliderPositionSegment extends StatelessWidget {
+  final SliderPosition value;
+  final ValueChanged<SliderPosition> onChanged;
+
+  const SliderPositionSegment({
+    super.key,
+    required this.value,
+    required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return SegmentedButton<SliderPosition>(
+      segments: [
+        ButtonSegment(
+          value: SliderPosition.top,
+          icon: _buildSliderIcon(isTop: true),
+          label: const Text('위'),
+        ),
+        ButtonSegment(
+          value: SliderPosition.bottom,
+          icon: _buildSliderIcon(isTop: false),
+          label: const Text('아래'),
+        ),
+      ],
+      selected: <SliderPosition>{value},
+      onSelectionChanged: (newSelection) {
+        onChanged(newSelection.first);
+      },
+    );
+  }
+
+  Widget _buildSliderIcon({required bool isTop}) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        if (isTop) ...[
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(width: 8, height: 8, decoration: const BoxDecoration(shape: BoxShape.circle, color: Colors.orange)),
+              const SizedBox(width: 2),
+              Container(width: 16, height: 2, color: Colors.orange),
+            ],
+          ),
+          const SizedBox(height: 4),
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: List.generate(4, (i) => Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 1),
+              child: Container(width: 4, height: 2, color: Colors.grey),
+            )),
+          ),
+        ] else ...[
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: List.generate(4, (i) => Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 1),
+              child: Container(width: 4, height: 2, color: Colors.grey),
+            )),
+          ),
+          const SizedBox(height: 4),
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Container(width: 8, height: 8, decoration: const BoxDecoration(shape: BoxShape.circle, color: Colors.orange)),
+              const SizedBox(width: 2),
+              Container(width: 16, height: 2, color: Colors.orange),
+            ],
+          ),
+        ],
+      ],
+    );
+  }
+}
+\n\n// ====== lib/presentation/widgets/trade_tile.dart ======\n
+import 'package:flutter/material.dart';
+import 'package:intl/intl.dart';
+import '../../domain/entities/trade.dart';
+
+class TradeTile extends StatelessWidget {
+  // 포맷터를 static으로 캐싱해 매번 새로 생성하지 않도록 최적화
+  static final _timeFormat = DateFormat('HH:mm:ss');
+  static final _integerFormat = NumberFormat('#,###'); // 정수용
+  static final _decimalFormat = NumberFormat('#,##0.######'); // 소수점용 (최대 6자리)
+  
+  final Trade trade;
+  
+  const TradeTile({Key? key, required this.trade}) : super(key: key);
+  
+  // 🎯 조건부 가격 포맷팅
+  String _formatPrice(double price) {
+    if (price < 1.0) {
+      return _decimalFormat.format(price); // 1원 미만: 소수점 최대 6자리
+    } else {
+      return _integerFormat.format(price); // 1원 이상: 정수 표시
+    }
+  }
+  
+  // 🎯 조건부 거래량 포맷팅
+  String _formatVolume(double volume) {
+    if (volume < 1.0) {
+      return _decimalFormat.format(volume); // 1개 미만: 소수점 최대 6자리
+    } else {
+      return _integerFormat.format(volume); // 1개 이상: 정수 표시
+    }
+  }
+  
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final onSurface = theme.colorScheme.onSurface;
+    final onSurface70 = onSurface.withAlpha((0.7 * 255).round());
+    
+    return Card(
+      elevation: 2,
+      margin: const EdgeInsets.symmetric(vertical: 4),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
+        child: Row(
+          children: [
+            // 🎯 시간 부분: flex 12 (1.2 비율, 17.1%)
+            Expanded(
+              flex: 12,
+              child: Text(
+                _timeFormat.format(trade.timestamp),
+                style: TextStyle(color: onSurface, fontSize: 11),
+                // 시간은 고정 형식이므로 overflow 방지 불필요
+              ),
+            ),
+            
+            // 🔧 티커 부분: flex 18 (1.8 비율, 25.7%)
+            Expanded(
+              flex: 18,
+              child: Text(
+                trade.market.replaceFirst('KRW-', ''),
+                style: TextStyle(
+                  fontWeight: FontWeight.bold,
+                  color: theme.colorScheme.primary,
+                  fontSize: 16,
+                ),
+                overflow: TextOverflow.ellipsis, // 긴 코인명 방지
+                maxLines: 1,
+              ),
+            ),
+            
+            // 🔧 가격/거래량 부분: flex 20 (2.0 비율, 28.6%)
+            Expanded(
+              flex: 20,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  Text(
+                    '${_formatPrice(trade.price)}원', // 🎯 조건부 가격 포맷
+                    style: TextStyle(color: onSurface, fontSize: 14),
+                    overflow: TextOverflow.ellipsis, // 큰 가격 방지
+                    maxLines: 1,
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    '${_formatVolume(trade.volume)} 개', // 🎯 조건부 거래량 포맷
+                    style: TextStyle(color: onSurface70, fontSize: 12),
+                    overflow: TextOverflow.ellipsis, // 큰 거래량 방지
+                    maxLines: 1,
+                  ),
+                ],
+              ),
+            ),
+            
+            // 🔧 총액 부분: flex 20 (2.0 비율, 28.6%)
+            Expanded(
+              flex: 20,
+              child: Align(
+                alignment: Alignment.centerRight,
+                child: Text(
+                  '${_integerFormat.format(trade.total / 10000)}만', // 총액은 항상 정수
+                  style: TextStyle(
+                    fontWeight: FontWeight.bold,
+                    color: trade.isBuy ? Colors.green : Colors.red,
+                    fontSize: 16,
+                  ),
+                  overflow: TextOverflow.ellipsis, // 큰 총액 방지
+                  maxLines: 1,
+                ),
+              ),
+            ),
+            
+            // 아이콘은 고정 크기이므로 변경 없음
+            Icon(
+              trade.isBuy ? Icons.arrow_upward : Icons.arrow_downward,
+              color: trade.isBuy ? Colors.green : Colors.red,
+              size: 16,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}\n\n// ====== lib/presentation/widgets/surge_tile.dart ======\n
+\n\n// ====== lib/presentation/widgets/common_app_bar.dart ======\n
+\n\n// ====== lib/presentation/widgets/volume_tile.dart ======\n
+\n\n// ====== lib/presentation/widgets/theme_mode_segment.dart ======\n
+import 'package:flutter/material.dart';
+
+class ThemeModeSegment extends StatelessWidget {
+  final ThemeMode value;
+  final ValueChanged<ThemeMode> onChanged;
+
+  const ThemeModeSegment({
+    super.key,
+    required this.value,
+    required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return SegmentedButton<ThemeMode>(
+      segments: const [
+        ButtonSegment(
+          value: ThemeMode.light,
+          icon: Icon(Icons.wb_sunny),
+          label: Text('라이트'),
+        ),
+        ButtonSegment(
+          value: ThemeMode.system,
+          icon: Icon(Icons.phone_iphone),
+          label: Text('시스템'),
+        ),
+        ButtonSegment(
+          value: ThemeMode.dark,
+          icon: Icon(Icons.nightlight_round),
+          label: Text('다크'),
+        ),
+      ],
+      selected: <ThemeMode>{value},
+      onSelectionChanged: (newSelection) {
+        onChanged(newSelection.first);
+      },
+    );
+  }
+}

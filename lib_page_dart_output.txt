@@ -1,0 +1,661 @@
+\n\n// ====== lib/features/settings/presentation/pages/settings_page.dart ======\n
+// lib/features/settings/presentation/pages/settings_page.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../providers/settings_provider.dart';
+import '../../../../shared/widgets/common_app_bar.dart';
+
+class SettingsPage extends ConsumerWidget {
+  const SettingsPage({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final settings = ref.watch(settingsProvider);
+    
+    return Scaffold(
+      appBar: const CommonAppBar(title: '설정'),
+      body: ListView(
+        children: [
+          ListTile(
+            title: const Text('테마 모드'),
+            trailing: DropdownButton<ThemeMode>(
+              value: settings.themeMode,
+              onChanged: (m) => ref.read(settingsProvider.notifier).setThemeMode(m!), // 수정됨
+              items: ThemeMode.values
+                  .map((mode) => DropdownMenuItem(
+                        value: mode,
+                        child: Text(_getThemeModeName(mode)),
+                      ))
+                  .toList(),
+            ),
+          ),
+          SwitchListTile(
+            title: const Text('화면 항상 켜기'),
+            value: settings.keepScreenOn,
+            onChanged: (value) =>
+                ref.read(settingsProvider.notifier).setKeepScreenOn(value),
+          ),
+          // 슬라이더 위치 설정
+          ListTile(
+            title: const Text('슬라이더 위치'),
+            trailing: DropdownButton<String>(
+              value: settings.sliderPosition,
+              onChanged: (value) {
+                if (value != null) {
+                  ref.read(settingsProvider.notifier).setSliderPosition(value);
+                }
+              },
+              items: const [
+                DropdownMenuItem(value: 'top', child: Text('위')),
+                DropdownMenuItem(value: 'bottom', child: Text('아래')),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+  
+  // 테마 모드 이름 가져오기
+  String _getThemeModeName(ThemeMode mode) {
+    switch (mode) {
+      case ThemeMode.light:
+        return '라이트';
+      case ThemeMode.dark:
+        return '다크';
+      case ThemeMode.system:
+        return '시스템';
+    }
+  }
+}\n\n// ====== lib/features/trade/presentation/pages/trade_page.dart ======\n
+// lib/features/trade/presentation/pages/trade_page.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../providers/trade_provider.dart';
+import '../widgets/trade_tile.dart';
+import '../../../../core/config/app_config.dart';
+import '../../../../features/settings/presentation/providers/settings_provider.dart';
+import '../../../../shared/widgets/common_app_bar.dart';
+import '../../domain/entities/trade.dart';
+
+class TradePage extends ConsumerWidget {
+  const TradePage({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final scrollController = ScrollController();
+    final settings = ref.watch(settingsProvider);
+    final selectedIndex = ref.watch(tradeFilterIndexProvider);
+    final threshold = ref.watch(tradeFilterThresholdProvider);
+    final tradesAsync = ref.watch(filteredTradesProvider);
+    
+    return Scaffold(
+      appBar: const CommonAppBar(title: '체결 포착'),
+      body: Column(
+        children: [
+          // 상단 슬라이더 (settings에 따라 위치 결정)
+          if (settings.sliderPosition == 'top') 
+            _buildThresholdSlider(context, ref, selectedIndex),
+          
+          // 메인 거래 목록
+          Expanded(
+            child: tradesAsync.when(
+              data: (trades) {
+                if (trades.isEmpty) {
+                  return _buildEmptyState(context, threshold);
+                }
+                
+                return _buildTradesList(context, scrollController, trades);
+              },
+              loading: () => const Center(child: CircularProgressIndicator()),
+              error: (error, stack) => Center(
+                child: Text('오류 발생: $error'),
+              ),
+            ),
+          ),
+          
+          // 하단 슬라이더 (settings에 따라 위치 결정)
+          if (settings.sliderPosition == 'bottom') 
+            _buildThresholdSlider(context, ref, selectedIndex),
+        ],
+      ),
+    );
+  }
+  
+  // 임계값 슬라이더 위젯
+  Widget _buildThresholdSlider(BuildContext context, WidgetRef ref, int selectedIndex) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            '최소 거래 금액: ${AppConfig.filterNames[_tradeFilterOptions[selectedIndex]] ?? '2천만'}',
+            style: const TextStyle(
+              fontSize: 16, 
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          Slider(
+            value: selectedIndex.toDouble(),
+            min: 0,
+            max: (_tradeFilterOptions.length - 1).toDouble(),
+            divisions: _tradeFilterOptions.length - 1,
+            label: AppConfig.filterNames[_tradeFilterOptions[selectedIndex]]!,
+            activeColor: Colors.orange,
+            inactiveColor: Colors.grey,
+            onChanged: (value) {
+              final index = value.round();
+              ref.read(tradeFilterIndexProvider.notifier).state = index;
+              ref.read(tradeFilterThresholdProvider.notifier).state = _tradeFilterOptions[index];
+            },
+          ),
+        ],
+      ),
+    );
+  }
+  
+  // 빈 상태를 보여주는 위젯
+  Widget _buildEmptyState(BuildContext context, double threshold) {
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Text(
+            '포착된 체결이 없습니다.',
+            style: TextStyle(
+              color: Theme.of(context).hintColor,
+              fontSize: 16,
+            ),
+          ),
+          const SizedBox(height: 16),
+          Text(
+            '현재 임계값: ${AppConfig.filterNames[threshold] ?? '${(threshold / 10000).toStringAsFixed(0)}만원'}',
+            style: const TextStyle(
+              fontSize: 14,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+  
+  // 거래 목록을 보여주는 위젯
+  Widget _buildTradesList(BuildContext context, ScrollController scrollController, List<Trade> trades) {
+    return RawScrollbar(
+      controller: scrollController,
+      thumbVisibility: true,
+      thickness: 8.0,
+      radius: const Radius.circular(4),
+      thumbColor: Colors.orange.withAlpha(128),
+      fadeDuration: const Duration(milliseconds: 300),
+      timeToFade: const Duration(milliseconds: 800),
+      child: ListView.builder(
+        controller: scrollController,
+        physics: const AlwaysScrollableScrollPhysics(),
+        key: const ValueKey('trade_view_list'),
+        padding: const EdgeInsets.all(16.0),
+        itemCount: trades.length,
+        itemBuilder: (context, index) => TradeTile(trade: trades[index]),
+      ),
+    );
+  }
+  
+  // 필터 옵션 (2천만원 이상만 포함)
+  static final List<double> _tradeFilterOptions = AppConfig.tradeFilters
+      .where((value) => value >= 20000000) // 2천만원 이상만 필터링
+      .toList();
+}
+
+// Trade 필터 관련 프로바이더 (초기값: 첫 번째 옵션, 즉 2천만)
+final tradeFilterIndexProvider = StateProvider<int>((ref) => 0);
+final tradeFilterThresholdProvider = StateProvider<double>((ref) => 
+    TradePage._tradeFilterOptions.isNotEmpty ? TradePage._tradeFilterOptions.first : 20000000.0);
+
+// 필터링된 거래 목록 프로바이더
+final filteredTradesProvider = Provider<AsyncValue<List<Trade>>>((ref) {
+  final tradesAsync = ref.watch(tradeProvider);
+  final threshold = ref.watch(tradeFilterThresholdProvider);
+  
+  return tradesAsync.whenData(
+    (trades) => trades.where((trade) => trade.total >= threshold).toList(),
+  );
+});\n\n// ====== lib/features/surge/presentation/pages/surge_page.dart ======\n
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../../../shared/widgets/common_app_bar.dart';
+import '../providers/surge_provider.dart';
+import '../widgets/surge_tile.dart';
+
+class SurgePage extends ConsumerWidget {
+  const SurgePage({super.key});
+  
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final surgeAsync = ref.watch(surgeProvider);
+    final scrollController = ScrollController();
+    
+    return Scaffold(
+      appBar: const CommonAppBar(title: '급등락 포착'),
+      body: surgeAsync.when(
+        data: (items) {
+          if (items.isEmpty) {
+            return const Center(
+              child: Text(
+                '포착된 급등락이 없습니다.',
+                style: TextStyle(color: Colors.grey),
+              ),
+            );
+          }
+          
+          return RawScrollbar(
+            controller: scrollController,
+            thumbVisibility: true,
+            thickness: 8.0,
+            radius: const Radius.circular(4),
+            thumbColor: Colors.orange.withAlpha(128),
+            fadeDuration: const Duration(milliseconds: 300),
+            timeToFade: const Duration(milliseconds: 800),
+            child: ListView.builder(
+              controller: scrollController,
+              physics: const AlwaysScrollableScrollPhysics(),
+              itemCount: items.length,
+              padding: const EdgeInsets.all(16.0),
+              itemBuilder: (context, index) => SurgeTile(
+                item: items[index],
+                key: ValueKey(items[index].market + items[index].detectedAt.toString()),
+              ),
+            ),
+          );
+        },
+        loading: () => const Center(child: CircularProgressIndicator()),
+        error: (error, stack) => Center(
+          child: Padding(
+            padding: const EdgeInsets.all(16.0),
+            child: Text(
+              '오류가 발생했습니다: $error',
+              style: const TextStyle(color: Colors.red),
+              textAlign: TextAlign.center,
+            ),
+          ),
+        ),
+      ),
+      floatingActionButton: FloatingActionButton(
+        onPressed: () {
+          // 임계값 설정 다이얼로그 표시
+          _showThresholdDialog(context, ref);
+        },
+        child: const Icon(Icons.tune),
+        tooltip: '급등락 기준 설정',
+      ),
+    );
+  }
+  
+  // 임계값 설정 다이얼로그
+  Future<void> _showThresholdDialog(BuildContext context, WidgetRef ref) async {
+    final currentThreshold = ref.read(surgeThresholdProvider);
+    double newThreshold = currentThreshold;
+    
+    return showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('급등락 감지 기준 설정'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text('급등락 감지를 위한 변동률(%) 기준을 설정하세요.'),
+            const SizedBox(height: 16),
+            StatefulBuilder(
+              builder: (context, setState) => Column(
+                children: [
+                  Text('현재 값: ${newThreshold.toStringAsFixed(1)}%'),
+                  Slider(
+                    value: newThreshold,
+                    min: 0.5,
+                    max: 5.0,
+                    divisions: 45,
+                    label: '${newThreshold.toStringAsFixed(1)}%',
+                    onChanged: (value) {
+                      setState(() {
+                        newThreshold = value;
+                      });
+                    },
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('취소'),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              ref.read(surgeProvider.notifier).setThreshold(newThreshold);
+              Navigator.of(context).pop();
+            },
+            child: const Text('설정'),
+          ),
+        ],
+      ),
+    );
+  }
+}\n\n// ====== lib/features/volume/presentation/pages/volume_page.dart ======\n
+import 'dart:async';
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../../../shared/widgets/common_app_bar.dart';
+import '../../../../core/config/app_config.dart';
+import '../../../../features/settings/presentation/providers/settings_provider.dart';
+import '../providers/volume_provider.dart';
+import '../widgets/volume_tile.dart';
+import '../../domain/entities/volume_item.dart';
+
+class VolumePage extends ConsumerStatefulWidget {
+  const VolumePage({super.key});
+
+  @override
+  ConsumerState<VolumePage> createState() => _VolumePageState();
+}
+
+class _VolumePageState extends ConsumerState<VolumePage> {
+  Timer? _periodicTimer;
+
+  @override
+  void initState() {
+    super.initState();
+    // 페이지 로드 시 볼륨 데이터 변경 리스너 설정
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      // 볼륨 데이터 변경 리스너 설정
+      setupVolumeDataChangeListener(ref);
+      
+      // 30초마다 상태 확인 및 리셋 체크
+      _periodicTimer = Timer.periodic(const Duration(seconds: 30), (_) {
+        if (mounted) {
+          // 시간대별 데이터 리셋 확인
+          final processor = ref.read(tradeProcessorProvider);
+          processor.checkAndResetVolumeData();
+          
+          // 디버그 로그
+          debugPrint('30초 주기 점검: 볼륨 데이터 상태 확인 및 리셋 체크 완료');
+        }
+      });
+    });
+  }
+
+  @override
+  void dispose() {
+    // 타이머 정리
+    _periodicTimer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    // volumeDataProvider 감시 (실시간 업데이트)
+    final volumes = ref.watch(volumeDataProvider);
+    final settings = ref.watch(settingsProvider);
+    final selectedTimeFrame = ref.watch(selectedTimeFrameProvider);
+    final timeFrameIndex = ref.watch(timeFrameIndexProvider);
+    
+    return Scaffold(
+      appBar: const CommonAppBar(title: '거래량 분석'),
+      body: Column(
+        children: [
+          // 상단 슬라이더 (settings에 따라 위치 결정)
+          if (settings.sliderPosition == 'top') 
+            _buildTimeFrameSlider(context, timeFrameIndex),
+          
+          // 메인 거래량 목록
+          Expanded(
+            child: volumes.isEmpty
+                ? _buildEmptyState(context, selectedTimeFrame)
+                : _buildVolumeList(context, volumes),
+          ),
+          
+          // 하단 슬라이더 (settings에 따라 위치 결정)
+          if (settings.sliderPosition == 'bottom') 
+            _buildTimeFrameSlider(context, timeFrameIndex),
+        ],
+      ),
+    );
+  }
+  
+  // 시간대 선택 슬라이더 위젯
+  Widget _buildTimeFrameSlider(BuildContext context, int timeFrameIndex) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            '시간대: ${AppConfig.timeFrameNames[AppConfig.timeFrames[timeFrameIndex]]}',
+            style: const TextStyle(
+              fontSize: 16, 
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          Slider(
+            value: timeFrameIndex.toDouble(),
+            min: 0,
+            max: (AppConfig.timeFrames.length - 1).toDouble(),
+            divisions: AppConfig.timeFrames.length - 1,
+            label: AppConfig.timeFrameNames[AppConfig.timeFrames[timeFrameIndex]],
+            activeColor: Colors.orange,
+            onChanged: (value) {
+              final index = value.round();
+              final timeFrame = '${AppConfig.timeFrames[index]}m';
+              
+              // Provider 상태 직접 업데이트
+              ref.read(timeFrameIndexProvider.notifier).state = index;
+              ref.read(selectedTimeFrameProvider.notifier).state = timeFrame;
+              
+              // 업데이트 알림 카운터 증가 - 이렇게 하면 UI가 즉시 갱신됨
+              ref.read(volumeUpdateNotifierProvider.notifier).state++;
+              
+              // 디버그 메시지 추가
+              debugPrint('시간대 변경: $timeFrame (인덱스: $index)');
+            },
+          ),
+        ],
+      ),
+    );
+  }
+  
+  // 빈 상태를 보여주는 위젯
+  Widget _buildEmptyState(BuildContext context, String selectedTimeFrame) {
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Text(
+            '거래량 데이터 수집 중...',
+            style: TextStyle(
+              color: Theme.of(context).hintColor,
+              fontSize: 16,
+            ),
+          ),
+          const SizedBox(height: 16),
+          Text(
+            '선택된 시간대: ${AppConfig.timeFrameNames[int.parse(selectedTimeFrame.replaceAll('m', ''))] ?? selectedTimeFrame}',
+            style: const TextStyle(
+              fontSize: 14,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+  
+  // 거래량 목록을 보여주는 위젯
+  Widget _buildVolumeList(BuildContext context, List<dynamic> volumes) {
+    final scrollController = ScrollController();
+    
+    return RefreshIndicator(
+      onRefresh: () async {
+        // 리셋 방식 변경 - 직접 resetVolumeData 함수 호출
+        resetVolumeData(ref);
+      },
+      child: RawScrollbar(
+        controller: scrollController,
+        thumbVisibility: true,
+        thickness: 8.0,
+        radius: const Radius.circular(4),
+        thumbColor: Colors.orange.withAlpha(128),
+        fadeDuration: const Duration(milliseconds: 300),
+        timeToFade: const Duration(milliseconds: 800),
+        child: ListView.builder(
+          controller: scrollController,
+          physics: const AlwaysScrollableScrollPhysics(),
+          itemCount: volumes.length,
+          padding: const EdgeInsets.all(16.0),
+          itemBuilder: (context, index) {
+            final volume = volumes[index];
+            return VolumeTile(
+              item: volume,
+              rank: index + 1,
+            );
+          },
+        ),
+      ),
+    );
+  }
+}\n\n// ====== lib/features/momentary/presentation/pages/momentary_page.dart ======\n
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../../../shared/widgets/common_app_bar.dart';
+import '../../../../core/config/app_config.dart';
+import '../../../../features/settings/presentation/providers/settings_provider.dart';
+import '../providers/momentary_provider.dart';
+import '../widgets/momentary_tile.dart';
+
+class MomentaryPage extends ConsumerWidget {
+  const MomentaryPage({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    // momentaryProvider에서 momentaryDataProvider로 변경
+    final trades = ref.watch(momentaryDataProvider);
+    final settings = ref.watch(settingsProvider);
+    final momentaryIndex = ref.watch(momentaryIndexProvider);
+    final threshold = ref.watch(momentaryThresholdProvider);
+    
+    return Scaffold(
+      appBar: const CommonAppBar(title: '순간 거래대금'),
+      body: Column(
+        children: [
+          // 상단 슬라이더 (settings에 따라 위치 결정)
+          if (settings.sliderPosition == 'top') 
+            _buildThresholdSlider(context, ref, momentaryIndex),
+          
+          // 메인 거래 목록
+          Expanded(
+            child: trades.isEmpty
+                ? _buildEmptyState(context, threshold)
+                : _buildTradesList(context, ref, trades),
+          ),
+          
+          // 하단 슬라이더 (settings에 따라 위치 결정)
+          if (settings.sliderPosition == 'bottom') 
+            _buildThresholdSlider(context, ref, momentaryIndex),
+        ],
+      ),
+    );
+  }
+  
+  // 임계값 슬라이더 위젯
+  Widget _buildThresholdSlider(BuildContext context, WidgetRef ref, int momentaryIndex) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            '최소 거래대금: ${AppConfig.filterNames[AppConfig.tradeFilters[momentaryIndex]]}',
+            style: const TextStyle(
+              fontSize: 16, 
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          Slider(
+            value: momentaryIndex.toDouble(),
+            min: 0,
+            max: (AppConfig.tradeFilters.length - 1).toDouble(),
+            divisions: AppConfig.tradeFilters.length - 1,
+            label: AppConfig.filterNames[AppConfig.tradeFilters[momentaryIndex]],
+            activeColor: Colors.orange,
+            onChanged: (value) {
+              final index = value.round();
+              final threshold = AppConfig.tradeFilters[index];
+              
+              // 직접 Provider 상태 업데이트
+              ref.read(momentaryIndexProvider.notifier).state = index;
+              ref.read(momentaryThresholdProvider.notifier).state = threshold;
+              
+              // 디버그 메시지 추가
+              debugPrint('순간 거래 임계값 변경: $threshold (인덱스: $index)');
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
+  // 빈 상태를 보여주는 위젯
+  Widget _buildEmptyState(BuildContext context, double threshold) {
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Text(
+            '포착된 순간 거래가 없습니다.',
+            style: TextStyle(
+              color: Theme.of(context).hintColor,
+              fontSize: 16,
+            ),
+          ),
+          const SizedBox(height: 16),
+          Text(
+            '현재 임계값: ${AppConfig.filterNames[threshold] ?? '${(threshold / 10000).toStringAsFixed(0)}만원'}',
+            style: const TextStyle(
+              fontSize: 14,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+  
+  // 거래 목록을 보여주는 위젯
+  Widget _buildTradesList(BuildContext context, WidgetRef ref, List<dynamic> trades) {
+    final scrollController = ScrollController();
+    
+    return RefreshIndicator(
+      onRefresh: () async {
+        // 데이터 초기화 - 직접 clearMomentaryData 함수 호출
+        clearMomentaryData(ref);
+      },
+      child: RawScrollbar(
+        controller: scrollController,
+        thumbVisibility: true,
+        thickness: 8.0,
+        radius: const Radius.circular(4),
+        thumbColor: Colors.orange.withAlpha(128),
+        fadeDuration: const Duration(milliseconds: 300),
+        timeToFade: const Duration(milliseconds: 800),
+        child: ListView.builder(
+          controller: scrollController,
+          physics: const AlwaysScrollableScrollPhysics(),
+          itemCount: trades.length,
+          padding: const EdgeInsets.all(16.0),
+          itemBuilder: (context, index) {
+            final trade = trades[index];
+            return MomentaryTile(item: trade);
+          },
+        ),
+      ),
+    );
+  }
+}
