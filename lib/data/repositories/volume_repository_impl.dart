@@ -1,14 +1,12 @@
-// lib/data/repositories/volume_repository_impl.dart
-
 import 'dart:async';
 import 'package:flutter/foundation.dart';
 import '../../../core/config/app_config.dart';
 import '../../domain/entities/trade.dart';
-import '../../domain/entities/volume.dart'; // 🆕 Volume 엔티티 import
+import '../../domain/entities/volume.dart';
 import '../../domain/repositories/volume_repository.dart';
 import '../datasources/trade_remote_ds.dart';
 
-/// 볼륨 전용 Repository - 브로드캐스트 스트림으로 TradeRemoteDataSource 공유
+/// ♻️ 100ms 배치 시스템을 적용하여 최적화된 볼륨 Repository
 class VolumeRepositoryImpl implements VolumeRepository {
   final TradeRemoteDataSource _remote;
 
@@ -26,19 +24,23 @@ class VolumeRepositoryImpl implements VolumeRepository {
   Stream<Trade>? _volumeStream;
   StreamSubscription<Trade>? _volumeSubscription;
   
+  // 🆕 배치 처리를 위한 타이머
+  Timer? _batchUpdateTimer;
+
   // 성능 최적화 상수
   static const int _maxCacheSize = 1000;
+  // 🆕 배치 업데이트 주기 (100ms)
+  static const Duration _batchUpdateInterval = Duration(milliseconds: 100);
 
   VolumeRepositoryImpl(this._remote) {
-    // 🆕 볼륨 관련 초기화
     _initializeVolumeTracking();
     
-    // 🆕 볼륨 리셋 체크 타이머 (15초마다)
+    // 볼륨 리셋 체크 타이머 (15초마다)
     Timer.periodic(const Duration(seconds:15), (_) => _checkVolumeResets());
   }
 
   // ═══════════════════════════════════════════════════════════════════════════════
-  // 🆕 VOLUME 전용 메서드들
+  // VOLUME 전용 메서드들
   // ═══════════════════════════════════════════════════════════════════════════════
 
   /// 볼륨 추적 초기화
@@ -48,13 +50,8 @@ class VolumeRepositoryImpl implements VolumeRepository {
     for (final timeFrameMinutes in AppConfig.timeFrames) {
       final timeFrameStr = '${timeFrameMinutes}m';
       
-      // 빈 볼륨 맵 초기화
       _volumeByTimeFrame[timeFrameStr] = <String, double>{};
-      
-      // 스트림 컨트롤러 생성
       _volumeControllers[timeFrameStr] = StreamController<Map<String, double>>.broadcast();
-      
-      // 시작 시간 설정
       _timeFrameStartTimes[timeFrameStr] = now;
     }
     
@@ -63,16 +60,14 @@ class VolumeRepositoryImpl implements VolumeRepository {
     }
   }
 
-  /// 🔥 핵심: 브로드캐스트 스트림 초기화 (TradeRepository와 독립적)
+  /// 브로드캐스트 스트림 초기화 (TradeRepository와 독립적)
   void _initializeVolumeStream(List<String> markets) {
-    if (_volumeStream != null) return; // 이미 초기화됨
+    if (_volumeStream != null) return;
     
     debugPrint('VolumeRepositoryImpl: initializing volume stream for ${markets.length} markets');
     
-    // 🎯 TradeRemoteDataSource 브로드캐스트 스트림 구독
     _volumeStream = _remote.watch(markets).asBroadcastStream();
     
-    // 🎯 볼륨 전용 구독 (원시 데이터 바로 처리)
     _volumeSubscription = _volumeStream!.listen(
       _processRawTradeForVolume,
       onError: (error, stackTrace) {
@@ -91,7 +86,7 @@ class VolumeRepositoryImpl implements VolumeRepository {
     final startTime = _timeFrameStartTimes[timeFrame] ?? now;
     
     final volumeList = volumeMap.entries
-        .where((entry) => entry.value > 0) // 볼륨이 0보다 큰 것만
+        .where((entry) => entry.value > 0)
         .map((entry) => Volume(
               market: entry.key,
               totalVolume: entry.value,
@@ -101,7 +96,6 @@ class VolumeRepositoryImpl implements VolumeRepository {
             ))
         .toList();
 
-    // 볼륨 순으로 정렬 (높은 순)
     volumeList.sort((a, b) => b.totalVolume.compareTo(a.totalVolume));
     
     return volumeList;
@@ -111,32 +105,27 @@ class VolumeRepositoryImpl implements VolumeRepository {
   Stream<List<Volume>> watchVolumeByTimeFrame(String timeFrame, List<String> markets) {
     debugPrint('VolumeRepositoryImpl: watchVolumeByTimeFrame() - timeFrame: $timeFrame');
     
-    // 볼륨 스트림 초기화
     _initializeVolumeStream(markets);
     
-    // 해당 시간대의 볼륨 스트림 반환 (Volume 리스트로)
     return _volumeControllers[timeFrame]?.stream
         .map((volumeMap) => _createVolumeList(volumeMap, timeFrame))
         ?? const Stream.empty();
   }
 
-  /// 📥 원시 거래 데이터를 볼륨으로 즉시 누적 (배치 없음!)
+  /// 📥 원시 거래 데이터를 볼륨으로 누적하고 업데이트 예약
   void _processRawTradeForVolume(Trade trade) {
     try {
       final key = '${trade.market}/${trade.sequentialId}';
-
-      // 중복 처리 방지
       if (!_seenIds.add(key)) return;
 
-      // 메모리 관리
       if (_seenIds.length > _maxCacheSize) {
         final removeCount = (_seenIds.length / 4).ceil();
         final toRemove = _seenIds.take(removeCount).toList();
         _seenIds.removeAll(toRemove);
       }
 
-      // 🆕 볼륨 즉시 누적 (배치 없이 실시간!)
-      _accumulateVolumeInstantly(trade);
+      // ♻️ 볼륨 누적 후, 즉시 업데이트 대신 '업데이트 예약'
+      _accumulateVolumeAndScheduleUpdate(trade);
       
     } catch (e, stackTrace) {
       debugPrint('_processRawTradeForVolume error: $e');
@@ -144,29 +133,36 @@ class VolumeRepositoryImpl implements VolumeRepository {
     }
   }
 
-  /// 거래 데이터를 받을 때마다 볼륨 즉시 누적 (실시간!)
-  void _accumulateVolumeInstantly(Trade trade) {
+  /// ♻️ 거래 데이터를 받아 볼륨 누적 후, 배치 업데이트 예약
+  void _accumulateVolumeAndScheduleUpdate(Trade trade) {
     final market = trade.market;
     final totalAmount = trade.total;
     
-    // 모든 시간대에 동시 누적
     for (final timeFrameStr in _volumeByTimeFrame.keys) {
       final currentVolume = _volumeByTimeFrame[timeFrameStr]![market] ?? 0.0;
       _volumeByTimeFrame[timeFrameStr]![market] = currentVolume + totalAmount;
     }
     
-    // 🚀 즉시 UI 업데이트 (배치 없음!)
-    _updateVolumeStreamsInstantly();
+    // ♻️ 즉시 UI 업데이트 대신, 배치 업데이트 예약
+    _scheduleBatchUpdate();
   }
 
-  /// 모든 시간대의 볼륨 스트림 즉시 업데이트 (실시간!)
-  void _updateVolumeStreamsInstantly() {
+  /// 🆕 배치 업데이트 스케줄링
+  void _scheduleBatchUpdate() {
+    // 이미 예약된 타이머가 있으면 취소 (디바운싱)
+    _batchUpdateTimer?.cancel();
+    
+    // 지정된 시간(100ms) 후에 업데이트 실행
+    _batchUpdateTimer = Timer(_batchUpdateInterval, _performBatchUpdate);
+  }
+
+  /// ♻️ 모든 시간대의 볼륨 스트림을 '배치' 업데이트 (타이머에 의해 호출됨)
+  void _performBatchUpdate() {
     try {
       for (final entry in _volumeByTimeFrame.entries) {
         final timeFrameStr = entry.key;
         final volumeMap = Map<String, double>.from(entry.value);
         
-        // 해당 시간대 스트림에 데이터 즉시 전송
         final controller = _volumeControllers[timeFrameStr];
         if (controller != null && !controller.isClosed) {
           controller.add(volumeMap);
@@ -178,11 +174,11 @@ class VolumeRepositoryImpl implements VolumeRepository {
             ? _volumeByTimeFrame.values.first.length 
             : 0;
         if (totalMarkets > 0) {
-          debugPrint('⚡ Volume streams updated instantly: $totalMarkets markets');
+          debugPrint('⚡⚡ Volume batch update: $totalMarkets markets (every 100ms)');
         }
       }
     } catch (e, stackTrace) {
-      debugPrint('_updateVolumeStreamsInstantly error: $e');
+      debugPrint('_performBatchUpdate error: $e');
       debugPrint('StackTrace: $stackTrace');
     }
   }
@@ -198,7 +194,6 @@ class VolumeRepositoryImpl implements VolumeRepository {
       if (startTime != null) {
         final elapsed = now.difference(startTime).inMinutes;
         
-        // 해당 시간대가 지나면 리셋
         if (elapsed >= timeFrameMinutes) {
           _resetTimeFrame(timeFrameStr);
           _timeFrameStartTimes[timeFrameStr] = now;
@@ -214,7 +209,8 @@ class VolumeRepositoryImpl implements VolumeRepository {
   /// 특정 시간대 리셋
   void _resetTimeFrame(String timeFrameStr) {
     _volumeByTimeFrame[timeFrameStr]?.clear();
-    _updateVolumeStreamsInstantly(); // 리셋 후 빈 데이터 즉시 전송
+    // ♻️ 리셋 후에도 즉시 UI에 반영되도록 배치 업데이트 함수 직접 호출
+    _performBatchUpdate(); 
   }
 
   @override
@@ -229,7 +225,8 @@ class VolumeRepositoryImpl implements VolumeRepository {
     for (final timeFrameStr in _volumeByTimeFrame.keys) {
       _volumeByTimeFrame[timeFrameStr]?.clear();
     }
-    _updateVolumeStreamsInstantly();
+    // ♻️ 리셋 후에도 즉시 UI에 반영되도록 배치 업데이트 함수 직접 호출
+    _performBatchUpdate();
   }
 
   @override
@@ -257,11 +254,12 @@ class VolumeRepositoryImpl implements VolumeRepository {
   Future<void> dispose() async {
     debugPrint('VolumeRepositoryImpl: dispose() called');
     
-    // 볼륨 구독 정리
+    // 🆕 배치 타이머 정리
+    _batchUpdateTimer?.cancel();
+    
     await _volumeSubscription?.cancel();
     _volumeStream = null;
     
-    // 볼륨 컨트롤러들 정리
     for (final controller in _volumeControllers.values) {
       await controller.close();
     }

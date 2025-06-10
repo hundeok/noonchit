@@ -1,10 +1,13 @@
+// lib/shared/widgets/market_mood_indicator.dart
+// 🎨 Shared Widget: Market Mood 인디케이터 (클린 아키텍처 완전 대응)
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import '../../core/di/market_mood_provider.dart';
-import 'market_mood_modal.dart'; // 🆕 Market Mood 모달 import
+import '../../core/di/app_providers.dart';
+import '../../presentation/controllers/market_mood_controller.dart';
 
-// 🎨 메인 위젯
+/// 🎨 메인 마켓무드 인디케이터 위젯
 class MarketMoodIndicator extends ConsumerWidget {
   final double size;
   final bool showTooltip;
@@ -19,11 +22,18 @@ class MarketMoodIndicator extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final marketMoodAsync = ref.watch(marketMoodProvider);
-    final currentMood = ref.watch(currentMarketMoodProvider);
+    // [수정] 중앙 계산 Provider를 watch하여 로딩/에러/데이터 상태를 한 번에 처리합니다.
+    final computedAsync = ref.watch(marketMoodComputedDataProvider);
     
-    Widget indicator = marketMoodAsync.when(
-      data: (data) => _buildMoodIcon(context, ref, data, currentMood),
+    Widget indicator = computedAsync.when(
+      data: (computed) {
+        // [수정] marketData가 아직 로드되지 않은 초기 상태일 수 있으므로 null 체크 추가
+        if (computed.marketData == null) {
+          return _buildLoadingIcon();
+        }
+        // [수정] computed 객체에서 필요한 marketData와 currentMood를 직접 가져옵니다.
+        return _buildMoodIcon(context, ref, computed.marketData!, computed.currentMood);
+      },
       loading: () => _buildLoadingIcon(),
       error: (_, __) => _buildErrorIcon(),
     );
@@ -67,37 +77,40 @@ class MarketMoodIndicator extends ConsumerWidget {
     );
   }
 
-  /// 시장 분위기 모달 표시
+  /// 🔥 시장 분위기 모달 표시 - 컨트롤러의 MarketMoodModalManager 사용
   void _showMarketMoodModal(BuildContext context, WidgetRef ref, Offset globalPosition, MarketMoodData data) {
     HapticFeedback.mediumImpact();
     Tooltip.dismissAllToolTips();
     
-    // 화면 크기 가져오기
+    // 화면 크기와 모달 크기 계산
     final screenSize = MediaQuery.of(context).size;
-    final modalWidth = size * 4.2 * 2.0; // 모달 너비 계산
+    final modalWidth = screenSize.width * 0.9; // 90% 너비 사용
     
     // 화면 경계 고려한 위치 계산
     double adjustedX = globalPosition.dx - (modalWidth / 2); // 중앙 정렬
-    double adjustedY = globalPosition.dy - (size * 3); // 위쪽으로
+    double adjustedY = globalPosition.dy + size + 40; // 🔥 무조건 아래쪽으로 (위쪽 계산 제거)
     
     // 좌측 경계 체크
     if (adjustedX < 16) {
-      adjustedX = 16; // 최소 여백
+      adjustedX = 16;
     }
     
     // 우측 경계 체크
     if (adjustedX + modalWidth > screenSize.width - 16) {
-      adjustedX = screenSize.width - modalWidth - 16; // 우측 여백 확보
+      adjustedX = screenSize.width - modalWidth - 16;
     }
     
-    // 상단 경계 체크
-    if (adjustedY < 50) {
-      adjustedY = globalPosition.dy + size + 30; // 아래쪽으로 이동
+    // 하단 경계 체크 - 화면 밖으로 나가면 위로 조정
+    final bottomSafeArea = MediaQuery.of(context).padding.bottom;
+    final maxY = screenSize.height - bottomSafeArea - 300; // 모달 최소 높이 고려
+    if (adjustedY > maxY) {
+      adjustedY = globalPosition.dy - 250; // 충분히 위로 올려서 표시
     }
     
     final adjustedPosition = Offset(adjustedX, adjustedY);
     
-    MarketMoodStatsOverlay.show(
+    // 컨트롤러의 MarketMoodModalManager 사용
+    MarketMoodModalManager.show(
       context: context,
       ref: ref,
       position: adjustedPosition,
@@ -106,9 +119,9 @@ class MarketMoodIndicator extends ConsumerWidget {
     );
   }
 
-  /// 시장 분위기 모달 숨기기
+  /// 🔥 시장 분위기 모달 숨기기
   void _hideMarketMoodModal() {
-    MarketMoodStatsOverlay.hide();
+    MarketMoodModalManager.hide();
   }
 
   Widget _getMoodIcon(MarketMood mood) {
@@ -152,7 +165,7 @@ class MarketMoodIndicator extends ConsumerWidget {
       case MarketMood.deepBear:
         return _AnimatedMoodIcon(
           icon: Icons.ac_unit,
-          color: const Color(0xFF4A90E2), // 💧 물방울 블루 톤
+          color: const Color(0xFF4A90E2), // 🧊 얼음장 블루 톤
           tooltip: showTooltip ? '🧊 얼음장 - 30분 전 대비 -15% 이하 (롱프레스: 상세정보)' : null,
           animationType: MoodAnimationType.coldShiver,
           size: size,
@@ -161,8 +174,19 @@ class MarketMoodIndicator extends ConsumerWidget {
   }
 }
 
-enum MoodAnimationType { none, fastPulse, fireFlicker, wiggle, waterDrop, coldShiver, rotate, blink }
+/// 🎨 애니메이션 타입 enum
+enum MoodAnimationType { 
+  none, 
+  fastPulse, 
+  fireFlicker, 
+  wiggle, 
+  waterDrop, 
+  coldShiver, 
+  rotate, 
+  blink 
+}
 
+/// 🎨 애니메이션 아이콘 위젯
 class _AnimatedMoodIcon extends StatefulWidget {
   final IconData icon;
   final Color color;
@@ -196,7 +220,6 @@ class _AnimatedMoodIconState extends State<_AnimatedMoodIcon>
   void _setupAnimation() {
     switch (widget.animationType) {
       case MoodAnimationType.fastPulse:
-        // 🚀 로켓: 빠른 펄스 + 약간의 위아래 흔들림
         _controller = AnimationController(
           duration: const Duration(milliseconds: 800),
           vsync: this,
@@ -208,7 +231,6 @@ class _AnimatedMoodIconState extends State<_AnimatedMoodIcon>
         break;
         
       case MoodAnimationType.fireFlicker:
-        // 🔥 화염: 깜빡이며 튀는 느낌 (빠른 맥동 + 흔들림)
         _controller = AnimationController(
           duration: const Duration(milliseconds: 600),
           vsync: this,
@@ -220,7 +242,6 @@ class _AnimatedMoodIconState extends State<_AnimatedMoodIcon>
         break;
         
       case MoodAnimationType.wiggle:
-        // ⚖️ 균형: 좌우 흔들림 + 부드러운 펄스
         _controller = AnimationController(
           duration: const Duration(milliseconds: 2000),
           vsync: this,
@@ -232,7 +253,6 @@ class _AnimatedMoodIconState extends State<_AnimatedMoodIcon>
         break;
         
       case MoodAnimationType.waterDrop:
-        // 💧 물방울: 떨어지는 듯한 움직임 (느린 펄스)
         _controller = AnimationController(
           duration: const Duration(milliseconds: 2500),
           vsync: this,
@@ -244,7 +264,6 @@ class _AnimatedMoodIconState extends State<_AnimatedMoodIcon>
         break;
         
       case MoodAnimationType.coldShiver:
-        // 🧊 눈송이: 차가운 떨림 (미세한 떨림 + 거의 정지)
         _controller = AnimationController(
           duration: const Duration(milliseconds: 150),
           vsync: this,
@@ -310,9 +329,8 @@ class _AnimatedMoodIconState extends State<_AnimatedMoodIcon>
 
         switch (widget.animationType) {
           case MoodAnimationType.fastPulse:
-            // 🚀 로켓: 빠른 펄스 + 위아래 흔들림
             return Transform.translate(
-              offset: Offset(0, (_animation.value - 1) * 2), // 위아래 움직임
+              offset: Offset(0, (_animation.value - 1) * 2),
               child: Transform.scale(
                 scale: _animation.value,
                 child: Opacity(
@@ -323,11 +341,10 @@ class _AnimatedMoodIconState extends State<_AnimatedMoodIcon>
             );
             
           case MoodAnimationType.fireFlicker:
-            // 🔥 화염: 깜빡이며 튀는 느낌
             return Transform.scale(
               scale: _animation.value,
               child: Transform.rotate(
-                angle: (_animation.value - 1) * 0.1, // 약간의 흔들림
+                angle: (_animation.value - 1) * 0.1,
                 child: Opacity(
                   opacity: (_animation.value * 0.8 + 0.2).clamp(0.4, 1.0),
                   child: icon,
@@ -336,19 +353,17 @@ class _AnimatedMoodIconState extends State<_AnimatedMoodIcon>
             );
             
           case MoodAnimationType.wiggle:
-            // ⚖️ 균형: 좌우 흔들림 + 미세한 펄스
             return Transform.rotate(
               angle: _animation.value,
               child: Transform.scale(
-                scale: 0.95 + (_animation.value.abs() * 0.1), // 미세한 펄스
+                scale: 0.95 + (_animation.value.abs() * 0.1),
                 child: icon,
               ),
             );
             
           case MoodAnimationType.waterDrop:
-            // 💧 물방울: 떨어지는 듯한 움직임
             return Transform.translate(
-              offset: Offset(0, (1 - _animation.value) * 1.5), // 아래로 떨어지는 효과
+              offset: Offset(0, (1 - _animation.value) * 1.5),
               child: Transform.scale(
                 scale: _animation.value,
                 child: Opacity(
@@ -359,11 +374,10 @@ class _AnimatedMoodIconState extends State<_AnimatedMoodIcon>
             );
             
           case MoodAnimationType.coldShiver:
-            // 🧊 눈송이: 차가운 떨림
             return Transform.translate(
               offset: Offset(
-                (_animation.value - 0.975) * 40, // 미세한 좌우 떨림
-                (_animation.value - 0.975) * 20, // 미세한 상하 떨림
+                (_animation.value - 0.975) * 40,
+                (_animation.value - 0.975) * 20,
               ),
               child: Transform.scale(
                 scale: _animation.value,
@@ -398,6 +412,18 @@ class _AnimatedMoodIconState extends State<_AnimatedMoodIcon>
     if (widget.tooltip != null) {
       return Tooltip(
         message: widget.tooltip!,
+        preferBelow: false,
+        verticalOffset: 20,
+        waitDuration: const Duration(milliseconds: 500),
+        showDuration: const Duration(seconds: 3),
+        decoration: BoxDecoration(
+          color: Colors.black87,
+          borderRadius: BorderRadius.circular(8),
+        ),
+        textStyle: const TextStyle(
+          fontSize: 11,
+          color: Colors.white,
+        ),
         child: iconWidget,
       );
     }

@@ -1,111 +1,72 @@
 Analyzing noonchit...                                           
 
-warning • Unused import: '../../domain/entities/app_settings.dart' • lib/core/di/trade_provider.dart:13:8 • unused_import
-   info • Unnecessary braces in a string interpolation • lib/core/di/trade_provider.dart:82:64 • unnecessary_brace_in_string_interps
-   info • Unnecessary braces in a string interpolation • lib/core/di/trade_provider.dart:128:23 • unnecessary_brace_in_string_interps
-  error • The name 'WsStatus' isn't a type, so it can't be used as a type argument • lib/core/di/websocket_provider.dart:59:40 • non_type_as_type_argument
-  error • Undefined name 'WsStatus' • lib/core/di/websocket_provider.dart:59:59 • undefined_identifier
-  error • The named parameter 'onStatusChange' isn't defined • lib/core/di/websocket_provider.dart:91:5 • undefined_named_parameter
-  error • Undefined name 'WsStatus' • lib/core/di/websocket_provider.dart:98:14 • undefined_identifier
-  error • Undefined name 'WsStatus' • lib/core/di/websocket_provider.dart:104:14 • undefined_identifier
-  error • Undefined name 'WsStatus' • lib/core/di/websocket_provider.dart:113:14 • undefined_identifier
-  error • Undefined name 'WsStatus' • lib/core/di/websocket_provider.dart:119:14 • undefined_identifier
+warning • The library 'package:noonchit/core/di/market_mood_provider.dart' doesn't export a member with the shown name 'MarketMoodCalculator' • lib/core/di/app_providers.dart:109:9 • undefined_shown_name
+warning • The library 'package:noonchit/core/di/market_mood_provider.dart' doesn't export a member with the shown name 'VolumeComparator' • lib/core/di/app_providers.dart:110:9 • undefined_shown_name
+warning • The library 'package:noonchit/core/di/market_mood_provider.dart' doesn't export a member with the shown name 'MarketMoodUseCase' • lib/core/di/app_providers.dart:111:9 • undefined_shown_name
+   info • The file name 'market_mood_provider copy.dart' isn't a lower_case_with_underscores identifier • lib/core/di/market_mood_provider copy.dart:1:1 • file_names
+  error • The named parameter 'repository' isn't defined • lib/core/di/market_mood_provider.dart:67:31 • undefined_named_parameter
+  error • 1 positional argument expected by 'VolumeComparator.new', but 0 found • lib/core/di/market_mood_provider.dart:73:27 • not_enough_positional_arguments
+  error • The named parameter 'repository' isn't defined • lib/core/di/market_mood_provider.dart:73:27 • undefined_named_parameter
+  error • 1 positional argument expected by 'MarketMoodUseCase.new', but 0 found • lib/core/di/market_mood_provider.dart:83:5 • not_enough_positional_arguments
+  error • The named parameter 'repository' isn't defined • lib/core/di/market_mood_provider.dart:83:5 • undefined_named_parameter
+  error • The named parameter 'calculator' isn't defined • lib/core/di/market_mood_provider.dart:84:5 • undefined_named_parameter
+  error • The named parameter 'comparator' isn't defined • lib/core/di/market_mood_provider.dart:85:5 • undefined_named_parameter
+  error • The method 'getCurrentExchangeRate' isn't defined for the type 'MarketMoodUseCase' • lib/core/di/market_mood_provider.dart:96:24 • undefined_method
+  error • The method 'getMarketDataStream' isn't defined for the type 'MarketMoodUseCase' • lib/core/di/market_mood_provider.dart:102:18 • undefined_method
+  error • The method 'performFullAnalysis' isn't defined for the type 'MarketMoodUseCase' • lib/core/di/market_mood_provider.dart:108:24 • undefined_method
+  error • The method 'getSystemState' isn't defined for the type 'MarketMoodUseCase' • lib/core/di/market_mood_provider.dart:120:24 • undefined_method
+  error • The method 'checkSystemHealth' isn't defined for the type 'MarketMoodUseCase' • lib/core/di/market_mood_provider.dart:126:24 • undefined_method
+warning • The value of the field '_ref' isn't used • lib/core/di/market_mood_provider.dart:136:13 • unused_field
+  error • The method 'getSystemState' isn't defined for the type 'MarketMoodUseCase' • lib/core/di/market_mood_provider.dart:145:42 • undefined_method
+  error • The method 'refreshExchangeRate' isn't defined for the type 'MarketMoodUseCase' • lib/core/di/market_mood_provider.dart:156:22 • undefined_method
+  error • The method 'getSystemState' isn't defined for the type 'MarketMoodUseCase' • lib/core/di/market_mood_provider.dart:157:42 • undefined_method
+  error • The method 'syncAfterBackground' isn't defined for the type 'MarketMoodUseCase' • lib/core/di/market_mood_provider.dart:167:22 • undefined_method
+   info • Don't invoke 'print' in production code • lib/core/di/market_mood_provider.dart:171:7 • avoid_print
+  error • The method 'logCurrentStatus' isn't defined for the type 'MarketMoodUseCase' • lib/core/di/market_mood_provider.dart:177:20 • undefined_method
+  error • The method 'injectTestData' isn't defined for the type 'MarketMoodUseCase' • lib/core/di/market_mood_provider.dart:182:20 • undefined_method
+  error • Undefined name 'Hive' • lib/core/di/market_mood_provider.dart:231:8 • undefined_identifier
+  error • Undefined name 'Hive' • lib/core/di/market_mood_provider.dart:232:5 • undefined_identifier
+  error • Undefined name 'Hive' • lib/core/di/market_mood_provider.dart:236:8 • undefined_identifier
+  error • Undefined name 'Hive' • lib/core/di/market_mood_provider.dart:237:5 • undefined_identifier
+  error • Undefined name 'Hive' • lib/core/di/market_mood_provider.dart:239:8 • undefined_identifier
+  error • Undefined name 'Hive' • lib/core/di/market_mood_provider.dart:240:5 • undefined_identifier
+  error • Undefined name 'Hive' • lib/core/di/market_mood_provider.dart:242:8 • undefined_identifier
+  error • Undefined name 'Hive' • lib/core/di/market_mood_provider.dart:243:5 • undefined_identifier
+  error • Undefined name 'Hive' • lib/core/di/market_mood_provider.dart:245:8 • undefined_identifier
+  error • Undefined name 'Hive' • lib/core/di/market_mood_provider.dart:246:5 • undefined_identifier
+  error • There's no constant named 'neutral' in 'MarketMood' • lib/core/di/market_mood_provider.dart:286:31 • undefined_enum_constant
+  error • There's no constant named 'neutral' in 'MarketMood' • lib/core/di/market_mood_provider.dart:304:31 • undefined_enum_constant
+warning • Unused import: 'dart:async' • lib/core/di/websocket_provider.dart:3:8 • unused_import
 warning • Unused import: 'dart:async' • lib/core/navigation/app_router.dart:1:8 • unused_import
 warning • Unused import: 'package:firebase_messaging/firebase_messaging.dart' • lib/core/navigation/app_router.dart:5:8 • unused_import
 warning • Unused import: '../di/app_providers.dart' • lib/core/navigation/app_router.dart:8:8 • unused_import
-   info • The private field _period could be 'final' • lib/core/network/api_client.dart:166:12 • prefer_final_fields
-warning • The value of the local variable 'now' isn't used • lib/core/network/api_client.dart:265:11 • unused_local_variable
-   info • The constant name 'DEFAULT' isn't a lowerCamelCase identifier • lib/core/network/websocket/base_ws_client.dart:11:3 • constant_identifier_names
-   info • The constant name 'SIMPLE' isn't a lowerCamelCase identifier • lib/core/network/websocket/base_ws_client.dart:13:3 • constant_identifier_names
-  error • Undefined class 'AdaptiveBackoff' • lib/core/network/websocket/base_ws_client.dart:26:9 • undefined_class
-  error • The method 'AdaptiveBackoff' isn't defined for the type 'BaseWsClient' • lib/core/network/websocket/base_ws_client.dart:26:36 • undefined_method
-  error • The method 'pingDefault' isn't defined for the type 'WebSocket' • lib/core/network/websocket/base_ws_client.dart:133:21 • undefined_method
-  error • Missing concrete implementations of 'BaseWsClient.getSubscriptionType', 'BaseWsClient.getTicketPrefix', 'BaseWsClient.getWebSocketUrl', and 'BaseWsClient.processMessage' • lib/core/network/websocket/candle_ws_client.dart:9:7 • non_abstract_class_inherits_abstract_member
-  error • The type 'BaseWsClient' is declared with 0 type parameters, but 1 type arguments were given • lib/core/network/websocket/candle_ws_client.dart:9:30 • wrong_number_of_type_arguments
-  error • Undefined class 'WsStatus' • lib/core/network/websocket/candle_ws_client.dart:12:19 • undefined_class
-  error • The named parameter 'url' isn't defined • lib/core/network/websocket/candle_ws_client.dart:14:11 • undefined_named_parameter
-  error • The named parameter 'onStatusChange' isn't defined • lib/core/network/websocket/candle_ws_client.dart:15:11 • undefined_named_parameter
-  error • The named parameter 'decode' isn't defined • lib/core/network/websocket/candle_ws_client.dart:16:11 • undefined_named_parameter
-  error • The getter 'decodeJsonList' isn't defined for the type 'BaseWsClient' • lib/core/network/websocket/candle_ws_client.dart:16:32 • undefined_getter
-  error • The named parameter 'encodeSubscribe' isn't defined • lib/core/network/websocket/candle_ws_client.dart:17:11 • undefined_named_parameter
-  error • Missing concrete implementations of 'BaseWsClient.getSubscriptionType', 'BaseWsClient.getTicketPrefix', 'BaseWsClient.getWebSocketUrl', and 'BaseWsClient.processMessage' • lib/core/network/websocket/orderbook_ws_client.dart:8:7 • non_abstract_class_inherits_abstract_member
-  error • The type 'BaseWsClient' is declared with 0 type parameters, but 1 type arguments were given • lib/core/network/websocket/orderbook_ws_client.dart:8:33 • wrong_number_of_type_arguments
-  error • Undefined class 'WsStatus' • lib/core/network/websocket/orderbook_ws_client.dart:9:36 • undefined_class
-  error • The named parameter 'url' isn't defined • lib/core/network/websocket/orderbook_ws_client.dart:11:11 • undefined_named_parameter
-  error • The named parameter 'onStatusChange' isn't defined • lib/core/network/websocket/orderbook_ws_client.dart:12:11 • undefined_named_parameter
-  error • The named parameter 'decode' isn't defined • lib/core/network/websocket/orderbook_ws_client.dart:13:11 • undefined_named_parameter
-  error • The getter 'decodeJsonList' isn't defined for the type 'BaseWsClient' • lib/core/network/websocket/orderbook_ws_client.dart:13:32 • undefined_getter
-  error • The named parameter 'encodeSubscribe' isn't defined • lib/core/network/websocket/orderbook_ws_client.dart:14:11 • undefined_named_parameter
-  error • Missing concrete implementations of 'BaseWsClient.getSubscriptionType', 'BaseWsClient.getTicketPrefix', 'BaseWsClient.getWebSocketUrl', and 'BaseWsClient.processMessage' • lib/core/network/websocket/ticker_ws_client.dart:8:7 • non_abstract_class_inherits_abstract_member
-  error • The type 'BaseWsClient' is declared with 0 type parameters, but 1 type arguments were given • lib/core/network/websocket/ticker_ws_client.dart:8:30 • wrong_number_of_type_arguments
-  error • Undefined class 'WsStatus' • lib/core/network/websocket/ticker_ws_client.dart:9:33 • undefined_class
-  error • The named parameter 'url' isn't defined • lib/core/network/websocket/ticker_ws_client.dart:11:11 • undefined_named_parameter
-  error • The named parameter 'onStatusChange' isn't defined • lib/core/network/websocket/ticker_ws_client.dart:12:11 • undefined_named_parameter
-  error • The named parameter 'decode' isn't defined • lib/core/network/websocket/ticker_ws_client.dart:13:11 • undefined_named_parameter
-  error • The getter 'decodeJsonList' isn't defined for the type 'BaseWsClient' • lib/core/network/websocket/ticker_ws_client.dart:13:32 • undefined_getter
-  error • The named parameter 'encodeSubscribe' isn't defined • lib/core/network/websocket/ticker_ws_client.dart:14:11 • undefined_named_parameter
-warning • Unused import: 'dart:convert' • lib/core/network/websocket/trade_ws_client.dart:2:8 • unused_import
-   info • Unnecessary braces in a string interpolation • lib/core/network/websocket/trade_ws_client.dart:22:28 • unnecessary_brace_in_string_interps
-  error • The named parameter 'changeState' is required, but there's no corresponding argument • lib/core/network/websocket/trade_ws_client.dart:68:14 • missing_required_argument
-  error • The named parameter 'price' is required, but there's no corresponding argument • lib/core/network/websocket/trade_ws_client.dart:68:14 • missing_required_argument
-  error • The named parameter 'side' is required, but there's no corresponding argument • lib/core/network/websocket/trade_ws_client.dart:68:14 • missing_required_argument
-  error • The named parameter 'timestampMs' is required, but there's no corresponding argument • lib/core/network/websocket/trade_ws_client.dart:68:14 • missing_required_argument
-  error • The named parameter 'volume' is required, but there's no corresponding argument • lib/core/network/websocket/trade_ws_client.dart:68:14 • missing_required_argument
-  error • The named parameter 'tradeDateUtc' isn't defined • lib/core/network/websocket/trade_ws_client.dart:70:9 • undefined_named_parameter
-  error • The named parameter 'tradeTimeUtc' isn't defined • lib/core/network/websocket/trade_ws_client.dart:71:9 • undefined_named_parameter
-  error • The named parameter 'timestamp' isn't defined • lib/core/network/websocket/trade_ws_client.dart:72:9 • undefined_named_parameter
-  error • The named parameter 'tradePrice' isn't defined • lib/core/network/websocket/trade_ws_client.dart:73:9 • undefined_named_parameter
-  error • The named parameter 'tradeVolume' isn't defined • lib/core/network/websocket/trade_ws_client.dart:74:9 • undefined_named_parameter
-  error • The named parameter 'askBid' isn't defined • lib/core/network/websocket/trade_ws_client.dart:75:9 • undefined_named_parameter
-  error • The named parameter 'prevClosingPrice' isn't defined • lib/core/network/websocket/trade_ws_client.dart:76:9 • undefined_named_parameter
-  error • The named parameter 'change' isn't defined • lib/core/network/websocket/trade_ws_client.dart:77:9 • undefined_named_parameter
-  error • The named parameter 'changeRate' isn't defined • lib/core/network/websocket/trade_ws_client.dart:79:9 • undefined_named_parameter
-  error • The argument type 'int?' can't be assigned to the parameter type 'String'.  • lib/core/network/websocket/trade_ws_client.dart:81:23 • argument_type_not_assignable
-  error • The named parameter 'streamType' isn't defined • lib/core/network/websocket/trade_ws_client.dart:82:9 • undefined_named_parameter
-  error • The getter 'tradePrice' isn't defined for the type 'Trade' • lib/core/network/websocket/trade_ws_client.dart:103:75 • undefined_getter
-  error • The getter 'stream' isn't defined for the type 'TradeWsClient' • lib/data/datasources/trade_remote_ds.dart:60:20 • undefined_getter
-warning • The value of the local variable 'currentIndex' isn't used • lib/presentation/pages/main_page.dart:88:11 • unused_local_variable
-   info • The import of '../../domain/entities/app_settings.dart' is unnecessary because all of the used elements are also provided by the import of '../../core/di/app_providers.dart' • lib/presentation/pages/settings_page.dart:5:8 • unnecessary_import
-  error • Undefined class 'WsStatus' • lib/shared/widgets/ws_status_indicator.dart:32:64 • undefined_class
-  error • The body might complete normally, causing 'null' to be returned, but the return type, 'Widget', is a potentially non-nullable type • lib/shared/widgets/ws_status_indicator.dart:87:10 • body_might_complete_normally
-  error • Undefined class 'WsStatus' • lib/shared/widgets/ws_status_indicator.dart:87:25 • undefined_class
-  error • Undefined name 'WsStatus' • lib/shared/widgets/ws_status_indicator.dart:89:12 • undefined_identifier
-  error • Undefined name 'WsStatus' • lib/shared/widgets/ws_status_indicator.dart:98:12 • undefined_identifier
-  error • Undefined name 'WsStatus' • lib/shared/widgets/ws_status_indicator.dart:107:12 • undefined_identifier
-  error • Undefined name 'WsStatus' • lib/shared/widgets/ws_status_indicator.dart:116:12 • undefined_identifier
-  error • Undefined name 'WsStatus' • lib/shared/widgets/ws_status_indicator.dart:125:12 • undefined_identifier
-  error • Undefined name 'WsStatus' • lib/shared/widgets/ws_status_indicator.dart:134:12 • undefined_identifier
-  error • Undefined name 'WsStatus' • lib/shared/widgets/ws_status_indicator.dart:135:12 • undefined_identifier
-  error • Undefined name 'WsStatus' • lib/shared/widgets/ws_status_indicator.dart:139:45 • undefined_identifier
-  error • Undefined name 'WsStatus' • lib/shared/widgets/ws_status_indicator.dart:144:12 • undefined_identifier
-  error • Missing concrete implementations of 'BaseWsClient.getSubscriptionType', 'BaseWsClient.getTicketPrefix', 'BaseWsClient.getWebSocketUrl', and 'BaseWsClient.processMessage' • test/core/network/websocket/base_ws_client_test.dart:6:7 • non_abstract_class_inherits_abstract_member
-  error • The type 'BaseWsClient' is declared with 0 type parameters, but 1 type arguments were given • test/core/network/websocket/base_ws_client_test.dart:6:29 • wrong_number_of_type_arguments
-  error • The named parameter 'url' isn't defined • test/core/network/websocket/base_ws_client_test.dart:9:11 • undefined_named_parameter
-  error • The named parameter 'decode' isn't defined • test/core/network/websocket/base_ws_client_test.dart:10:11 • undefined_named_parameter
-  error • The named parameter 'encodeSubscribe' isn't defined • test/core/network/websocket/base_ws_client_test.dart:11:11 • undefined_named_parameter
-  error • The method 'encodeSubscribe' isn't defined for the type 'CandleWsClient' • test/core/network/websocket/candle_ws_client_test.dart:12:30 • undefined_method
-  error • The method 'encodeSubscribe' isn't defined for the type 'CandleWsClient' • test/core/network/websocket/candle_ws_client_test.dart:24:30 • undefined_method
-  error • The method 'decode' isn't defined for the type 'CandleWsClient' • test/core/network/websocket/candle_ws_client_test.dart:33:27 • undefined_method
-  error • The method 'decode' isn't defined for the type 'CandleWsClient' • test/core/network/websocket/candle_ws_client_test.dart:38:27 • undefined_method
-  error • The method 'encodeSubscribe' isn't defined for the type 'OrderbookWsClient' • test/core/network/websocket/orderbook_ws_client_test.dart:12:30 • undefined_method
-  error • The method 'encodeSubscribe' isn't defined for the type 'OrderbookWsClient' • test/core/network/websocket/orderbook_ws_client_test.dart:21:31 • undefined_method
-  error • The method 'decode' isn't defined for the type 'OrderbookWsClient' • test/core/network/websocket/orderbook_ws_client_test.dart:29:27 • undefined_method
-  error • The method 'decode' isn't defined for the type 'OrderbookWsClient' • test/core/network/websocket/orderbook_ws_client_test.dart:33:27 • undefined_method
-  error • The method 'encodeSubscribe' isn't defined for the type 'TickerWsClient' • test/core/network/websocket/ticker_ws_client_test.dart:12:30 • undefined_method
-  error • The method 'encodeSubscribe' isn't defined for the type 'TickerWsClient' • test/core/network/websocket/ticker_ws_client_test.dart:21:31 • undefined_method
-  error • The method 'decode' isn't defined for the type 'TickerWsClient' • test/core/network/websocket/ticker_ws_client_test.dart:29:27 • undefined_method
-  error • The method 'decode' isn't defined for the type 'TickerWsClient' • test/core/network/websocket/ticker_ws_client_test.dart:33:27 • undefined_method
-  error • The method 'encodeSubscribe' isn't defined for the type 'TradeWsClient' • test/core/network/websocket/trade_ws_client_test.dart:12:30 • undefined_method
-  error • The method 'encodeSubscribe' isn't defined for the type 'TradeWsClient' • test/core/network/websocket/trade_ws_client_test.dart:21:31 • undefined_method
-  error • The method 'decode' isn't defined for the type 'TradeWsClient' • test/core/network/websocket/trade_ws_client_test.dart:29:27 • undefined_method
-  error • The method 'decode' isn't defined for the type 'TradeWsClient' • test/core/network/websocket/trade_ws_client_test.dart:33:27 • undefined_method
-  error • The getter 'stream' isn't defined for the type 'MockTradeWsClient' • test/data/datasources/trade_remote_ds_test.dart:53:31 • undefined_getter
-  error • The getter 'stream' isn't defined for the type 'MockTradeWsClient' • test/data/datasources/trade_remote_ds_test.dart:71:31 • undefined_getter
-  error • The getter 'stream' isn't defined for the type 'MockTradeWsClient' • test/data/datasources/trade_remote_ds_test.dart:111:31 • undefined_getter
-  error • The getter 'stream' isn't defined for the type 'MockTradeWsClient' • test/data/datasources/trade_remote_ds_test.dart:134:31 • undefined_getter
-   info • Uses 'await' on an instance of 'void', which is not a subtype of 'Future' • test/integration/websocket_integration_test.dart:32:7 • await_only_futures
-  error • This expression has a type of 'void' so its value can't be used • test/integration/websocket_integration_test.dart:32:20 • use_of_void_result
-  error • The getter 'stream' isn't defined for the type 'TickerWsClient' • test/integration/websocket_integration_test.dart:47:20 • undefined_getter
-   info • Uses 'await' on an instance of 'void', which is not a subtype of 'Future' • test/integration/websocket_integration_test.dart:74:7 • await_only_futures
-  error • This expression has a type of 'void' so its value can't be used • test/integration/websocket_integration_test.dart:74:20 • use_of_void_result
+warning • The stack trace variable 'stackTrace' isn't used and can be removed • lib/core/network/api_client_coingecko.dart:59:17 • unused_catch_stack
+   info • Unnecessary braces in a string interpolation • lib/data/datasources/market_mood_local_ds.dart:126:27 • unnecessary_brace_in_string_interps
+  error • The argument type 'CoinGeckoGlobalResponse' can't be assigned to the parameter type 'Map<String, dynamic>?'.  • lib/data/datasources/market_mood_remote_ds.dart:28:60 • argument_type_not_assignable
+  error • The argument type 'CoinGeckoGlobalResponse' can't be assigned to the parameter type 'Map<String, dynamic>?'.  • lib/data/datasources/market_mood_remote_ds.dart:60:58 • argument_type_not_assignable
+warning • The operand can't be 'null', so the condition is always 'false' • lib/data/repositories/market_mood_repository_impl.dart:49:35 • unnecessary_null_comparison
+warning • The '!' will have no effect because the receiver can't be null • lib/data/repositories/market_mood_repository_impl.dart:54:49 • unnecessary_non_null_assertion
+   info • Unnecessary braces in a string interpolation • lib/data/repositories/market_mood_repository_impl.dart:171:19 • unnecessary_brace_in_string_interps
+   info • Unnecessary braces in a string interpolation • lib/data/repositories/market_mood_repository_impl.dart:175:17 • unnecessary_brace_in_string_interps
+warning • Unused import: '../../core/utils/date_time.dart' • lib/domain/entities/market_mood.dart:4:8 • unused_import
+  error • The method 'checkAndFillMissingSlots' isn't defined for the type 'MarketMoodRepository' • lib/domain/usecases/market_mood_usecase.dart:242:23 • undefined_method
+  error • The method 'getDebugInfo' isn't defined for the type 'MarketMoodRepository' • lib/domain/usecases/market_mood_usecase.dart:247:24 • undefined_method
+  error • The method 'logStatus' isn't defined for the type 'MarketMoodRepository' • lib/domain/usecases/market_mood_usecase.dart:252:17 • undefined_method
+   info • The import of '../../domain/entities/market_mood.dart' is unnecessary because all of the used elements are also provided by the import of '../../core/di/app_providers.dart' • lib/presentation/controllers/market_mood_controller.dart:8:8 • unnecessary_import
+  error • The argument type 'AsyncValue<Map<String, dynamic>>' can't be assigned to the parameter type 'MarketMoodSystemState?'.  • lib/presentation/controllers/market_mood_controller.dart:33:22 • argument_type_not_assignable
+  error • The method 'refresh' isn't defined for the type 'AsyncValue' • lib/presentation/controllers/market_mood_controller.dart:46:22 • undefined_method
+  error • The argument type 'FutureProviderFamily<MarketMood, double>' can't be assigned to the parameter type 'ProviderListenable<MarketMood>'.  • lib/presentation/controllers/market_mood_controller.dart:52:22 • argument_type_not_assignable
+  error • The argument type 'FutureProviderFamily<ComparisonData, double>' can't be assigned to the parameter type 'ProviderListenable<ComparisonData>'.  • lib/presentation/controllers/market_mood_controller.dart:63:22 • argument_type_not_assignable
+  error • The method 'getSystemHealth' isn't defined for the type 'AsyncValue' • lib/presentation/controllers/market_mood_controller.dart:70:39 • undefined_method
+  error • The method 'syncMissingData' isn't defined for the type 'AsyncValue' • lib/presentation/controllers/market_mood_controller.dart:85:24 • undefined_method
+warning • Unused import: '../../core/config/app_config.dart' • lib/presentation/controllers/volume_controller.dart:4:8 • unused_import
+   info • The import of '../../domain/entities/market_mood.dart' is unnecessary because all of the used elements are also provided by the import of '../../core/di/app_providers.dart' • lib/presentation/pages/market_mood_page.dart:7:8 • unnecessary_import
+   info • The import of '../controllers/market_mood_controller.dart' is unnecessary because all of the used elements are also provided by the import of '../../core/di/app_providers.dart' • lib/presentation/pages/market_mood_page.dart:8:8 • unnecessary_import
+  error • The argument type 'FutureProviderFamily<ComparisonData, double>' can't be assigned to the parameter type 'ProviderListenable<dynamic>'.  • lib/presentation/pages/market_mood_page.dart:252:38 • argument_type_not_assignable
+  error • The argument type 'FutureProviderFamily<ComparisonData, double>' can't be assigned to the parameter type 'ProviderListenable<dynamic>'.  • lib/presentation/pages/market_mood_page.dart:271:38 • argument_type_not_assignable
+   info • The file name 'common_app_bar copy.dart' isn't a lower_case_with_underscores identifier • lib/shared/widgets/common_app_bar copy.dart:1:1 • file_names
+   info • Use a 'SizedBox' to add whitespace to a layout • lib/shared/widgets/common_app_bar.dart:51:27 • sized_box_for_whitespace
+   info • The import of '../../presentation/controllers/market_mood_controller.dart' is unnecessary because all of the used elements are also provided by the import of '../../core/di/app_providers.dart' • lib/shared/widgets/market_mood_indicator.dart:6:8 • unnecessary_import
+  error • The argument type 'FutureProviderFamily<MarketMood, double>' can't be assigned to the parameter type 'ProviderListenable<dynamic>'.  • lib/shared/widgets/market_mood_indicator.dart:24:35 • argument_type_not_assignable
+   info • Use 'const' for final variables initialized to a constant value • lib/shared/widgets/websocket_modal.dart:38:5 • prefer_const_declarations
 

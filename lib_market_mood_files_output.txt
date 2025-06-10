@@ -1,0 +1,3399 @@
+\n\n// ====== lib/core/di/market_mood_provider copy.dart ======\n
+\n\n// ====== lib/core/di/market_mood_provider.dart ======\n
+// lib/core/di/market_mood_provider.dart
+// 🔥 Provider들만 깔끔하게 분리 (DI 패턴) - 완성형
+
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+import '../network/api_client_coingecko.dart';
+import '../utils/logger.dart';
+import 'trade_provider.dart' show hiveServiceProvider; // 🔥 기존 hiveServiceProvider 사용
+import '../../data/datasources/market_mood_remote_ds.dart';
+import '../../data/datasources/market_mood_local_ds.dart';
+import '../../data/repositories/market_mood_repository_impl.dart';
+import '../../domain/entities/market_mood.dart';
+import '../../domain/usecases/market_mood_usecase.dart';
+
+/// 🌐 CoinGecko API 클라이언트 Provider
+final coinGeckoApiClientProvider = Provider<CoinGeckoApiClient>((ref) {
+  return CoinGeckoApiClient();
+});
+
+/// 🔥 Remote DataSource Provider
+final marketMoodRemoteDSProvider = Provider<MarketMoodRemoteDataSource>((ref) {
+  final client = ref.read(coinGeckoApiClientProvider);
+  return MarketMoodRemoteDataSource(client);
+});
+
+/// 🔥 Local DataSource Provider
+final marketMoodLocalDSProvider = Provider<MarketMoodLocalDataSource>((ref) {
+  final hive = ref.watch(hiveServiceProvider);
+  return MarketMoodLocalDataSource(hive);
+});
+
+/// 🔥 Repository Provider
+final marketMoodRepositoryProvider = Provider<MarketMoodRepositoryImpl>((ref) {
+  final remoteDS = ref.read(marketMoodRemoteDSProvider);
+  final localDS = ref.read(marketMoodLocalDSProvider);
+  return MarketMoodRepositoryImpl(remoteDS, localDS);
+});
+
+/// 🔥 UseCase Provider
+final marketMoodUsecaseProvider = Provider<MarketMoodUsecase>((ref) {
+  final repository = ref.read(marketMoodRepositoryProvider);
+  return MarketMoodUsecase(repository);
+});
+
+/// 🔥 환율 Provider (UseCase 통해서)
+final exchangeRateProvider = FutureProvider.autoDispose<double>((ref) async {
+  final usecase = ref.read(marketMoodUsecaseProvider);
+  
+  try {
+    final rate = await usecase.getExchangeRate();
+    log.d('환율 조회 성공: $rate');
+    return rate;
+  } catch (e) {
+    log.w('환율 조회 실패, 기본값 1400 사용: $e');
+    return 1400.0;
+  }
+});
+
+/// 🔥 글로벌 마켓 데이터 Provider (Repository 통해서) - 메인 데이터 소스
+final marketMoodProvider = StreamProvider.autoDispose<MarketMoodData>((ref) {
+  final repository = ref.read(marketMoodRepositoryProvider);
+  
+  ref.onDispose(() {
+    repository.dispose();
+  });
+
+  return repository.getMarketDataStream();
+});
+
+/// 📈 볼륨 비교 데이터 Provider
+final volumeComparisonProvider = FutureProvider.autoDispose<ComparisonData>((ref) async {
+  final moodAsync = ref.watch(marketMoodProvider);
+  final usecase = ref.read(marketMoodUsecaseProvider);
+
+  return moodAsync.when(
+    data: (data) async => await usecase.calculateVolumeComparison(data.totalVolumeUsd),
+    loading: () async => ComparisonData.loading(),
+    error: (_, __) async => ComparisonData.error(),
+  );
+});
+
+/// 🎯 현재 마켓 무드 Provider (30분 기준)
+final currentMarketMoodProvider = FutureProvider.autoDispose<MarketMood>((ref) async {
+  final moodAsync = ref.watch(marketMoodProvider);
+  final usecase = ref.read(marketMoodUsecaseProvider);
+
+  return moodAsync.when(
+    data: (data) async => await usecase.calculateCurrentMood(data.totalVolumeUsd),
+    loading: () async => MarketMood.sideways,
+    error: (_, __) async => MarketMood.sideways,
+  );
+});
+
+/// 📊 마켓 무드 상태 요약 Provider
+final marketMoodSummaryProvider = FutureProvider.autoDispose<String>((ref) async {
+  final moodAsync = ref.watch(currentMarketMoodProvider);
+  final usecase = ref.read(marketMoodUsecaseProvider);
+  
+  return moodAsync.when(
+    data: (mood) => usecase.generateMoodSummary(mood),
+    loading: () => '로딩중...',
+    error: (_, __) => '오류',
+  );
+});
+
+/// 🌐 전체 시스템 상태 Provider
+final marketMoodSystemProvider = FutureProvider.autoDispose<MarketMoodSystemState>((ref) async {
+  final usecase = ref.read(marketMoodUsecaseProvider);
+
+  // 각 Provider의 현재 값들을 가져오기
+  final moodAsync = ref.watch(marketMoodProvider);
+  final comparisonAsync = ref.watch(volumeComparisonProvider);
+  final currentMoodAsync = ref.watch(currentMarketMoodProvider);
+  final exchangeAsync = ref.watch(exchangeRateProvider);
+
+  // AsyncValue에서 데이터 추출
+  final marketData = moodAsync.asData?.value;
+  final comparison = comparisonAsync.asData?.value ?? ComparisonData.loading();
+  final currentMood = currentMoodAsync.asData?.value ?? MarketMood.sideways;
+  final exchangeRate = exchangeAsync.asData?.value ?? 1400.0;
+
+  final isLoading = moodAsync.isLoading || comparisonAsync.isLoading || 
+                   currentMoodAsync.isLoading || exchangeAsync.isLoading;
+  final hasError = moodAsync.hasError || comparisonAsync.hasError || 
+                  currentMoodAsync.hasError || exchangeAsync.hasError;
+
+  return usecase.createSystemState(
+    marketData: marketData,
+    comparisonData: comparison,
+    currentMood: currentMood,
+    exchangeRate: exchangeRate,
+    isLoading: isLoading,
+    hasError: hasError,
+  );
+});
+
+/// 🎮 마켓 무드 컨트롤러 Provider
+final marketMoodControllerProvider = Provider((ref) => MarketMoodController(ref));
+
+class MarketMoodController {
+  final Ref ref;
+  MarketMoodController(this.ref);
+
+  void refresh() {
+    ref.invalidate(marketMoodProvider);
+    ref.invalidate(exchangeRateProvider);
+  }
+
+  Future<MarketMood> getCurrentMood() async {
+    final moodAsync = ref.read(currentMarketMoodProvider);
+    return moodAsync.when(
+      data: (mood) => mood,
+      loading: () => MarketMood.sideways,
+      error: (_, __) => MarketMood.sideways,
+    );
+  }
+
+  Future<ComparisonData> getComparisonData() async {
+    final comparisonAsync = ref.read(volumeComparisonProvider);
+    return comparisonAsync.when(
+      data: (data) => data,
+      loading: () => ComparisonData.loading(),
+      error: (_, __) => ComparisonData.error(),
+    );
+  }
+
+  Future<void> refreshExchangeRate() async {
+    final usecase = ref.read(marketMoodUsecaseProvider);
+    await usecase.refreshExchangeRate();
+    ref.invalidate(exchangeRateProvider);
+  }
+
+  Future<Map<String, dynamic>> getSystemHealth() async {
+    final usecase = ref.read(marketMoodUsecaseProvider);
+    return await usecase.getSystemHealth();
+  }
+
+  Future<void> logSystemStatus() async {
+    final usecase = ref.read(marketMoodUsecaseProvider);
+    await usecase.logSystemStatus();
+  }
+}\n\n// ====== lib/shared/widgets/market_mood_modal.dart ======\n
+\n\n// ====== lib/shared/widgets/market_mood_indicator.dart ======\n
+// lib/shared/widgets/market_mood_indicator.dart
+// 🎨 Shared Widget: Market Mood 인디케이터 (클린 아키텍처 완전 대응)
+
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../core/di/app_providers.dart';
+import '../../presentation/controllers/market_mood_controller.dart';
+
+/// 🎨 메인 마켓무드 인디케이터 위젯
+class MarketMoodIndicator extends ConsumerWidget {
+  final double size;
+  final bool showTooltip;
+  final EdgeInsets? padding;
+
+  const MarketMoodIndicator({
+    Key? key,
+    this.size = 16,
+    this.showTooltip = false,
+    this.padding,
+  }) : super(key: key);
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final marketMoodAsync = ref.watch(marketMoodProvider);
+    final currentMoodAsync = ref.watch(currentMarketMoodProvider);
+    
+    Widget indicator = marketMoodAsync.when(
+      data: (data) => currentMoodAsync.when(
+        data: (mood) => _buildMoodIcon(context, ref, data, mood),
+        loading: () => _buildLoadingIcon(),
+        error: (_, __) => _buildErrorIcon(),
+      ),
+      loading: () => _buildLoadingIcon(),
+      error: (_, __) => _buildErrorIcon(),
+    );
+    
+    if (padding != null) {
+      indicator = Padding(padding: padding!, child: indicator);
+    }
+    
+    return indicator;
+  }
+
+  Widget _buildMoodIcon(BuildContext context, WidgetRef ref, MarketMoodData data, MarketMood mood) {
+    Widget moodIcon = _getMoodIcon(mood);
+    
+    // 롱프레스 제스처 추가
+    return GestureDetector(
+      onLongPressStart: (details) => _showMarketMoodModal(context, ref, details.globalPosition, data),
+      onLongPressEnd: (_) => _hideMarketMoodModal(),
+      onLongPressCancel: () => _hideMarketMoodModal(),
+      child: moodIcon,
+    );
+  }
+
+  Widget _buildLoadingIcon() {
+    return _AnimatedMoodIcon(
+      icon: Icons.refresh,
+      color: Colors.grey,
+      tooltip: showTooltip ? '시장 데이터 로딩 중...' : null,
+      animationType: MoodAnimationType.rotate,
+      size: size,
+    );
+  }
+
+  Widget _buildErrorIcon() {
+    return _AnimatedMoodIcon(
+      icon: Icons.error_outline,
+      color: Colors.red,
+      tooltip: showTooltip ? '시장 데이터 로드 실패' : null,
+      animationType: MoodAnimationType.blink,
+      size: size,
+    );
+  }
+
+  /// 🔥 시장 분위기 모달 표시 - 컨트롤러의 MarketMoodModalManager 사용
+  void _showMarketMoodModal(BuildContext context, WidgetRef ref, Offset globalPosition, MarketMoodData data) {
+    HapticFeedback.mediumImpact();
+    Tooltip.dismissAllToolTips();
+    
+    // 화면 크기와 모달 크기 계산
+    final screenSize = MediaQuery.of(context).size;
+    final modalWidth = screenSize.width * 0.9; // 90% 너비 사용
+    
+    // 화면 경계 고려한 위치 계산
+    double adjustedX = globalPosition.dx - (modalWidth / 2); // 중앙 정렬
+    double adjustedY = globalPosition.dy + size + 40; // 🔥 무조건 아래쪽으로 (위쪽 계산 제거)
+    
+    // 좌측 경계 체크
+    if (adjustedX < 16) {
+      adjustedX = 16;
+    }
+    
+    // 우측 경계 체크
+    if (adjustedX + modalWidth > screenSize.width - 16) {
+      adjustedX = screenSize.width - modalWidth - 16;
+    }
+    
+    // 하단 경계 체크 - 화면 밖으로 나가면 위로 조정
+    final bottomSafeArea = MediaQuery.of(context).padding.bottom;
+    final maxY = screenSize.height - bottomSafeArea - 300; // 모달 최소 높이 고려
+    if (adjustedY > maxY) {
+      adjustedY = globalPosition.dy - 250; // 충분히 위로 올려서 표시
+    }
+    
+    final adjustedPosition = Offset(adjustedX, adjustedY);
+    
+    // 컨트롤러의 MarketMoodModalManager 사용
+    MarketMoodModalManager.show(
+      context: context,
+      ref: ref,
+      position: adjustedPosition,
+      statusIconSize: size,
+      data: data,
+    );
+  }
+
+  /// 🔥 시장 분위기 모달 숨기기
+  void _hideMarketMoodModal() {
+    MarketMoodModalManager.hide();
+  }
+
+  Widget _getMoodIcon(MarketMood mood) {
+    switch (mood) {
+      case MarketMood.bull:
+        return _AnimatedMoodIcon(
+          icon: Icons.rocket_launch,
+          color: const Color(0xFFFF6B35), // 🚀 화염 오렌지-레드 톤
+          tooltip: showTooltip ? '🚀 불장 - 30분 전 대비 +15% 이상 (롱프레스: 상세정보)' : null,
+          animationType: MoodAnimationType.fastPulse,
+          size: size,
+        );
+        
+      case MarketMood.weakBull:
+        return _AnimatedMoodIcon(
+          icon: Icons.local_fire_department,
+          color: const Color(0xFFFF6B35), // 🔥 화염 오렌지-레드 톤
+          tooltip: showTooltip ? '🔥 약불장 - 30분 전 대비 +5~15% (롱프레스: 상세정보)' : null,
+          animationType: MoodAnimationType.fireFlicker,
+          size: size,
+        );
+        
+      case MarketMood.sideways:
+        return _AnimatedMoodIcon(
+          icon: Icons.balance,
+          color: const Color(0xFF757575), // ⚖️ 중성 회색
+          tooltip: showTooltip ? '⚖️ 중간장 - 30분 전 대비 -5~+5% (롱프레스: 상세정보)' : null,
+          animationType: MoodAnimationType.wiggle,
+          size: size,
+        );
+        
+      case MarketMood.bear:
+        return _AnimatedMoodIcon(
+          icon: Icons.water_drop,
+          color: const Color(0xFF4A90E2), // 💧 물방울 블루 톤
+          tooltip: showTooltip ? '💧 물장 - 30분 전 대비 -5~-15% (롱프레스: 상세정보)' : null,
+          animationType: MoodAnimationType.waterDrop,
+          size: size,
+        );
+        
+      case MarketMood.deepBear:
+        return _AnimatedMoodIcon(
+          icon: Icons.ac_unit,
+          color: const Color(0xFF4A90E2), // 🧊 얼음장 블루 톤
+          tooltip: showTooltip ? '🧊 얼음장 - 30분 전 대비 -15% 이하 (롱프레스: 상세정보)' : null,
+          animationType: MoodAnimationType.coldShiver,
+          size: size,
+        );
+    }
+  }
+}
+
+/// 🎨 애니메이션 타입 enum
+enum MoodAnimationType { 
+  none, 
+  fastPulse, 
+  fireFlicker, 
+  wiggle, 
+  waterDrop, 
+  coldShiver, 
+  rotate, 
+  blink 
+}
+
+/// 🎨 애니메이션 아이콘 위젯
+class _AnimatedMoodIcon extends StatefulWidget {
+  final IconData icon;
+  final Color color;
+  final String? tooltip;
+  final MoodAnimationType animationType;
+  final double size;
+
+  const _AnimatedMoodIcon({
+    required this.icon,
+    required this.color,
+    required this.animationType,
+    required this.size,
+    this.tooltip,
+  });
+
+  @override
+  State<_AnimatedMoodIcon> createState() => _AnimatedMoodIconState();
+}
+
+class _AnimatedMoodIconState extends State<_AnimatedMoodIcon>
+    with TickerProviderStateMixin {
+  late AnimationController _controller;
+  late Animation<double> _animation;
+
+  @override
+  void initState() {
+    super.initState();
+    _setupAnimation();
+  }
+
+  void _setupAnimation() {
+    switch (widget.animationType) {
+      case MoodAnimationType.fastPulse:
+        _controller = AnimationController(
+          duration: const Duration(milliseconds: 800),
+          vsync: this,
+        );
+        _animation = Tween<double>(begin: 0.6, end: 1.3).animate(
+          CurvedAnimation(parent: _controller, curve: Curves.easeInOut),
+        );
+        _controller.repeat(reverse: true);
+        break;
+        
+      case MoodAnimationType.fireFlicker:
+        _controller = AnimationController(
+          duration: const Duration(milliseconds: 600),
+          vsync: this,
+        );
+        _animation = Tween<double>(begin: 0.7, end: 1.3).animate(
+          CurvedAnimation(parent: _controller, curve: Curves.elasticOut),
+        );
+        _controller.repeat(reverse: true);
+        break;
+        
+      case MoodAnimationType.wiggle:
+        _controller = AnimationController(
+          duration: const Duration(milliseconds: 2000),
+          vsync: this,
+        );
+        _animation = Tween<double>(begin: -0.15, end: 0.15).animate(
+          CurvedAnimation(parent: _controller, curve: Curves.easeInOut),
+        );
+        _controller.repeat(reverse: true);
+        break;
+        
+      case MoodAnimationType.waterDrop:
+        _controller = AnimationController(
+          duration: const Duration(milliseconds: 2500),
+          vsync: this,
+        );
+        _animation = Tween<double>(begin: 0.85, end: 1.0).animate(
+          CurvedAnimation(parent: _controller, curve: Curves.easeInOut),
+        );
+        _controller.repeat(reverse: true);
+        break;
+        
+      case MoodAnimationType.coldShiver:
+        _controller = AnimationController(
+          duration: const Duration(milliseconds: 150),
+          vsync: this,
+        );
+        _animation = Tween<double>(begin: 0.95, end: 1.0).animate(
+          CurvedAnimation(parent: _controller, curve: Curves.linear),
+        );
+        _controller.repeat(reverse: true);
+        break;
+        
+      case MoodAnimationType.rotate:
+        _controller = AnimationController(
+          duration: const Duration(seconds: 1),
+          vsync: this,
+        );
+        _animation = Tween<double>(begin: 0, end: 1).animate(_controller);
+        _controller.repeat();
+        break;
+        
+      case MoodAnimationType.blink:
+        _controller = AnimationController(
+          duration: const Duration(milliseconds: 800),
+          vsync: this,
+        );
+        _animation = Tween<double>(begin: 0.3, end: 1.0).animate(
+          CurvedAnimation(parent: _controller, curve: Curves.easeInOut),
+        );
+        _controller.repeat(reverse: true);
+        break;
+        
+      case MoodAnimationType.none:
+        _controller = AnimationController(vsync: this);
+        _animation = const AlwaysStoppedAnimation(1.0);
+        break;
+    }
+  }
+
+  @override
+  void didUpdateWidget(_AnimatedMoodIcon oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.animationType != widget.animationType) {
+      _controller.dispose();
+      _setupAnimation();
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    Widget iconWidget = AnimatedBuilder(
+      animation: _animation,
+      builder: (context, child) {
+        Widget icon = Icon(
+          widget.icon,
+          color: widget.color,
+          size: widget.size,
+        );
+
+        switch (widget.animationType) {
+          case MoodAnimationType.fastPulse:
+            return Transform.translate(
+              offset: Offset(0, (_animation.value - 1) * 2),
+              child: Transform.scale(
+                scale: _animation.value,
+                child: Opacity(
+                  opacity: (_animation.value * 0.8 + 0.2).clamp(0.5, 1.0),
+                  child: icon,
+                ),
+              ),
+            );
+            
+          case MoodAnimationType.fireFlicker:
+            return Transform.scale(
+              scale: _animation.value,
+              child: Transform.rotate(
+                angle: (_animation.value - 1) * 0.1,
+                child: Opacity(
+                  opacity: (_animation.value * 0.8 + 0.2).clamp(0.4, 1.0),
+                  child: icon,
+                ),
+              ),
+            );
+            
+          case MoodAnimationType.wiggle:
+            return Transform.rotate(
+              angle: _animation.value,
+              child: Transform.scale(
+                scale: 0.95 + (_animation.value.abs() * 0.1),
+                child: icon,
+              ),
+            );
+            
+          case MoodAnimationType.waterDrop:
+            return Transform.translate(
+              offset: Offset(0, (1 - _animation.value) * 1.5),
+              child: Transform.scale(
+                scale: _animation.value,
+                child: Opacity(
+                  opacity: _animation.value.clamp(0.6, 1.0),
+                  child: icon,
+                ),
+              ),
+            );
+            
+          case MoodAnimationType.coldShiver:
+            return Transform.translate(
+              offset: Offset(
+                (_animation.value - 0.975) * 40,
+                (_animation.value - 0.975) * 20,
+              ),
+              child: Transform.scale(
+                scale: _animation.value,
+                child: Opacity(
+                  opacity: _animation.value.clamp(0.8, 1.0),
+                  child: icon,
+                ),
+              ),
+            );
+            
+          case MoodAnimationType.rotate:
+            return Transform.rotate(
+              angle: _animation.value * 2 * 3.14159,
+              child: icon,
+            );
+            
+          case MoodAnimationType.blink:
+            return Transform.scale(
+              scale: _animation.value,
+              child: Opacity(
+                opacity: _animation.value.clamp(0.3, 1.0),
+                child: icon,
+              ),
+            );
+            
+          case MoodAnimationType.none:
+            return icon;
+        }
+      },
+    );
+
+    if (widget.tooltip != null) {
+      return Tooltip(
+        message: widget.tooltip!,
+        preferBelow: false,
+        verticalOffset: 20,
+        waitDuration: const Duration(milliseconds: 500),
+        showDuration: const Duration(seconds: 3),
+        decoration: BoxDecoration(
+          color: Colors.black87,
+          borderRadius: BorderRadius.circular(8),
+        ),
+        textStyle: const TextStyle(
+          fontSize: 11,
+          color: Colors.white,
+        ),
+        child: iconWidget,
+      );
+    }
+    
+    return iconWidget;
+  }
+}\n\n// ====== lib/data/datasources/market_mood_remote_ds.dart ======\n
+// lib/data/datasources/market_mood_remote_ds.dart
+// 🌐 Data Layer: 원격 데이터 소스 (CoinGecko API)
+
+import 'dart:async';
+import '../../core/network/api_client_coingecko.dart';
+import '../../core/utils/logger.dart';
+
+/// 🌐 마켓무드 원격 데이터 소스
+/// Provider 파일 기준으로 필요한 API 호출 담당
+class MarketMoodRemoteDataSource {
+  final CoinGeckoApiClient _apiClient;
+  Timer? _globalDataTimer;
+  StreamController<CoinGeckoGlobalData>? _globalDataController;
+
+  MarketMoodRemoteDataSource(this._apiClient);
+
+  // ═══════════════════════════════════════════════════════════
+  // 📊 글로벌 마켓 데이터 스트림 (30분 주기)
+  // ═══════════════════════════════════════════════════════════
+  
+  /// 글로벌 마켓 데이터 스트림 (Provider에서 요구하는 형태)
+  Stream<CoinGeckoGlobalData> getGlobalMarketDataStream() {
+    // broadcast 스트림으로 변경 (여러 리스너 지원)
+    _globalDataController = StreamController<CoinGeckoGlobalData>.broadcast();
+    
+    Future<void> fetch() async {
+      try {
+        final response = await _apiClient.getGlobalMarketData();
+        final data = response.data;
+        if (_globalDataController != null && !_globalDataController!.isClosed) {
+          _globalDataController!.add(data);
+          log.d('📊 글로벌 마켓 데이터 수신 성공: ${data.totalVolumeUsd.toStringAsFixed(0)}B USD');
+        }
+      } catch (e) {
+        if (_globalDataController != null && !_globalDataController!.isClosed) {
+          _globalDataController!.addError(e);
+          log.e('❌ 글로벌 마켓 데이터 조회 실패: $e');
+        }
+      }
+    }
+
+    // 첫 호출
+    fetch();
+
+    // 30분마다 호출
+    _globalDataTimer = Timer.periodic(const Duration(minutes: 30), (_) => fetch());
+
+    // 스트림 종료 시 타이머 정리
+    _globalDataController!.onCancel = () {
+      _globalDataTimer?.cancel();
+      _globalDataTimer = null;
+      log.d('🔄 글로벌 마켓 데이터 스트림 종료');
+    };
+
+    return _globalDataController!.stream;
+  }
+
+  /// 단일 글로벌 마켓 데이터 조회
+  Future<CoinGeckoGlobalData> getGlobalMarketData() async {
+    try {
+      final response = await _apiClient.getGlobalMarketData();
+      log.d('📊 글로벌 마켓 데이터 조회 성공');
+      return response.data;
+    } catch (e) {
+      log.e('❌ 글로벌 마켓 데이터 조회 실패: $e');
+      rethrow;
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // 💱 환율 데이터
+  // ═══════════════════════════════════════════════════════════
+  
+  /// USD/KRW 환율 조회 (캐시 없는 순수 API 호출)
+  Future<double> getUsdToKrwRate() async {
+    try {
+      final rate = await _apiClient.getUsdToKrwRate();
+      log.d('💱 환율 조회 성공: $rate KRW');
+      return rate;
+    } catch (e) {
+      log.e('❌ 환율 조회 실패: $e');
+      rethrow;
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // 🔧 유틸리티
+  // ═══════════════════════════════════════════════════════════
+  
+  /// API 연결 상태 확인
+  Future<bool> checkApiHealth() async {
+    try {
+      await getGlobalMarketData();
+      log.d('✅ CoinGecko API 연결 정상');
+      return true;
+    } catch (e) {
+      log.w('⚠️ CoinGecko API 연결 실패: $e');
+      return false;
+    }
+  }
+
+  /// 리소스 정리
+  void dispose() {
+    _globalDataTimer?.cancel();
+    _globalDataTimer = null;
+    _globalDataController?.close();
+    _globalDataController = null;
+    log.d('🧹 MarketMoodRemoteDataSource 정리 완료');
+  }
+}\n\n// ====== lib/data/datasources/market_mood_local_ds.dart ======\n
+// lib/data/datasources/market_mood_local_ds.dart
+// 💾 Data Layer: 로컬 데이터 소스 (Hive 기반, DI 패턴)
+
+import 'package:hive_flutter/hive_flutter.dart';
+import '../../core/services/hive_service.dart';
+import '../../core/utils/logger.dart';
+import '../models/market_mood_dto.dart'; // 🔥 TimestampedVolume이 여기 있음
+
+/// 💾 마켓무드 로컬 데이터 소스
+/// HiveService를 통한 볼륨 데이터 저장/조회, 환율 캐싱 (DI 패턴)
+class MarketMoodLocalDataSource {
+  final HiveService _hiveService;
+  
+  static const String _exchangeRateKey = 'exchange_rate';
+  static const String _appStartTimeKey = 'app_start_time';
+
+  MarketMoodLocalDataSource(this._hiveService);
+
+  /// Volume Box 접근
+  Box<TimestampedVolume> get _volumeBox => _hiveService.marketMoodVolumeBox;
+  
+  /// Cache Box 접근 
+  Box get _cacheBox => _hiveService.marketMoodCacheBox;
+
+  // ═══════════════════════════════════════════════════════════
+  // 📈 볼륨 데이터 관리
+  // ═══════════════════════════════════════════════════════════
+
+  /// 볼륨 데이터 추가 (30분 슬롯)
+  Future<void> addVolumeData(TimestampedVolume volume) async {
+    try {
+      // 30분 단위로 정규화된 키 생성
+      final slotKey = _getSlotKey(volume.timestamp);
+      
+      await _volumeBox.put(slotKey, volume);
+      log.d('📈 볼륨 데이터 저장: $slotKey -> ${volume.volumeUsd.toStringAsFixed(0)}B');
+    } catch (e, st) {
+      log.e('📈 볼륨 데이터 저장 실패', e, st);
+      rethrow;
+    }
+  }
+
+  /// N분 전 볼륨 데이터 조회
+  Future<TimestampedVolume?> getVolumeNMinutesAgo(int minutes) async {
+    try {
+      final targetTime = DateTime.now().subtract(Duration(minutes: minutes));
+      final slotKey = _getSlotKey(targetTime);
+      
+      final volume = _volumeBox.get(slotKey);
+      if (volume != null) {
+        log.d('📈 $minutes분 전 볼륨 조회 성공: ${volume.volumeUsd.toStringAsFixed(0)}B');
+      } else {
+        log.d('📈 $minutes분 전 볼륨 데이터 없음');
+      }
+      
+      return volume;
+    } catch (e, st) {
+      log.e('📈 $minutes분 전 볼륨 조회 실패', e, st);
+      return null;
+    }
+  }
+
+  /// 특정 기간의 평균 볼륨 계산
+  Future<double?> getAverageVolume(int days) async {
+    try {
+      final now = DateTime.now();
+      final cutoffTime = now.subtract(Duration(days: days));
+      
+      final volumes = _volumeBox.values
+          .where((volume) => volume.timestamp.isAfter(cutoffTime))
+          .map((volume) => volume.volumeUsd)
+          .toList();
+      
+      if (volumes.isEmpty) {
+        log.d('📊 $days일 평균 볼륨: 데이터 없음');
+        return null;
+      }
+      
+      final average = volumes.reduce((a, b) => a + b) / volumes.length;
+      log.d('📊 $days일 평균 볼륨: ${average.toStringAsFixed(0)}B (${volumes.length}개 데이터)');
+      
+      return average;
+    } catch (e, st) {
+      log.e('📊 $days일 평균 볼륨 계산 실패', e, st);
+      return null;
+    }
+  }
+
+  /// 수집된 데이터 개수 확인
+  Future<int> getCollectedDataCount() async {
+    try {
+      final count = _volumeBox.length;
+      log.d('📊 총 데이터 개수: $count');
+      return count;
+    } catch (e, st) {
+      log.e('📊 데이터 개수 조회 실패', e, st);
+      return 0;
+    }
+  }
+
+  /// 누락된 30분 슬롯 확인 및 보정
+  Future<void> checkAndFillMissingSlots() async {
+    try {
+      final appStartTime = getAppStartTime();
+      final now = DateTime.now();
+      final totalMinutes = now.difference(appStartTime).inMinutes;
+      final expectedSlots = (totalMinutes / 30).floor();
+      
+      log.i('🔄 슬롯 체크: 예상 $expectedSlots개, 실제 ${_volumeBox.length}개');
+      
+      if (_volumeBox.length < expectedSlots) {
+        final missing = expectedSlots - _volumeBox.length;
+        log.w('⚠️ $missing개 슬롯 누락 감지');
+        // 실제 보정 로직은 필요 시 구현
+      }
+    } catch (e, st) {
+      log.e('🔄 슬롯 체크 실패', e, st);
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // 💱 환율 캐싱
+  // ═══════════════════════════════════════════════════════════
+
+  /// 환율 캐시 저장
+  Future<void> cacheExchangeRate(double rate) async {
+    try {
+      await _cacheBox.put(_exchangeRateKey, {
+        'rate': rate,
+        'timestamp': DateTime.now().millisecondsSinceEpoch,
+      });
+      log.d('💱 환율 캐시 저장: $rate KRW');
+    } catch (e, st) {
+      log.e('💱 환율 캐시 저장 실패', e, st);
+      rethrow;
+    }
+  }
+
+  /// 캐시된 환율 조회 (12시간 유효)
+  Future<double?> getCachedExchangeRate() async {
+    try {
+      final cached = _cacheBox.get(_exchangeRateKey);
+      if (cached == null) return null;
+      
+      final timestamp = DateTime.fromMillisecondsSinceEpoch(cached['timestamp']);
+      final rate = cached['rate'] as double;
+      
+      // 12시간 이내인지 확인 (Provider와 동일한 캐시 정책)
+      if (DateTime.now().difference(timestamp).inHours < 12) {
+        log.d('💱 캐시된 환율 사용: $rate KRW');
+        return rate;
+      } else {
+        log.d('💱 캐시된 환율 만료');
+        return null;
+      }
+    } catch (e, st) {
+      log.e('💱 캐시된 환율 조회 실패', e, st);
+      return null;
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // 🕰️ 시간 관리
+  // ═══════════════════════════════════════════════════════════
+
+  /// 앱 시작 시간 조회
+  DateTime getAppStartTime() {
+    try {
+      final cached = _cacheBox.get(_appStartTimeKey);
+      if (cached != null) {
+        return cached as DateTime;
+      }
+      
+      // 최초 실행 시 현재 시간으로 설정
+      final now = DateTime.now();
+      _cacheBox.put(_appStartTimeKey, now);
+      log.i('🕰️ 앱 시작 시간 설정: ${now.toIso8601String()}');
+      return now;
+    } catch (e, st) {
+      log.e('🕰️ 앱 시작 시간 조회 실패', e, st);
+      return DateTime.now(); // fallback
+    }
+  }
+
+  /// 30분 슬롯 키 생성 (정규화)
+  String _getSlotKey(DateTime timestamp) {
+    // 30분 단위로 정규화: 예) 14:23 -> 14:00, 14:47 -> 14:30
+    final normalized = DateTime(
+      timestamp.year,
+      timestamp.month,
+      timestamp.day,
+      timestamp.hour,
+      (timestamp.minute ~/ 30) * 30, // 30분 단위로 내림
+    );
+    
+    return normalized.toIso8601String();
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // 🔧 유틸리티
+  // ═══════════════════════════════════════════════════════════
+
+  /// 디버깅용 정보 반환
+  Map<String, Object> getDebugInfo() {
+    try {
+      final volumeInfo = {
+        'total_count': _volumeBox.length,
+        'box_open': _volumeBox.isOpen,
+        'first_entry': _volumeBox.isNotEmpty 
+            ? _volumeBox.values.first.timestamp.toIso8601String() 
+            : 'none',
+        'last_entry': _volumeBox.isNotEmpty 
+            ? _volumeBox.values.last.timestamp.toIso8601String() 
+            : 'none',
+      };
+      
+      final cacheInfo = {
+        'cache_keys': _cacheBox.keys.toList(),
+        'app_start_time': getAppStartTime().toIso8601String(),
+        'has_exchange_rate': _cacheBox.containsKey(_exchangeRateKey),
+        'box_open': _cacheBox.isOpen,
+      };
+
+      return {
+        'volume_storage': volumeInfo,
+        'cache_storage': cacheInfo,
+        'hive_service': 'injected',
+        'status': 'healthy',
+      };
+    } catch (e) {
+      return {
+        'status': 'error',
+        'error': e.toString(),
+      };
+    }
+  }
+
+  /// 상태 로깅
+  void logStatus() {
+    final info = getDebugInfo();
+    log.i('💾 MarketMoodLocalDataSource 상태: $info');
+  }
+
+  /// 리소스 정리
+  Future<void> dispose() async {
+    try {
+      // HiveService가 Box 관리하므로 여기서는 정리 안함
+      log.i('🧹 MarketMoodLocalDataSource 정리 완료');
+    } catch (e, st) {
+      log.e('🧹 리소스 정리 중 오류 발생', e, st);
+    }
+  }
+
+  /// 개발용: 모든 데이터 삭제
+  Future<void> clearAllData() async {
+    try {
+      await _volumeBox.clear();
+      await _cacheBox.clear();
+      log.w('🗑️ 모든 로컬 데이터 삭제 완료');
+    } catch (e, st) {
+      log.e('🗑️ 데이터 삭제 실패', e, st);
+      rethrow;
+    }
+  }
+
+  /// 개발용: 최근 N개 데이터만 유지
+  Future<void> trimOldData({int keepCount = 100}) async {
+    try {
+      if (_volumeBox.length <= keepCount) return;
+
+      final allEntries = _volumeBox.values.toList()
+        ..sort((a, b) => b.timestamp.compareTo(a.timestamp)); // 최신순
+
+      final toKeep = allEntries.take(keepCount).toList();
+      
+      await _volumeBox.clear();
+      for (final volume in toKeep) {
+        await addVolumeData(volume);
+      }
+      
+      log.i('🧹 오래된 데이터 정리: ${allEntries.length} -> $keepCount개');
+    } catch (e, st) {
+      log.e('🧹 데이터 정리 실패', e, st);
+      rethrow;
+    }
+  }
+}\n\n// ====== lib/data/repositories/market_mood_repository_impl.dart ======\n
+// lib/data/repositories/market_mood_repository_impl.dart
+// 🏗️ Data Layer: Repository 구현체 (Domain 인터페이스 완전 매칭)
+
+import 'dart:async';
+import '../../core/utils/logger.dart';
+import '../../domain/entities/market_mood.dart';
+import '../../domain/repositories/market_mood_repository.dart';
+import '../datasources/market_mood_local_ds.dart';
+import '../datasources/market_mood_remote_ds.dart';
+import '../models/market_mood_dto.dart';
+
+/// 🏗️ 마켓무드 Repository 구현체
+/// Remote + Local DataSource를 통합하여 Domain Entity로 변환하여 제공
+class MarketMoodRepositoryImpl implements MarketMoodRepository {
+  final MarketMoodRemoteDataSource _remoteDataSource;
+  final MarketMoodLocalDataSource _localDataSource;
+
+  // 스트림 컨트롤러 (브로드캐스트)
+  StreamController<MarketMoodData>? _marketDataController;
+  StreamSubscription? _remoteSubscription;
+
+  MarketMoodRepositoryImpl(this._remoteDataSource, this._localDataSource);
+
+  // ═══════════════════════════════════════════════════════════
+  // 🌐 원격 데이터 (CoinGecko API)
+  // ═══════════════════════════════════════════════════════════
+
+  @override
+  Stream<MarketMoodData> getMarketDataStream() {
+    // 이미 활성화된 스트림이 있으면 재사용
+    if (_marketDataController != null && !_marketDataController!.isClosed) {
+      return _marketDataController!.stream;
+    }
+
+    // 새로운 브로드캐스트 스트림 생성
+    _marketDataController = StreamController<MarketMoodData>.broadcast();
+
+    // 원격 데이터 스트림 구독
+    _remoteSubscription?.cancel(); // 기존 구독 정리
+    _remoteSubscription = _remoteDataSource.getGlobalMarketDataStream().listen(
+      (globalData) async {
+        try {
+          // RemoteDS에서 받은 CoinGeckoGlobalData를 MarketMoodData Entity로 변환
+          final marketData = MarketMoodData(
+            totalMarketCapUsd: globalData.totalMarketCapUsd,
+            totalVolumeUsd: globalData.totalVolumeUsd,
+            btcDominance: globalData.btcDominance,
+            marketCapChange24h: globalData.marketCapChangePercentage24hUsd,
+            updatedAt: DateTime.fromMillisecondsSinceEpoch(globalData.updatedAt * 1000),
+          );
+          
+          // 로컬에 볼륨 데이터 저장 (Entity -> DTO 변환)
+          final volumeDto = TimestampedVolume(
+            timestamp: marketData.updatedAt,
+            volumeUsd: marketData.totalVolumeUsd,
+          );
+          await _localDataSource.addVolumeData(volumeDto);
+          
+          // 스트림에 Domain Entity 전달
+          if (_marketDataController != null && !_marketDataController!.isClosed) {
+            _marketDataController!.add(marketData);
+          }
+          
+          log.d('📊 마켓 데이터 처리 완료: ${marketData.totalVolumeUsd.toStringAsFixed(0)}B USD');
+        } catch (e, st) {
+          log.e('📊 마켓 데이터 처리 실패', e, st);
+          if (_marketDataController != null && !_marketDataController!.isClosed) {
+            _marketDataController!.addError(e, st);
+          }
+        }
+      },
+      onError: (error, stackTrace) {
+        log.e('🌐 원격 데이터 스트림 오류', error, stackTrace);
+        if (_marketDataController != null && !_marketDataController!.isClosed) {
+          _marketDataController!.addError(error, stackTrace);
+        }
+      },
+    );
+
+    return _marketDataController!.stream;
+  }
+
+  @override
+  Future<MarketMoodData?> getCurrentMarketData() async {
+    try {
+      final data = await _remoteDataSource.getGlobalMarketData();
+      
+      final marketData = MarketMoodData(
+        totalMarketCapUsd: data.totalMarketCapUsd,
+        totalVolumeUsd: data.totalVolumeUsd,
+        btcDominance: data.btcDominance,
+        marketCapChange24h: data.marketCapChangePercentage24hUsd,
+        updatedAt: DateTime.fromMillisecondsSinceEpoch(data.updatedAt * 1000),
+      );
+      
+      log.d('📊 현재 마켓 데이터 조회 성공');
+      return marketData;
+    } catch (e, st) {
+      log.e('📊 현재 마켓 데이터 조회 실패', e, st);
+      return null;
+    }
+  }
+
+  @override
+  Future<double> getExchangeRate() async {
+    try {
+      // 로컬 캐시 먼저 확인
+      final cachedRate = await _localDataSource.getCachedExchangeRate();
+      if (cachedRate != null) {
+        log.d('💱 캐시된 환율 사용: $cachedRate KRW');
+        return cachedRate;
+      }
+
+      // 원격에서 환율 조회
+      final rate = await _remoteDataSource.getUsdToKrwRate();
+      
+      // 로컬에 캐시 저장
+      await _localDataSource.cacheExchangeRate(rate);
+      
+      log.d('💱 원격 환율 조회 성공: $rate KRW');
+      return rate;
+    } catch (e, st) {
+      log.e('💱 환율 조회 실패, 기본값 사용', e, st);
+      return 1400.0;
+    }
+  }
+
+  @override
+  Future<void> refreshExchangeRate() async {
+    try {
+      log.i('💱 환율 수동 새로고침 시작');
+      
+      final rate = await _remoteDataSource.getUsdToKrwRate();
+      await _localDataSource.cacheExchangeRate(rate);
+      
+      log.i('💱 환율 새로고침 완료: $rate KRW');
+    } catch (e, st) {
+      log.e('💱 환율 새로고침 실패', e, st);
+      rethrow;
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // 💾 로컬 데이터 (볼륨 버퍼) - Domain Entity 사용
+  // ═══════════════════════════════════════════════════════════
+
+  @override
+  Future<void> addVolumeData(VolumeData volume) async {
+    try {
+      // Domain Entity -> Data DTO 변환
+      final volumeDto = TimestampedVolume.fromEntity(volume);
+      await _localDataSource.addVolumeData(volumeDto);
+      
+      log.d('📈 볼륨 데이터 추가 완료: ${volume.volumeUsd.toStringAsFixed(0)}B');
+    } catch (e, st) {
+      log.e('📈 볼륨 데이터 추가 실패', e, st);
+      rethrow;
+    }
+  }
+
+  @override
+  Future<VolumeData?> getVolumeNMinutesAgo(int minutes) async {
+    try {
+      final volumeDto = await _localDataSource.getVolumeNMinutesAgo(minutes);
+      if (volumeDto == null) return null;
+      
+      // Data DTO -> Domain Entity 변환
+      final volumeEntity = volumeDto.toEntity();
+      
+      log.d('📈 $minutes분 전 볼륨 조회 성공: ${volumeEntity.volumeUsd.toStringAsFixed(0)}B');
+      return volumeEntity;
+    } catch (e, st) {
+      log.e('📈 $minutes분 전 볼륨 조회 실패', e, st);
+      return null;
+    }
+  }
+
+  @override
+  Future<double?> getAverageVolume(int days) async {
+    try {
+      final average = await _localDataSource.getAverageVolume(days);
+      if (average != null) {
+        log.d('📊 $days일 평균 볼륨 조회 성공: ${average.toStringAsFixed(0)}B');
+      }
+      return average;
+    } catch (e, st) {
+      log.e('📊 $days일 평균 볼륨 조회 실패', e, st);
+      return null;
+    }
+  }
+
+  @override
+  Future<int> getCollectedDataCount() async {
+    try {
+      final count = await _localDataSource.getCollectedDataCount();
+      log.d('📊 수집된 데이터 개수: $count');
+      return count;
+    } catch (e, st) {
+      log.e('📊 데이터 개수 조회 실패', e, st);
+      return 0;
+    }
+  }
+
+  @override
+  DateTime getAppStartTime() {
+    try {
+      final startTime = _localDataSource.getAppStartTime();
+      log.d('⏰ 앱 시작 시간: ${startTime.toIso8601String()}');
+      return startTime;
+    } catch (e, st) {
+      log.e('⏰ 앱 시작 시간 조회 실패', e, st);
+      return DateTime.now();
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // 🧹 관리 기능
+  // ═══════════════════════════════════════════════════════════
+
+  @override
+  Future<void> syncMissingData() async {
+    try {
+      log.i('🔄 누락 데이터 동기화 시작');
+      
+      await _localDataSource.checkAndFillMissingSlots();
+      
+      log.i('🔄 누락 데이터 동기화 완료');
+    } catch (e, st) {
+      log.e('🔄 누락 데이터 동기화 실패', e, st);
+      rethrow;
+    }
+  }
+
+  @override
+  Future<void> clearOldData() async {
+    try {
+      log.i('🧹 오래된 데이터 정리 시작');
+      
+      // LocalDS의 trimOldData 활용
+      await _localDataSource.trimOldData(keepCount: 336); // 7일 * 48슬롯/일
+      
+      log.i('🧹 오래된 데이터 정리 완료');
+    } catch (e, st) {
+      log.e('🧹 데이터 정리 실패', e, st);
+      rethrow;
+    }
+  }
+
+  @override
+  Future<Map<String, dynamic>> getSystemHealth() async {
+    try {
+      final localInfo = _localDataSource.getDebugInfo();
+      final remoteHealth = await _remoteDataSource.checkApiHealth();
+      final dataCount = await getCollectedDataCount();
+      final appStartTime = getAppStartTime();
+      final elapsedMinutes = DateTime.now().difference(appStartTime).inMinutes;
+
+      return {
+        'status': 'healthy',
+        'local_storage': localInfo,
+        'remote_api': {'healthy': remoteHealth, 'status': remoteHealth ? 'ok' : 'error'},
+        'data_count': dataCount,
+        'app_start_time': appStartTime.toIso8601String(),
+        'elapsed_minutes': elapsedMinutes,
+        'stream_active': _marketDataController != null && !_marketDataController!.isClosed,
+        'subscription_active': _remoteSubscription != null,
+        'last_check': DateTime.now().toIso8601String(),
+      };
+    } catch (e, st) {
+      log.e('🔍 시스템 상태 확인 실패', e, st);
+      return {
+        'status': 'error',
+        'error': e.toString(),
+        'last_check': DateTime.now().toIso8601String(),
+      };
+    }
+  }
+
+  @override
+  Future<void> logCurrentStatus() async {
+    try {
+      final health = await getSystemHealth();
+      _localDataSource.logStatus();
+      log.i('📊 마켓무드 시스템 상태: $health');
+    } catch (e, st) {
+      log.e('📊 상태 로깅 실패', e, st);
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // 🛠️ 개발/테스트용 기능
+  // ═══════════════════════════════════════════════════════════
+
+  @override
+  Future<void> injectTestVolumeData(List<VolumeData> testData) async {
+    if (testData.isEmpty) return;
+    
+    try {
+      log.i('🧪 테스트 데이터 ${testData.length}개 주입 시작');
+      
+      for (final volume in testData) {
+        await addVolumeData(volume); // Domain Entity 사용
+      }
+      
+      log.i('🧪 테스트 데이터 주입 완료');
+    } catch (e, st) {
+      log.e('🧪 테스트 데이터 주입 실패', e, st);
+      rethrow;
+    }
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // 🧹 리소스 정리
+  // ═══════════════════════════════════════════════════════════
+
+  /// 리소스 정리 (앱 종료 시 호출)
+  Future<void> dispose() async {
+    try {
+      log.i('🧹 MarketMoodRepository 리소스 정리 시작');
+      
+      // 스트림 구독 정리
+      await _remoteSubscription?.cancel();
+      _remoteSubscription = null;
+      
+      // 스트림 컨트롤러 정리
+      if (_marketDataController != null && !_marketDataController!.isClosed) {
+        await _marketDataController!.close();
+      }
+      _marketDataController = null;
+      
+      // DataSource 정리
+      _remoteDataSource.dispose();
+      await _localDataSource.dispose();
+      
+      log.i('🧹 MarketMoodRepository 리소스 정리 완료');
+    } catch (e, st) {
+      log.e('🧹 리소스 정리 중 오류 발생', e, st);
+    }
+  }
+
+  /// 개발용: 스트림 강제 재시작
+  Future<void> restartStream() async {
+    try {
+      log.i('🔄 마켓 데이터 스트림 재시작');
+      
+      // 기존 스트림 정리
+      await _remoteSubscription?.cancel();
+      if (_marketDataController != null && !_marketDataController!.isClosed) {
+        await _marketDataController!.close();
+      }
+      
+      // 새로운 스트림 시작
+      _marketDataController = null;
+      getMarketDataStream(); // 새로운 스트림 생성
+      
+      log.i('🔄 스트림 재시작 완료');
+    } catch (e, st) {
+      log.e('🔄 스트림 재시작 실패', e, st);
+      rethrow;
+    }
+  }
+}\n\n// ====== lib/data/models/market_mood_model.dart ======\n
+\n\n// ====== lib/data/models/market_mood_dto.g.dart ======\n
+// GENERATED CODE - DO NOT MODIFY BY HAND
+
+part of 'market_mood_dto.dart';
+
+// **************************************************************************
+// TypeAdapterGenerator
+// **************************************************************************
+
+class TimestampedVolumeAdapter extends TypeAdapter<TimestampedVolume> {
+  @override
+  final int typeId = 1;
+
+  @override
+  TimestampedVolume read(BinaryReader reader) {
+    final numOfFields = reader.readByte();
+    final fields = <int, dynamic>{
+      for (int i = 0; i < numOfFields; i++) reader.readByte(): reader.read(),
+    };
+    return TimestampedVolume(
+      timestamp: fields[0] as DateTime,
+      volumeUsd: fields[1] as double,
+    );
+  }
+
+  @override
+  void write(BinaryWriter writer, TimestampedVolume obj) {
+    writer
+      ..writeByte(2)
+      ..writeByte(0)
+      ..write(obj.timestamp)
+      ..writeByte(1)
+      ..write(obj.volumeUsd);
+  }
+
+  @override
+  int get hashCode => typeId.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is TimestampedVolumeAdapter &&
+          runtimeType == other.runtimeType &&
+          typeId == other.typeId;
+}
+
+class CoinGeckoGlobalDataDtoAdapter
+    extends TypeAdapter<CoinGeckoGlobalDataDto> {
+  @override
+  final int typeId = 2;
+
+  @override
+  CoinGeckoGlobalDataDto read(BinaryReader reader) {
+    final numOfFields = reader.readByte();
+    final fields = <int, dynamic>{
+      for (int i = 0; i < numOfFields; i++) reader.readByte(): reader.read(),
+    };
+    return CoinGeckoGlobalDataDto(
+      totalMarketCapUsd: fields[0] as double,
+      totalVolumeUsd: fields[1] as double,
+      btcDominance: fields[2] as double,
+      marketCapChangePercentage24hUsd: fields[3] as double,
+      updatedAt: fields[4] as int,
+    );
+  }
+
+  @override
+  void write(BinaryWriter writer, CoinGeckoGlobalDataDto obj) {
+    writer
+      ..writeByte(5)
+      ..writeByte(0)
+      ..write(obj.totalMarketCapUsd)
+      ..writeByte(1)
+      ..write(obj.totalVolumeUsd)
+      ..writeByte(2)
+      ..write(obj.btcDominance)
+      ..writeByte(3)
+      ..write(obj.marketCapChangePercentage24hUsd)
+      ..writeByte(4)
+      ..write(obj.updatedAt);
+  }
+
+  @override
+  int get hashCode => typeId.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is CoinGeckoGlobalDataDtoAdapter &&
+          runtimeType == other.runtimeType &&
+          typeId == other.typeId;
+}
+
+class CoinGeckoGlobalResponseDtoAdapter
+    extends TypeAdapter<CoinGeckoGlobalResponseDto> {
+  @override
+  final int typeId = 3;
+
+  @override
+  CoinGeckoGlobalResponseDto read(BinaryReader reader) {
+    final numOfFields = reader.readByte();
+    final fields = <int, dynamic>{
+      for (int i = 0; i < numOfFields; i++) reader.readByte(): reader.read(),
+    };
+    return CoinGeckoGlobalResponseDto(
+      data: fields[0] as CoinGeckoGlobalDataDto,
+    );
+  }
+
+  @override
+  void write(BinaryWriter writer, CoinGeckoGlobalResponseDto obj) {
+    writer
+      ..writeByte(1)
+      ..writeByte(0)
+      ..write(obj.data);
+  }
+
+  @override
+  int get hashCode => typeId.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is CoinGeckoGlobalResponseDtoAdapter &&
+          runtimeType == other.runtimeType &&
+          typeId == other.typeId;
+}
+\n\n// ====== lib/data/models/market_mood_dto.dart ======\n
+// lib/data/models/market_mood_dto.dart
+// 🌐 Data Layer: 통합 DTO 모델 (Trade 스타일)
+
+import 'dart:convert';
+import 'package:hive/hive.dart';
+import '../../core/utils/date_time.dart'; // DateTime extension
+import '../../core/utils/logger.dart';
+import '../../domain/entities/market_mood.dart';
+
+part 'market_mood_dto.g.dart';
+
+/// 📈 인트라데이 볼륨 데이터 (30분 단위) - Hive 모델
+@HiveType(typeId: 1) // TradeDto가 typeId: 0 사용하므로 1 사용
+class TimestampedVolume extends HiveObject {
+  @HiveField(0)
+  final DateTime timestamp;
+
+  @HiveField(1)
+  final double volumeUsd;
+
+  TimestampedVolume({
+    required this.timestamp,
+    required this.volumeUsd,
+  });
+
+  /// Domain Entity로 변환
+  VolumeData toEntity() => VolumeData(
+    timestamp: timestamp,
+    volumeUsd: volumeUsd,
+  );
+
+  /// Domain Entity에서 생성
+  factory TimestampedVolume.fromEntity(VolumeData entity) => TimestampedVolume(
+    timestamp: entity.timestamp,
+    volumeUsd: entity.volumeUsd,
+  );
+
+  /// JSON 직렬화용 맵 변환
+  Map<String, dynamic> toMap() => {
+    'timestamp': timestamp.toIso8601String(),
+    'volumeUsd': volumeUsd,
+  };
+
+  /// JSON 문자열 직렬화
+  String toJson() => json.encode(toMap());
+
+  /// JSON 파싱
+  static TimestampedVolume? tryParse(Map<String, dynamic> m) {
+    try {
+      if (m.isEmpty) return null;
+
+      final timestampStr = m['timestamp']?.toString() ?? '';
+      final volumeUsd = (m['volumeUsd'] as num?)?.toDouble() ?? 0.0;
+
+      if (timestampStr.isEmpty) return null;
+
+      return TimestampedVolume(
+        timestamp: DateTime.parse(timestampStr),
+        volumeUsd: volumeUsd,
+      );
+    } catch (e) {
+      log.w('TimestampedVolume.tryParse error: $e');
+      return null;
+    }
+  }
+
+  /// JSON 문자열로부터 객체 생성
+  factory TimestampedVolume.fromJson(String src) =>
+      tryParse(json.decode(src) as Map<String, dynamic>) ??
+      TimestampedVolume(
+        timestamp: DateTime.now(),
+        volumeUsd: 0.0,
+      );
+
+  /// DateTime extension 활용
+  String get formattedTime => timestamp.yyyyMMddhhmm();
+  String get timeAgoText => timestamp.timeAgo();
+  String get shortTime => timestamp.hhmmss();
+
+  @override
+  String toString() => 'TimestampedVolume($formattedTime, ${volumeUsd.toStringAsFixed(2)}B)';
+}
+
+/// 🌐 CoinGecko 글로벌 마켓 데이터 DTO
+@HiveType(typeId: 2)
+class CoinGeckoGlobalDataDto extends HiveObject {
+  @HiveField(0)
+  final double totalMarketCapUsd;
+
+  @HiveField(1)
+  final double totalVolumeUsd;
+
+  @HiveField(2)
+  final double btcDominance;
+
+  @HiveField(3)
+  final double marketCapChangePercentage24hUsd;
+
+  @HiveField(4)
+  final int updatedAt;
+
+  CoinGeckoGlobalDataDto({
+    required this.totalMarketCapUsd,
+    required this.totalVolumeUsd,
+    required this.btcDominance,
+    required this.marketCapChangePercentage24hUsd,
+    required this.updatedAt,
+  });
+
+  /// Domain Entity로 변환
+  MarketMoodData toEntity() => MarketMoodData(
+    totalMarketCapUsd: totalMarketCapUsd,
+    totalVolumeUsd: totalVolumeUsd,
+    btcDominance: btcDominance,
+    marketCapChange24h: marketCapChangePercentage24hUsd,
+    updatedAt: DateTime.fromMillisecondsSinceEpoch(updatedAt * 1000),
+  );
+
+  /// JSON 직렬화용 맵 변환
+  Map<String, dynamic> toMap() => {
+    'total_market_cap_usd': totalMarketCapUsd,
+    'total_volume_usd': totalVolumeUsd,
+    'btc_dominance': btcDominance,
+    'market_cap_change_percentage_24h_usd': marketCapChangePercentage24hUsd,
+    'updated_at': updatedAt,
+  };
+
+  /// JSON 문자열 직렬화
+  String toJson() => json.encode(toMap());
+
+  /// JSON 파싱 (CoinGecko API 응답 형태)
+  static CoinGeckoGlobalDataDto? tryParse(Map<String, dynamic> m) {
+    try {
+      if (m.isEmpty) return null;
+
+      double parseDouble(dynamic v) {
+        if (v is num) return v.toDouble();
+        final str = v?.toString().trim() ?? '';
+        return str.isNotEmpty ? double.tryParse(str) ?? 0.0 : 0.0;
+      }
+
+      int parseInt(dynamic v) {
+        if (v is int) return v;
+        final str = v?.toString().trim() ?? '';
+        return str.isNotEmpty ? int.tryParse(str) ?? DateTime.now().millisecondsSinceEpoch ~/ 1000
+            : DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      }
+
+      // CoinGecko API 구조: nested maps
+      final totalMarketCap = m['total_market_cap'] as Map<String, dynamic>?;
+      final totalVolume = m['total_volume'] as Map<String, dynamic>?;
+      final marketCapPercentage = m['market_cap_percentage'] as Map<String, dynamic>?;
+
+      return CoinGeckoGlobalDataDto(
+        totalMarketCapUsd: parseDouble(totalMarketCap?['usd']),
+        totalVolumeUsd: parseDouble(totalVolume?['usd']),
+        btcDominance: parseDouble(marketCapPercentage?['btc']),
+        marketCapChangePercentage24hUsd: parseDouble(m['market_cap_change_percentage_24h_usd']),
+        updatedAt: parseInt(m['updated_at']),
+      );
+    } catch (e) {
+      log.w('CoinGeckoGlobalDataDto.tryParse error: $e');
+      return null;
+    }
+  }
+
+  /// JSON 문자열로부터 객체 생성
+  factory CoinGeckoGlobalDataDto.fromJson(String src) =>
+      tryParse(json.decode(src) as Map<String, dynamic>) ??
+      CoinGeckoGlobalDataDto(
+        totalMarketCapUsd: 0.0,
+        totalVolumeUsd: 0.0,
+        btcDominance: 0.0,
+        marketCapChangePercentage24hUsd: 0.0,
+        updatedAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+      );
+
+  @override
+  String toString() => 'CoinGeckoGlobalDataDto(volume: ${totalVolumeUsd.toStringAsFixed(0)}B USD)';
+}
+
+/// 🌐 CoinGecko 글로벌 마켓 응답 래퍼 DTO
+@HiveType(typeId: 3)
+class CoinGeckoGlobalResponseDto extends HiveObject {
+  @HiveField(0)
+  final CoinGeckoGlobalDataDto data;
+
+  CoinGeckoGlobalResponseDto({
+    required this.data,
+  });
+
+  /// JSON 직렬화용 맵 변환
+  Map<String, dynamic> toMap() => {
+    'data': data.toMap(),
+  };
+
+  /// JSON 문자열 직렬화
+  String toJson() => json.encode(toMap());
+
+  /// JSON 파싱
+  static CoinGeckoGlobalResponseDto? tryParse(Map<String, dynamic> m) {
+    try {
+      if (m.isEmpty) return null;
+
+      final dataMap = m['data'] as Map<String, dynamic>?;
+      if (dataMap == null) return null;
+
+      final data = CoinGeckoGlobalDataDto.tryParse(dataMap);
+      if (data == null) return null;
+
+      return CoinGeckoGlobalResponseDto(data: data);
+    } catch (e) {
+      log.w('CoinGeckoGlobalResponseDto.tryParse error: $e');
+      return null;
+    }
+  }
+
+  /// JSON 문자열로부터 객체 생성
+  factory CoinGeckoGlobalResponseDto.fromJson(String src) =>
+      tryParse(json.decode(src) as Map<String, dynamic>) ??
+      CoinGeckoGlobalResponseDto(
+        data: CoinGeckoGlobalDataDto(
+          totalMarketCapUsd: 0.0,
+          totalVolumeUsd: 0.0,
+          btcDominance: 0.0,
+          marketCapChangePercentage24hUsd: 0.0,
+          updatedAt: DateTime.now().millisecondsSinceEpoch ~/ 1000,
+        ),
+      );
+
+  @override
+  String toString() => 'CoinGeckoGlobalResponseDto(data: $data)';
+}\n\n// ====== lib/domain/repositories/market_mood_repository.dart ======\n
+// lib/domain/repositories/market_mood_repository.dart
+// 🎯 Domain Layer: Repository 인터페이스 (클린 아키텍처 준수)
+
+import '../entities/market_mood.dart';
+
+/// 📊 마켓무드 저장소 인터페이스
+/// Data Layer에서 구현해야 할 계약을 정의 (Domain → Data 의존성 제거)
+abstract class MarketMoodRepository {
+  // ═══════════════════════════════════════════════════════════
+  // 📡 원격 데이터 (CoinGecko API)
+  // ═══════════════════════════════════════════════════════════
+  
+  /// 글로벌 마켓 데이터 스트림 (30분 주기)
+  Stream<MarketMoodData> getMarketDataStream();
+  
+  /// 현재 마켓 데이터 한 번 조회
+  Future<MarketMoodData?> getCurrentMarketData();
+  
+  /// 현재 USD/KRW 환율 조회 (캐시 포함)
+  Future<double> getExchangeRate();
+  
+  /// 환율 수동 새로고침
+  Future<void> refreshExchangeRate();
+  
+  // ═══════════════════════════════════════════════════════════
+  // 💾 로컬 데이터 (Hive 볼륨 버퍼)
+  // ═══════════════════════════════════════════════════════════
+  
+  /// 볼륨 데이터 추가 (30분마다)
+  Future<void> addVolumeData(VolumeData volume);
+  
+  /// N분 전 볼륨 데이터 조회
+  Future<VolumeData?> getVolumeNMinutesAgo(int minutes);
+  
+  /// 특정 기간의 평균 볼륨 계산
+  Future<double?> getAverageVolume(int days);
+  
+  /// 수집된 데이터 개수 확인
+  Future<int> getCollectedDataCount();
+  
+  /// 앱 시작 시간 조회
+  DateTime getAppStartTime();
+  
+  // ═══════════════════════════════════════════════════════════
+  // 🧹 관리 기능
+  // ═══════════════════════════════════════════════════════════
+  
+  /// 백그라운드 복귀 시 누락된 슬롯 보정
+  Future<void> syncMissingData();
+  
+  /// 오래된 데이터 정리
+  Future<void> clearOldData();
+  
+  /// 시스템 헬스체크
+  Future<Map<String, dynamic>> getSystemHealth();
+  
+  /// 현재 상태 로깅
+  Future<void> logCurrentStatus();
+  
+  // ═══════════════════════════════════════════════════════════
+  // 🛠️ 개발/테스트용 기능
+  // ═══════════════════════════════════════════════════════════
+  
+  /// 테스트 데이터 주입
+  Future<void> injectTestVolumeData(List<VolumeData> testData);
+}\n\n// ====== lib/domain/usecases/market_mood_usecase.dart ======\n
+// lib/domain/usecases/market_mood_usecase.dart
+// 🎯 Domain Layer: 비즈니스 로직 (순수 계산 알고리즘)
+
+import 'dart:math';
+import '../entities/market_mood.dart';
+import '../repositories/market_mood_repository.dart';
+
+/// 💰 마켓 무드 계산기 (순수 비즈니스 로직)
+class MarketMoodCalculator {
+  static MarketMood calculateMoodByComparison(double current, double previous) {
+    if (previous <= 0) return MarketMood.sideways;
+    final changePercent = ((current - previous) / previous) * 100;
+    
+    if (changePercent >= 15) return MarketMood.bull;
+    if (changePercent >= 5) return MarketMood.weakBull;
+    if (changePercent >= -5) return MarketMood.sideways;
+    if (changePercent >= -15) return MarketMood.bear;
+    return MarketMood.deepBear;
+  }
+
+  static MarketMood calculateMoodByAbsolute(double volumeUsd) {
+    if (volumeUsd >= 150e9) return MarketMood.bull;
+    if (volumeUsd >= 100e9) return MarketMood.weakBull;
+    if (volumeUsd >= 70e9) return MarketMood.sideways;
+    if (volumeUsd >= 50e9) return MarketMood.bear;
+    return MarketMood.deepBear;
+  }
+}
+
+/// 🧮 볼륨 비교 계산기 (순수 계산 로직)
+class VolumeComparator {
+  final MarketMoodRepository _repository;
+
+  VolumeComparator(this._repository);
+
+  double _calculateChangePercent(double current, double previous) {
+    if (previous <= 0) return 0.0;
+    return ((current - previous) / previous) * 100;
+  }
+
+  /// 진행률 계산 (첫 주기는 targetMinutes, 이후 순환)
+  double _calculateProgress(int targetMinutes) {
+    final elapsed = DateTime.now().difference(_repository.getAppStartTime()).inMinutes;
+    if (elapsed < targetMinutes) {
+      return min(elapsed / targetMinutes, 1.0);
+    }
+    final cycleElapsed = (elapsed - targetMinutes) % targetMinutes;
+    return cycleElapsed / targetMinutes;
+  }
+
+  /// 장기 비교 진행률 계산
+  double _calculateLongTermProgress(int targetMinutes) {
+    final elapsed = DateTime.now().difference(_repository.getAppStartTime()).inMinutes;
+    return min(elapsed / targetMinutes, 1.0);
+  }
+
+  Future<ComparisonResult> _compareGeneric({
+    required double currentVolume,
+    required int targetMinutes,
+    required bool isLongTermAverage,
+    required int daysForAverage,
+  }) async {
+    final elapsed = DateTime.now().difference(_repository.getAppStartTime()).inMinutes;
+
+    // 장기 평균 비교(예: 3일, 7일)
+    if (isLongTermAverage) {
+      if (elapsed < targetMinutes) {
+        final prog = _calculateLongTermProgress(targetMinutes);
+        return ComparisonResult.collecting(prog);
+      }
+      final average = await _repository.getAverageVolume(daysForAverage);
+      if (average == null) {
+        return ComparisonResult.unavailable('샘플 부족');
+      }
+      final change = _calculateChangePercent(currentVolume, average);
+      return ComparisonResult.ready(change);
+    }
+
+    // 단기 비교(예: 30분, 1시간, 2시간, 4시간, 8시간, 12시간, 24시간)
+    if (elapsed < targetMinutes * 1) {
+      final prog = _calculateProgress(targetMinutes);
+      return ComparisonResult.collecting(prog);
+    }
+    final past = await _repository.getVolumeNMinutesAgo(targetMinutes);
+    if (past == null) {
+      final prog = _calculateProgress(targetMinutes);
+      return ComparisonResult.collecting(prog);
+    }
+    final change = _calculateChangePercent(currentVolume, past.volumeUsd);
+    return ComparisonResult.ready(change);
+  }
+
+  Future<ComparisonResult> compare30Minutes(double currentVolume) =>
+      _compareGeneric(
+        currentVolume: currentVolume,
+        targetMinutes: 30,
+        isLongTermAverage: false,
+        daysForAverage: 0,
+      );
+
+  Future<ComparisonResult> compare1Hour(double currentVolume) =>
+      _compareGeneric(
+        currentVolume: currentVolume,
+        targetMinutes: 60,
+        isLongTermAverage: false,
+        daysForAverage: 0,
+      );
+
+  Future<ComparisonResult> compare2Hours(double currentVolume) =>
+      _compareGeneric(
+        currentVolume: currentVolume,
+        targetMinutes: 120,
+        isLongTermAverage: false,
+        daysForAverage: 0,
+      );
+
+  Future<ComparisonResult> compare4Hours(double currentVolume) =>
+      _compareGeneric(
+        currentVolume: currentVolume,
+        targetMinutes: 240,
+        isLongTermAverage: false,
+        daysForAverage: 0,
+      );
+
+  Future<ComparisonResult> compare8Hours(double currentVolume) =>
+      _compareGeneric(
+        currentVolume: currentVolume,
+        targetMinutes: 480,
+        isLongTermAverage: false,
+        daysForAverage: 0,
+      );
+
+  Future<ComparisonResult> compare12Hours(double currentVolume) =>
+      _compareGeneric(
+        currentVolume: currentVolume,
+        targetMinutes: 720,
+        isLongTermAverage: false,
+        daysForAverage: 0,
+      );
+
+  Future<ComparisonResult> compare24Hours(double currentVolume) =>
+      _compareGeneric(
+        currentVolume: currentVolume,
+        targetMinutes: 1440,
+        isLongTermAverage: false,
+        daysForAverage: 0,
+      );
+
+  Future<ComparisonResult> compare3DayAverage(double currentVolume) =>
+      _compareGeneric(
+        currentVolume: currentVolume,
+        targetMinutes: 4320, // 3일 = 4320분
+        isLongTermAverage: true,
+        daysForAverage: 3,
+      );
+
+  Future<ComparisonResult> compareWeeklyAverage(double currentVolume) =>
+      _compareGeneric(
+        currentVolume: currentVolume,
+        targetMinutes: 10080, // 7일 = 10080분
+        isLongTermAverage: true,
+        daysForAverage: 7,
+      );
+
+  /// 전체 비교 데이터 계산
+  Future<ComparisonData> calculateAll(double currentVolume) async {
+    return ComparisonData(
+      thirtyMin: await compare30Minutes(currentVolume),
+      oneHour: await compare1Hour(currentVolume),
+      twoHour: await compare2Hours(currentVolume),
+      fourHour: await compare4Hours(currentVolume),
+      eightHour: await compare8Hours(currentVolume),
+      twelveHour: await compare12Hours(currentVolume),
+      twentyFourHour: await compare24Hours(currentVolume),
+      threeDayAverage: await compare3DayAverage(currentVolume),
+      weeklyAverage: await compareWeeklyAverage(currentVolume),
+    );
+  }
+}
+
+/// 🎯 마켓무드 UseCase (전체 비즈니스 로직 조합) - Provider와 매칭
+class MarketMoodUsecase {
+  final MarketMoodRepository _repository;
+  final VolumeComparator _comparator;
+
+  MarketMoodUsecase(this._repository) : _comparator = VolumeComparator(_repository);
+
+  /// 볼륨 데이터 추가 (Provider에서 호출)
+  Future<void> addVolumeData(double volumeUsd) async {
+    final volumeData = VolumeData(
+      timestamp: DateTime.now(),
+      volumeUsd: volumeUsd,
+    );
+    await _repository.addVolumeData(volumeData);
+  }
+
+  /// 현재 마켓무드 계산 (Provider에서 호출)
+  Future<MarketMood> calculateCurrentMood(double currentVolume) async {
+    final thirtyMinAgo = await _repository.getVolumeNMinutesAgo(30);
+    if (thirtyMinAgo != null) {
+      return MarketMoodCalculator.calculateMoodByComparison(
+        currentVolume, 
+        thirtyMinAgo.volumeUsd
+      );
+    }
+    return MarketMoodCalculator.calculateMoodByAbsolute(currentVolume);
+  }
+
+  /// 전체 볼륨 비교 데이터 계산 (Provider에서 호출)
+  Future<ComparisonData> calculateVolumeComparison(double currentVolume) {
+    return _comparator.calculateAll(currentVolume);
+  }
+
+  /// 시스템 상태 생성
+  MarketMoodSystemState createSystemState({
+    required MarketMoodData? marketData,
+    required ComparisonData comparisonData,
+    required MarketMood currentMood,
+    required double exchangeRate,
+    required bool isLoading,
+    required bool hasError,
+  }) {
+    return MarketMoodSystemState(
+      marketData: marketData,
+      comparisonData: comparisonData,
+      currentMood: currentMood,
+      exchangeRate: exchangeRate,
+      isLoading: isLoading,
+      hasError: hasError,
+    );
+  }
+
+  /// 마켓무드 요약 문자열 생성
+  String generateMoodSummary(MarketMood mood) {
+    switch (mood) {
+      case MarketMood.bull:
+        return '🚀 불장';
+      case MarketMood.weakBull:
+        return '🔥 약불장';
+      case MarketMood.sideways:
+        return '⚖️ 중간장';
+      case MarketMood.bear:
+        return '💧 물장';
+      case MarketMood.deepBear:
+        return '🧊 얼음장';
+    }
+  }
+
+  /// 백그라운드 복귀 시 보정 작업
+  Future<void> handleBackgroundResume() async {
+    await _repository.syncMissingData();
+  }
+
+  /// 시스템 상태 조회
+  Future<Map<String, dynamic>> getSystemHealth() async {
+    return await _repository.getSystemHealth();
+  }
+
+  /// 상태 로깅
+  Future<void> logSystemStatus() async {
+    await _repository.logCurrentStatus();
+  }
+
+  /// 데이터 개수 조회
+  Future<int> getCollectedDataCount() async {
+    return await _repository.getCollectedDataCount();
+  }
+
+  /// 앱 시작 시간 조회
+  DateTime getAppStartTime() {
+    return _repository.getAppStartTime();
+  }
+
+  /// 환율 조회
+  Future<double> getExchangeRate() async {
+    return await _repository.getExchangeRate();
+  }
+
+  /// 환율 새로고침
+  Future<void> refreshExchangeRate() async {
+    await _repository.refreshExchangeRate();
+  }
+}\n\n// ====== lib/domain/entities/market_mood.dart ======\n
+// lib/domain/entities/market_mood.dart
+// 🎯 Domain Layer: 순수 엔티티들 (VolumeData 추가)
+
+import '../../core/utils/date_time.dart'; // DateTime extension
+
+/// 🕒 볼륨 관련 상수 정의
+class VolumeConstants {
+ static const int minutesPerSlot = 30;
+ static const int slotsPerHour = 60 ~/ minutesPerSlot; // 2
+ static const int hoursPerDay = 24;
+ static const int daysInBuffer = 7;
+ static const int totalSlots = slotsPerHour * hoursPerDay * daysInBuffer; // 336
+ static const int maxMinutesBuffer = minutesPerSlot * totalSlots; // 10080
+ static const String volumeBoxName = 'market_volumes';
+}
+
+/// 🔥 시장 분위기 enum
+enum MarketMood {
+ bull,       // 🚀 불장
+ weakBull,   // 🔥 약불장
+ sideways,   // ⚖️ 중간장
+ bear,       // 💧 물장
+ deepBear,   // 🧊 얼음장
+}
+
+/// 📈 볼륨 데이터 엔티티 (30분 단위)
+class VolumeData {
+ final DateTime timestamp;
+ final double volumeUsd;
+
+ const VolumeData({
+   required this.timestamp,
+   required this.volumeUsd,
+ });
+
+ /// DateTime extension 활용
+ String get formattedTime => timestamp.yyyyMMddhhmm();
+ String get timeAgoText => timestamp.timeAgo();
+ String get shortTime => timestamp.hhmmss();
+
+ /// JSON 직렬화
+ Map<String, dynamic> toJson() => {
+   'timestamp': timestamp.toIso8601String(),
+   'volume_usd': volumeUsd,
+ };
+
+ factory VolumeData.fromJson(Map<String, dynamic> json) {
+   return VolumeData(
+     timestamp: DateTime.parse(json['timestamp']),
+     volumeUsd: (json['volume_usd'] as num).toDouble(),
+   );
+ }
+
+ @override
+ bool operator ==(Object other) =>
+     identical(this, other) ||
+     other is VolumeData &&
+         runtimeType == other.runtimeType &&
+         timestamp == other.timestamp &&
+         volumeUsd == other.volumeUsd;
+
+ @override
+ int get hashCode => timestamp.hashCode ^ volumeUsd.hashCode;
+
+ @override
+ String toString() =>
+     'VolumeData(${volumeUsd.toStringAsFixed(0)}B USD at ${timestamp.hhmmss()})';
+}
+
+/// 📊 마켓 무드 데이터 엔티티
+class MarketMoodData {
+ final double totalMarketCapUsd;
+ final double totalVolumeUsd;
+ final double btcDominance;
+ final double marketCapChange24h;
+ final DateTime updatedAt;
+
+ const MarketMoodData({
+   required this.totalMarketCapUsd,
+   required this.totalVolumeUsd,
+   required this.btcDominance,
+   required this.marketCapChange24h,
+   required this.updatedAt,
+ });
+
+ /// JSON 직렬화 (DTO 호환용)
+ Map<String, dynamic> toJson() => {
+   'total_market_cap_usd': totalMarketCapUsd,
+   'total_volume_usd': totalVolumeUsd,
+   'btc_dominance': btcDominance,
+   'market_cap_change_24h': marketCapChange24h,
+   'updated_at': updatedAt.toIso8601String(),
+ };
+
+ @override
+ bool operator ==(Object other) =>
+     identical(this, other) ||
+     other is MarketMoodData &&
+         runtimeType == other.runtimeType &&
+         totalMarketCapUsd == other.totalMarketCapUsd &&
+         totalVolumeUsd == other.totalVolumeUsd &&
+         btcDominance == other.btcDominance &&
+         marketCapChange24h == other.marketCapChange24h;
+
+ @override
+ int get hashCode =>
+     totalMarketCapUsd.hashCode ^
+     totalVolumeUsd.hashCode ^
+     btcDominance.hashCode ^
+     marketCapChange24h.hashCode;
+
+ @override
+ String toString() =>
+     'MarketMoodData(volume: ${totalVolumeUsd.toStringAsFixed(0)}, '
+     'cap: ${totalMarketCapUsd.toStringAsFixed(0)}, '
+     'btc: ${btcDominance.toStringAsFixed(1)}%)';
+}
+
+/// 📊 비교 결과 엔티티
+class ComparisonResult {
+ final bool isReady;
+ final double? changePercent;
+ final double progressPercent;
+ final String status;
+
+ const ComparisonResult({
+   required this.isReady,
+   this.changePercent,
+   required this.progressPercent,
+   required this.status,
+ });
+
+ factory ComparisonResult.collecting(double progress) {
+   return ComparisonResult(
+     isReady: false,
+     changePercent: null,
+     progressPercent: progress,
+     status: '수집중',
+   );
+ }
+
+ factory ComparisonResult.ready(double changePercent) {
+   return ComparisonResult(
+     isReady: true,
+     changePercent: changePercent,
+     progressPercent: 1.0,
+     status: '완료',
+   );
+ }
+
+ factory ComparisonResult.unavailable(String message) {
+   return ComparisonResult(
+     isReady: false,
+     changePercent: null,
+     progressPercent: 0.0,
+     status: message,
+   );
+ }
+
+ @override
+ bool operator ==(Object other) =>
+     identical(this, other) ||
+     other is ComparisonResult &&
+         runtimeType == other.runtimeType &&
+         isReady == other.isReady &&
+         changePercent == other.changePercent &&
+         progressPercent == other.progressPercent &&
+         status == other.status;
+
+ @override
+ int get hashCode =>
+     isReady.hashCode ^
+     changePercent.hashCode ^
+     progressPercent.hashCode ^
+     status.hashCode;
+
+ @override
+ String toString() =>
+     'ComparisonResult(ready: $isReady, change: $changePercent%, progress: ${(progressPercent * 100).round()}%)';
+}
+
+/// 📈 전체 비교 데이터 엔티티
+class ComparisonData {
+ final ComparisonResult thirtyMin;
+ final ComparisonResult oneHour;
+ final ComparisonResult twoHour;
+ final ComparisonResult fourHour;
+ final ComparisonResult eightHour;
+ final ComparisonResult twelveHour;
+ final ComparisonResult twentyFourHour;
+ final ComparisonResult threeDayAverage;
+ final ComparisonResult weeklyAverage;
+
+ const ComparisonData({
+   required this.thirtyMin,
+   required this.oneHour,
+   required this.twoHour,
+   required this.fourHour,
+   required this.eightHour,
+   required this.twelveHour,
+   required this.twentyFourHour,
+   required this.threeDayAverage,
+   required this.weeklyAverage,
+ });
+
+ factory ComparisonData.loading() {
+   final loading = ComparisonResult.collecting(0.0);
+   return ComparisonData(
+     thirtyMin: loading,
+     oneHour: loading,
+     twoHour: loading,
+     fourHour: loading,
+     eightHour: loading,
+     twelveHour: loading,
+     twentyFourHour: loading,
+     threeDayAverage: loading,
+     weeklyAverage: loading,
+   );
+ }
+
+ factory ComparisonData.error() {
+   final error = ComparisonResult.unavailable('오류');
+   return ComparisonData(
+     thirtyMin: error,
+     oneHour: error,
+     twoHour: error,
+     fourHour: error,
+     eightHour: error,
+     twelveHour: error,
+     twentyFourHour: error,
+     threeDayAverage: error,
+     weeklyAverage: error,
+   );
+ }
+
+ /// 모든 비교 결과를 리스트로 반환
+ List<ComparisonResult> get allResults => [
+       thirtyMin,
+       oneHour,
+       twoHour,
+       fourHour,
+       eightHour,
+       twelveHour,
+       twentyFourHour,
+       threeDayAverage,
+       weeklyAverage,
+     ];
+
+ /// 준비된 비교 결과 개수
+ int get readyCount => allResults.where((r) => r.isReady).length;
+
+ /// 전체 진행률 (0.0 ~ 1.0)
+ double get overallProgress =>
+     allResults.map((r) => r.progressPercent).reduce((a, b) => a + b) / 9;
+
+ @override
+ bool operator ==(Object other) =>
+     identical(this, other) ||
+     other is ComparisonData &&
+         runtimeType == other.runtimeType &&
+         thirtyMin == other.thirtyMin &&
+         oneHour == other.oneHour &&
+         twoHour == other.twoHour &&
+         fourHour == other.fourHour &&
+         eightHour == other.eightHour &&
+         twelveHour == other.twelveHour &&
+         twentyFourHour == other.twentyFourHour &&
+         threeDayAverage == other.threeDayAverage &&
+         weeklyAverage == other.weeklyAverage;
+
+ @override
+ int get hashCode => Object.hash(
+       thirtyMin,
+       oneHour,
+       twoHour,
+       fourHour,
+       eightHour,
+       twelveHour,
+       twentyFourHour,
+       threeDayAverage,
+       weeklyAverage,
+     );
+
+ @override
+ String toString() =>
+     'ComparisonData(ready: $readyCount/9, progress: ${(overallProgress * 100).round()}%)';
+}
+
+/// 📦 전체 시스템 상태 엔티티
+class MarketMoodSystemState {
+ final MarketMoodData? marketData;
+ final ComparisonData comparisonData;
+ final MarketMood currentMood;
+ final double exchangeRate;
+ final bool isLoading;
+ final bool hasError;
+
+ const MarketMoodSystemState({
+   required this.marketData,
+   required this.comparisonData,
+   required this.currentMood,
+   required this.exchangeRate,
+   required this.isLoading,
+   required this.hasError,
+ });
+
+ /// 시스템이 정상 작동 중인지 확인
+ bool get isHealthy => !hasError && marketData != null;
+
+ /// 데이터 수집 진행률 (0.0 ~ 1.0)
+ double get dataProgress => comparisonData.overallProgress;
+
+ /// 상태 요약 문자열
+ String get statusSummary {
+   if (hasError) return '오류 발생';
+   if (isLoading) return '로딩 중';
+   if (marketData == null) return '데이터 없음';
+   return '정상 작동';
+ }
+
+ @override
+ bool operator ==(Object other) =>
+     identical(this, other) ||
+     other is MarketMoodSystemState &&
+         runtimeType == other.runtimeType &&
+         marketData == other.marketData &&
+         comparisonData == other.comparisonData &&
+         currentMood == other.currentMood &&
+         exchangeRate == other.exchangeRate &&
+         isLoading == other.isLoading &&
+         hasError == other.hasError;
+
+ @override
+ int get hashCode => Object.hash(
+       marketData,
+       comparisonData,
+       currentMood,
+       exchangeRate,
+       isLoading,
+       hasError,
+     );
+
+ @override
+ String toString() =>
+     'MarketMoodSystemState(mood: $currentMood, status: $statusSummary, progress: ${(dataProgress * 100).round()}%)';
+}\n\n// ====== lib/presentation/controllers/market_mood_controller.dart ======\n
+// lib/presentation/controllers/market_mood_controller.dart
+// 🎮 Presentation Layer: Market Mood 컨트롤러 (클린 아키텍처 맞춤)
+
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../core/di/app_providers.dart';
+import '../../core/utils/date_time.dart';
+import '../pages/market_mood_page.dart';
+
+/// 🎮 마켓무드 페이지 컨트롤러
+class MarketMoodPageController extends StateNotifier<MarketMoodPageState> {
+  final Ref _ref;
+
+  MarketMoodPageController(this._ref) : super(MarketMoodPageState.initial()) {
+    _init();
+  }
+
+  /// 초기화
+  void _init() {
+    loadData();
+  }
+
+  /// 데이터 로드 (클린 아키텍처 Provider 사용)
+  Future<void> loadData() async {
+    state = state.copyWith(isLoading: true, error: null);
+    
+    try {
+      // AsyncValue에서 값 직접 읽기
+      final systemStateAsync = _ref.read(marketMoodSystemProvider);
+      
+      systemStateAsync.when(
+        data: (systemState) {
+          state = state.copyWith(
+            isLoading: false,
+            systemState: systemState,
+          );
+        },
+        loading: () {
+          // 로딩 상태 유지
+        },
+        error: (error, _) {
+          state = state.copyWith(
+            isLoading: false,
+            error: error.toString(),
+          );
+        },
+      );
+    } catch (e) {
+      state = state.copyWith(
+        isLoading: false,
+        error: e.toString(),
+      );
+    }
+  }
+
+  /// 수동 새로고침
+  Future<void> refresh() async {
+    final controller = _ref.read(marketMoodControllerProvider);
+    controller.refresh();
+    await loadData();
+  }
+
+  /// 현재 마켓무드 조회 (Future 대응)
+  Future<MarketMood> getCurrentMood() async {
+    final moodAsync = _ref.read(currentMarketMoodProvider);
+    return moodAsync.when(
+      data: (mood) => mood,
+      loading: () => MarketMood.sideways,
+      error: (_, __) => MarketMood.sideways,
+    );
+  }
+
+  /// 환율 조회 (Future 대응)
+  Future<double> getExchangeRate() async {
+    final exchangeAsync = _ref.read(exchangeRateProvider);
+    return exchangeAsync.when(
+      data: (rate) => rate,
+      loading: () => 1400.0,
+      error: (_, __) => 1400.0,
+    );
+  }
+
+  /// 볼륨 비교 데이터 조회 (Future 대응)
+  Future<ComparisonData> getVolumeComparisons() async {
+    final comparisonAsync = _ref.read(volumeComparisonProvider);
+    return comparisonAsync.when(
+      data: (data) => data,
+      loading: () => ComparisonData.loading(),
+      error: (_, __) => ComparisonData.error(),
+    );
+  }
+
+  /// 시스템 헬스체크
+  Future<void> checkSystemHealth() async {
+    try {
+      final controller = _ref.read(marketMoodControllerProvider);
+      final health = await controller.getSystemHealth();
+      
+      state = state.copyWith(
+        systemHealth: health,
+        lastHealthCheck: DateTime.now(),
+      );
+    } catch (e) {
+      state = state.copyWith(error: e.toString());
+    }
+  }
+
+  /// 환율 새로고침
+  Future<void> refreshExchangeRate() async {
+    try {
+      final controller = _ref.read(marketMoodControllerProvider);
+      await controller.refreshExchangeRate();
+      await loadData();
+    } catch (e) {
+      state = state.copyWith(error: e.toString());
+    }
+  }
+
+  /// 시스템 상태 로깅
+  Future<void> logSystemStatus() async {
+    try {
+      final controller = _ref.read(marketMoodControllerProvider);
+      await controller.logSystemStatus();
+    } catch (e) {
+      state = state.copyWith(error: e.toString());
+    }
+  }
+
+  /// 분위기 이모지 조회
+  String getMoodEmoji(MarketMood mood) {
+    return switch (mood) {
+      MarketMood.bull => '🚀',
+      MarketMood.weakBull => '🔥',
+      MarketMood.sideways => '⚖️',
+      MarketMood.bear => '💧',
+      MarketMood.deepBear => '🧊',
+    };
+  }
+
+  /// 분위기 이름 조회
+  String getMoodName(MarketMood mood) {
+    return switch (mood) {
+      MarketMood.bull => '불장',
+      MarketMood.weakBull => '약불장',
+      MarketMood.sideways => '중간장',
+      MarketMood.bear => '물장',
+      MarketMood.deepBear => '얼음장',
+    };
+  }
+
+  /// 분위기 요약 텍스트 조회 (Provider 직접 사용)
+  Future<String> getMoodSummary() async {
+    final summaryAsync = _ref.read(marketMoodSummaryProvider);
+    return summaryAsync.when(
+      data: (summary) => summary,
+      loading: () => '로딩중...',
+      error: (_, __) => '오류',
+    );
+  }
+
+  /// 볼륨 포맷팅 (한국 원화)
+  Future<String> formatVolume(double volumeUsd) async {
+    final rate = await getExchangeRate();
+    final volumeKrw = volumeUsd * rate;
+    
+    if (volumeKrw >= 1e12) {
+      final trillions = (volumeKrw / 1e12).toStringAsFixed(0);
+      return '${_addCommas(trillions)}조원';
+    }
+    if (volumeKrw >= 1e8) {
+      final hundreds = (volumeKrw / 1e8).toStringAsFixed(0);
+      return '${_addCommas(hundreds)}억원';
+    }
+    return '${(volumeKrw / 1e8).toStringAsFixed(1)}억원';
+  }
+
+  /// 시가총액 포맷팅 (한국 원화)
+  Future<String> formatMarketCap(double marketCapUsd) async {
+    final rate = await getExchangeRate();
+    final marketCapKrw = marketCapUsd * rate;
+    
+    if (marketCapKrw >= 1e12) {
+      final trillions = (marketCapKrw / 1e12).toStringAsFixed(0);
+      return '${_addCommas(trillions)}조원';
+    }
+    if (marketCapKrw >= 1e8) {
+      final hundreds = (marketCapKrw / 1e8).toStringAsFixed(0);
+      return '${_addCommas(hundreds)}억원';
+    }
+    return '${(marketCapKrw / 1e8).toStringAsFixed(1)}억원';
+  }
+
+  /// 업데이트 시간 포맷팅
+  String formatUpdateTime(DateTime updatedAt) {
+    return updatedAt.hhmmss(); // DateTime extension 사용
+  }
+
+  /// 비교 결과 값 포맷팅
+  String formatComparisonValue(ComparisonResult result) {
+    if (result.isReady && result.changePercent != null) {
+      final value = result.changePercent!;
+      final arrow = value > 5 ? '↗️' : value < -5 ? '↘️' : '➡️';
+      return '${value >= 0 ? '+' : ''}${value.toStringAsFixed(1)}% $arrow';
+    }
+    return '${(result.progressPercent * 100).round()}% (${result.status})';
+  }
+
+  /// 진행률 계산
+  int getProgressPercent(ComparisonResult result) {
+    return (result.progressPercent * 100).round();
+  }
+
+  /// 하이라이트 색상 판단
+  bool isHighlight(ComparisonResult result) {
+    return result.isReady && (result.changePercent ?? 0) > 5;
+  }
+
+  /// 경고 색상 판단
+  bool isWarning(ComparisonResult result) {
+    return result.isReady && (result.changePercent ?? 0) < -5;
+  }
+
+  /// 데이터 스트림 리스닝 (실시간 업데이트)
+  void startListening() {
+    // MarketMoodData 스트림 리스닝
+    _ref.listen<AsyncValue<MarketMoodData>>(
+      marketMoodProvider,
+      (previous, next) {
+        next.when(
+          data: (data) {
+            if (state.systemState?.marketData != data) {
+              // 새로운 데이터 감지 시 상태 업데이트
+              loadData();
+            }
+          },
+          loading: () {
+            // 로딩 상태 처리
+            state = state.copyWith(isLoading: true);
+          },
+          error: (error, _) {
+            // 에러 상태 처리
+            state = state.copyWith(
+              isLoading: false,
+              error: error.toString(),
+            );
+          },
+        );
+      },
+    );
+  }
+
+  /// 숫자에 콤마 추가
+  String _addCommas(String numberStr) {
+    final parts = numberStr.split('.');
+    final integerPart = parts[0];
+    final reversedInteger = integerPart.split('').reversed.join('');
+    final withCommas = reversedInteger
+        .replaceAllMapped(RegExp(r'.{3}'), (match) => '${match.group(0)},')
+        .split('')
+        .reversed
+        .join('');
+    final result = withCommas.startsWith(',') ? withCommas.substring(1) : withCommas;
+    return parts.length > 1 ? '$result.${parts[1]}' : result;
+  }
+}
+
+/// 🎮 마켓무드 페이지 상태
+class MarketMoodPageState {
+  final bool isLoading;
+  final String? error;
+  final MarketMoodSystemState? systemState;
+  final Map<String, dynamic>? systemHealth;
+  final DateTime? lastHealthCheck;
+
+  const MarketMoodPageState({
+    required this.isLoading,
+    this.error,
+    this.systemState,
+    this.systemHealth,
+    this.lastHealthCheck,
+  });
+
+  factory MarketMoodPageState.initial() {
+    return const MarketMoodPageState(isLoading: false);
+  }
+
+  MarketMoodPageState copyWith({
+    bool? isLoading,
+    String? error,
+    MarketMoodSystemState? systemState,
+    Map<String, dynamic>? systemHealth,
+    DateTime? lastHealthCheck,
+  }) {
+    return MarketMoodPageState(
+      isLoading: isLoading ?? this.isLoading,
+      error: error ?? this.error,
+      systemState: systemState ?? this.systemState,
+      systemHealth: systemHealth ?? this.systemHealth,
+      lastHealthCheck: lastHealthCheck ?? this.lastHealthCheck,
+    );
+  }
+}
+
+/// 🎮 마켓무드 페이지 컨트롤러 Provider
+final marketMoodPageControllerProvider = 
+    StateNotifierProvider.autoDispose<MarketMoodPageController, MarketMoodPageState>((ref) {
+  final controller = MarketMoodPageController(ref);
+  controller.startListening(); // 실시간 리스닝 시작
+  return controller;
+});
+
+/// 🎮 모달 오버레이 관리자 (실제 MarketMoodPage 사용)
+class MarketMoodModalManager {
+  static OverlayEntry? _overlayEntry;
+
+  /// 모달 표시
+  static void show({
+    required BuildContext context,
+    required WidgetRef ref,
+    required Offset position,
+    required double statusIconSize,
+    required MarketMoodData data,
+  }) {
+    hide(); // 기존 모달 제거
+
+    _overlayEntry = OverlayEntry(
+      builder: (context) => MarketMoodModalOverlay(
+        position: position,
+        statusIconSize: statusIconSize,
+        ref: ref,
+        data: data,
+      ),
+    );
+
+    Overlay.of(context).insert(_overlayEntry!);
+  }
+
+  /// 모달 숨기기
+  static void hide() {
+    _overlayEntry?.remove();
+    _overlayEntry = null;
+  }
+}
+
+/// 🎮 모달 오버레이 (실제 MarketMoodPage 사용)
+class MarketMoodModalOverlay extends StatelessWidget {
+  final Offset position;
+  final double statusIconSize;
+  final WidgetRef ref;
+  final MarketMoodData data;
+
+  const MarketMoodModalOverlay({
+    super.key,
+    required this.position,
+    required this.statusIconSize,
+    required this.ref,
+    required this.data,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: () => MarketMoodModalManager.hide(),
+      behavior: HitTestBehavior.translucent,
+      child: Material(
+        color: Colors.transparent,
+        child: Stack(
+          children: [
+            // 투명 배경
+            Positioned.fill(
+              child: Container(color: Colors.transparent),
+            ),
+            // 실제 MarketMoodPage 위젯
+            Positioned(
+              left: position.dx,
+              top: position.dy,
+              child: Consumer(
+                builder: (context, ref, child) {
+                  return MarketMoodPage(
+                    statusIconSize: statusIconSize,
+                    data: data,
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}\n\n// ====== lib/presentation/pages/market_mood_page.dart ======\n
+// lib/presentation/pages/market_mood_page.dart
+// 📱 Presentation Layer: Market Mood 페이지 (모달 형태, 클린 아키텍처)
+
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../core/di/app_providers.dart';
+import '../controllers/market_mood_controller.dart';
+
+/// 📱 마켓무드 상세 페이지 (모달 형태)
+class MarketMoodPage extends ConsumerStatefulWidget {
+  final double statusIconSize;
+  final MarketMoodData data;
+
+  const MarketMoodPage({
+    super.key,
+    required this.statusIconSize,
+    required this.data,
+  });
+
+  @override
+  ConsumerState<MarketMoodPage> createState() => _MarketMoodPageState();
+}
+
+class _MarketMoodPageState extends ConsumerState<MarketMoodPage>
+    with SingleTickerProviderStateMixin {
+  late AnimationController _animationController;
+  late Animation<double> _scaleAnimation;
+  late Animation<double> _opacityAnimation;
+
+  @override
+  void initState() {
+    super.initState();
+    _setupAnimations();
+    _animationController.forward();
+  }
+
+  void _setupAnimations() {
+    _animationController = AnimationController(
+      duration: const Duration(milliseconds: 200),
+      vsync: this,
+    );
+
+    _scaleAnimation = Tween<double>(
+      begin: 0.0,
+      end: 1.0,
+    ).animate(CurvedAnimation(
+      parent: _animationController,
+      curve: Curves.elasticOut,
+    ));
+
+    _opacityAnimation = Tween<double>(
+      begin: 0.0,
+      end: 1.0,
+    ).animate(CurvedAnimation(
+      parent: _animationController,
+      curve: const Interval(0.0, 0.5),
+    ));
+  }
+
+  @override
+  void dispose() {
+    _animationController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _animationController,
+      builder: (context, child) {
+        return Transform.scale(
+          scale: _scaleAnimation.value,
+          alignment: Alignment.center,
+          child: Opacity(
+            opacity: _opacityAnimation.value,
+            child: _buildPageContent(),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildPageContent() {
+    // 화면 크기 계산
+    final screenSize = MediaQuery.of(context).size;
+    final maxWidth = screenSize.width * 0.9;
+
+    return IntrinsicWidth(
+      child: Container(
+        constraints: BoxConstraints(
+          minWidth: widget.statusIconSize * 4.2,
+          maxWidth: maxWidth,
+        ),
+        decoration: _buildContainerDecoration(),
+        child: Padding(
+          padding: const EdgeInsets.all(14),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              _buildHeader(),
+              const SizedBox(height: 8),
+              _buildCoreMetrics(),
+              const SizedBox(height: 8),
+              _buildIntradayAnalysis(),
+              const SizedBox(height: 8),
+              _buildLongTermAnalysis(),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  BoxDecoration _buildContainerDecoration() {
+    return BoxDecoration(
+      color: Theme.of(context).colorScheme.surface,
+      borderRadius: BorderRadius.circular(16),
+      boxShadow: [
+        BoxShadow(
+          color: Colors.black.withValues(alpha: 0.08),
+          blurRadius: 16,
+          offset: const Offset(0, 6),
+          spreadRadius: 2,
+        ),
+        BoxShadow(
+          color: Colors.black.withValues(alpha: 0.04),
+          blurRadius: 4,
+          offset: const Offset(0, 2),
+        ),
+      ],
+      border: Border.all(
+        color: Theme.of(context).colorScheme.outline.withValues(alpha: 0.12),
+        width: 0.8,
+      ),
+    );
+  }
+
+  Widget _buildHeader() {
+    final controller = ref.read(marketMoodPageControllerProvider.notifier);
+    final updateTime = controller.formatUpdateTime(widget.data.updatedAt);
+
+    return Consumer(
+      builder: (context, ref, child) {
+        // AsyncValue Provider들을 watch
+        final currentMoodAsync = ref.watch(currentMarketMoodProvider);
+
+        return currentMoodAsync.when(
+          data: (currentMood) {
+            final moodEmoji = controller.getMoodEmoji(currentMood);
+            final moodName = controller.getMoodName(currentMood);
+
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // 메인 타이틀
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      moodEmoji,
+                      style: const TextStyle(fontSize: 12),
+                    ),
+                    const SizedBox(width: 4),
+                    Flexible(
+                      child: Text(
+                        '$moodName - 30분 전 대비',
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w700,
+                          color: Theme.of(context).colorScheme.onSurface,
+                          letterSpacing: 0.3,
+                        ),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 2),
+                // 업데이트 시간
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      Icons.schedule,
+                      size: 9,
+                      color: Theme.of(context).colorScheme.primary.withValues(alpha: 0.7),
+                    ),
+                    const SizedBox(width: 3),
+                    Text(
+                      '실시간 기준 • ',
+                      style: TextStyle(
+                        fontSize: 8,
+                        fontWeight: FontWeight.w500,
+                        color: Theme.of(context).colorScheme.primary.withValues(alpha: 0.7),
+                      ),
+                    ),
+                    Icon(
+                      Icons.access_time,
+                      size: 9,
+                      color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.6),
+                    ),
+                    const SizedBox(width: 3),
+                    Flexible(
+                      child: Text(
+                        '$updateTime 업데이트',
+                        style: TextStyle(
+                          fontSize: 8,
+                          color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.6),
+                        ),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            );
+          },
+          loading: () => _buildLoadingHeader(),
+          error: (_, __) => _buildErrorHeader(),
+        );
+      },
+    );
+  }
+
+  Widget _buildLoadingHeader() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const CircularProgressIndicator(strokeWidth: 2),
+            const SizedBox(width: 8),
+            Text(
+              '로딩중...',
+              style: TextStyle(
+                fontSize: 11,
+                fontWeight: FontWeight.w700,
+                color: Theme.of(context).colorScheme.onSurface,
+              ),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  Widget _buildErrorHeader() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              Icons.error_outline,
+              size: 12,
+              color: Theme.of(context).colorScheme.error,
+            ),
+            const SizedBox(width: 4),
+            Text(
+              '데이터 로드 오류',
+              style: TextStyle(
+                fontSize: 11,
+                fontWeight: FontWeight.w700,
+                color: Theme.of(context).colorScheme.error,
+              ),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  Widget _buildCoreMetrics() {
+    return Consumer(
+      builder: (context, ref, child) {
+        final exchangeAsync = ref.watch(exchangeRateProvider);
+
+        return exchangeAsync.when(
+          data: (exchangeRate) => _buildCoreMetricsContent(exchangeRate),
+          loading: () => _buildLoadingMetrics(),
+          error: (_, __) => _buildCoreMetricsContent(1400.0), // 기본값 사용
+        );
+      },
+    );
+  }
+
+  Widget _buildCoreMetricsContent(double exchangeRate) {
+    final controller = ref.read(marketMoodPageControllerProvider.notifier);
+
+    return FutureBuilder<List<String>>(
+      future: Future.wait([
+        controller.formatVolume(widget.data.totalVolumeUsd),
+        controller.formatMarketCap(widget.data.totalMarketCapUsd),
+      ]),
+      builder: (context, snapshot) {
+        if (snapshot.hasData) {
+          final values = snapshot.data!;
+          return Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              _buildSectionTitle('핵심 지표', Icons.analytics),
+              const SizedBox(height: 4),
+              _buildStatRow(
+                icon: Icons.monetization_on,
+                label: '24시간 거래대금',
+                value: values[0],
+                isHighlight: true,
+              ),
+              _buildStatRow(
+                icon: Icons.pie_chart,
+                label: '총 시가총액',
+                value: values[1],
+              ),
+              _buildStatRow(
+                icon: Icons.trending_up,
+                label: '시총 24시간 변화',
+                value: '${widget.data.marketCapChange24h >= 0 ? '+' : ''}${widget.data.marketCapChange24h.toStringAsFixed(2)}%',
+                isHighlight: widget.data.marketCapChange24h > 0,
+                isWarning: widget.data.marketCapChange24h < -2,
+              ),
+              _buildStatRow(
+                icon: Icons.flash_on,
+                label: 'BTC 도미넌스',
+                value: '${widget.data.btcDominance.toStringAsFixed(1)}%',
+              ),
+            ],
+          );
+        }
+        return _buildLoadingMetrics();
+      },
+    );
+  }
+
+  Widget _buildLoadingMetrics() {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _buildSectionTitle('핵심 지표', Icons.analytics),
+        const SizedBox(height: 4),
+        const CircularProgressIndicator(strokeWidth: 2),
+      ],
+    );
+  }
+
+  Widget _buildIntradayAnalysis() {
+    return Consumer(
+      builder: (context, ref, child) {
+        final comparisonAsync = ref.watch(volumeComparisonProvider);
+
+        return comparisonAsync.when(
+          data: (comparisonData) => Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              _buildSectionTitle('인트라데이 비교 분석', Icons.schedule),
+              const SizedBox(height: 4),
+              _buildComparisonRow('30분 대비', comparisonData.thirtyMin, Icons.schedule),
+              _buildComparisonRow('1시간 대비', comparisonData.oneHour, Icons.access_time),
+              _buildComparisonRow('2시간 대비', comparisonData.twoHour, Icons.timer),
+              _buildComparisonRow('4시간 대비', comparisonData.fourHour, Icons.timer_3),
+              _buildComparisonRow('8시간 대비', comparisonData.eightHour, Icons.timer_outlined),
+              _buildComparisonRow('12시간 대비', comparisonData.twelveHour, Icons.access_time_filled),
+            ],
+          ),
+          loading: () => _buildLoadingSection('인트라데이 비교 분석', Icons.schedule),
+          error: (_, __) => _buildErrorSection('인트라데이 비교 분석', Icons.schedule),
+        );
+      },
+    );
+  }
+
+  Widget _buildLongTermAnalysis() {
+    return Consumer(
+      builder: (context, ref, child) {
+        final comparisonAsync = ref.watch(volumeComparisonProvider);
+
+        return comparisonAsync.when(
+          data: (comparisonData) => Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              _buildSectionTitle('장기 비교 분석', Icons.calendar_month),
+              const SizedBox(height: 4),
+              _buildComparisonRow('24시간 대비', comparisonData.twentyFourHour, Icons.calendar_today),
+              _buildComparisonRow('3일 평균 대비', comparisonData.threeDayAverage, Icons.view_day),
+              _buildComparisonRow('일주일 평균 대비', comparisonData.weeklyAverage, Icons.date_range),
+            ],
+          ),
+          loading: () => _buildLoadingSection('장기 비교 분석', Icons.calendar_month),
+          error: (_, __) => _buildErrorSection('장기 비교 분석', Icons.calendar_month),
+        );
+      },
+    );
+  }
+
+  Widget _buildLoadingSection(String title, IconData icon) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _buildSectionTitle(title, icon),
+        const SizedBox(height: 4),
+        const CircularProgressIndicator(strokeWidth: 2),
+      ],
+    );
+  }
+
+  Widget _buildErrorSection(String title, IconData icon) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _buildSectionTitle(title, icon),
+        const SizedBox(height: 4),
+        Text(
+          '데이터 로드 오류',
+          style: TextStyle(
+            fontSize: 9,
+            color: Theme.of(context).colorScheme.error,
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildComparisonRow(String label, ComparisonResult result, IconData icon) {
+    final controller = ref.read(marketMoodPageControllerProvider.notifier);
+    
+    if (result.isReady && result.changePercent != null) {
+      // 데이터 준비됨 - 실제 비교 값 표시
+      return _buildStatRow(
+        icon: icon,
+        label: label,
+        value: controller.formatComparisonValue(result),
+        isHighlight: controller.isHighlight(result),
+        isWarning: controller.isWarning(result),
+      );
+    } else {
+      // 데이터 준비 안됨 - 프로그레스 바 표시
+      return _buildProgressRow(icon, label, result);
+    }
+  }
+
+  Widget _buildProgressRow(IconData icon, String label, ComparisonResult result) {
+    final controller = ref.read(marketMoodPageControllerProvider.notifier);
+    final progressPercent = controller.getProgressPercent(result);
+    
+    return Container(
+      margin: const EdgeInsets.symmetric(vertical: 1),
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            icon,
+            size: 11,
+            color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.6),
+          ),
+          const SizedBox(width: 5),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  '$label: $progressPercent% (${result.status})',
+                  style: TextStyle(
+                    fontSize: 9,
+                    fontWeight: FontWeight.w500,
+                    color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.7),
+                  ),
+                ),
+                const SizedBox(height: 2),
+                LinearProgressIndicator(
+                  value: result.progressPercent.clamp(0.0, 1.0),
+                  backgroundColor: Theme.of(context).colorScheme.outline.withValues(alpha: 0.2),
+                  valueColor: AlwaysStoppedAnimation(
+                    result.progressPercent >= 1.0 
+                      ? Colors.green
+                      : Theme.of(context).colorScheme.primary.withValues(alpha: 0.8),
+                  ),
+                  minHeight: 3,
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSectionTitle(String title, IconData icon) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(
+          icon,
+          size: 11,
+          color: Theme.of(context).colorScheme.primary.withValues(alpha: 0.8),
+        ),
+        const SizedBox(width: 4),
+        Text(
+          title,
+          style: TextStyle(
+            fontSize: 9,
+            fontWeight: FontWeight.w700,
+            color: Theme.of(context).colorScheme.primary.withValues(alpha: 0.8),
+            letterSpacing: 0.3,
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildStatRow({
+    required IconData icon,
+    required String label,
+    required String value,
+    bool isError = false,
+    bool isHighlight = false,
+    bool isWarning = false,
+  }) {
+    Color getColor() {
+      if (isError) return Theme.of(context).colorScheme.error;
+      if (isHighlight) return Colors.green;
+      if (isWarning) return Colors.red;
+      return Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.6);
+    }
+
+    return Container(
+      margin: const EdgeInsets.symmetric(vertical: 1),
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+      decoration: BoxDecoration(
+        color: isHighlight
+            ? Colors.green.withValues(alpha: 0.08)
+            : isWarning
+            ? Colors.red.withValues(alpha: 0.08)
+            : Colors.transparent,
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            icon,
+            size: 11,
+            color: getColor(),
+          ),
+          const SizedBox(width: 5),
+          Text(
+            '$label: ',
+            style: TextStyle(
+              fontSize: 9,
+              fontWeight: FontWeight.w500,
+              color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.7),
+            ),
+          ),
+          Flexible(
+            child: Text(
+              value,
+              style: TextStyle(
+                fontSize: 9,
+                fontWeight: FontWeight.w600,
+                color: getColor(),
+                letterSpacing: 0.2,
+              ),
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}

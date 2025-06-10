@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import '../utils/logger.dart';
 import '../../data/models/trade_dto.dart';
+import '../../data/models/market_mood_dto.dart'; // 🔥 MarketMood DTO 추가
 
 /// 🎯 Hive 전역 관리 서비스 (싱글톤)
 /// - 앱 시작 시 한 번만 초기화
@@ -18,9 +19,13 @@ class HiveService {
 
   // 🏷️ Box 이름 상수 (HiveService 자체 관리)
   static const String _tradeBoxName = 'trades';
+  static const String _marketMoodVolumeBoxName = 'market_mood_volume'; // 🔥 추가
+  static const String _marketMoodCacheBoxName = 'market_mood_cache';   // 🔥 추가
 
   // Box 인스턴스 캐싱
   late final Box<TradeDto> _tradeBox;
+  late final Box<TimestampedVolume> _marketMoodVolumeBox; // 🔥 추가
+  late final Box _marketMoodCacheBox; // 🔥 추가 (dynamic)
   
   // 초기화 상태 관리
   bool _initialized = false;
@@ -34,6 +39,26 @@ class HiveService {
       );
     }
     return _tradeBox;
+  }
+
+  /// 🔥 MarketMood Volume Box getter (이미 열려있다는 전제)
+  Box<TimestampedVolume> get marketMoodVolumeBox {
+    if (!_initialized) {
+      throw StateError(
+        'HiveService has not been initialized. Call HiveService.init() before using marketMoodVolumeBox.'
+      );
+    }
+    return _marketMoodVolumeBox;
+  }
+
+  /// 🔥 MarketMood Cache Box getter (이미 열려있다는 전제)
+  Box get marketMoodCacheBox {
+    if (!_initialized) {
+      throw StateError(
+        'HiveService has not been initialized. Call HiveService.init() before using marketMoodCacheBox.'
+      );
+    }
+    return _marketMoodCacheBox;
   }
 
   /// 🚀 Hive 초기화 (앱 시작 시 단 한 번만 호출)
@@ -63,9 +88,15 @@ class HiveService {
       // 2. TypeAdapter 등록 (중복 방지)
       _registerAdapters();
 
-      // 3. Trade Box 열기 및 캐싱
+      // 3. 모든 Box 열기 및 캐싱
       _tradeBox = await Hive.openBox<TradeDto>(_tradeBoxName);
       log.i('[HiveService] "$_tradeBoxName" box opened and cached');
+
+      _marketMoodVolumeBox = await Hive.openBox<TimestampedVolume>(_marketMoodVolumeBoxName); // 🔥 추가
+      log.i('[HiveService] "$_marketMoodVolumeBoxName" box opened and cached');
+
+      _marketMoodCacheBox = await Hive.openBox(_marketMoodCacheBoxName); // 🔥 추가
+      log.i('[HiveService] "$_marketMoodCacheBoxName" box opened and cached');
 
       _initialized = true;
       log.i('[HiveService] ✅ initialized successfully');
@@ -82,19 +113,25 @@ class HiveService {
 
   /// 📋 모든 TypeAdapter 등록 (중복 방지)
   void _registerAdapters() {
-    final adapter = TradeDtoAdapter();
-    if (!Hive.isAdapterRegistered(adapter.typeId)) {
-      Hive.registerAdapter(adapter);
-      log.i('[HiveService] TradeDtoAdapter registered (typeId: ${adapter.typeId})');
+    // Trade Adapter
+    final tradeAdapter = TradeDtoAdapter();
+    if (!Hive.isAdapterRegistered(tradeAdapter.typeId)) {
+      Hive.registerAdapter(tradeAdapter);
+      log.i('[HiveService] TradeDtoAdapter registered (typeId: ${tradeAdapter.typeId})');
     } else {
       log.d('[HiveService] TradeDtoAdapter already registered');
     }
     
+    // 🔥 TimestampedVolume Adapter 추가
+    final volumeAdapter = TimestampedVolumeAdapter();
+    if (!Hive.isAdapterRegistered(volumeAdapter.typeId)) {
+      Hive.registerAdapter(volumeAdapter);
+      log.i('[HiveService] TimestampedVolumeAdapter registered (typeId: ${volumeAdapter.typeId})');
+    } else {
+      log.d('[HiveService] TimestampedVolumeAdapter already registered');
+    }
+    
     // 📝 향후 다른 어댑터 추가 시 여기에 추가
-    // if (!Hive.isAdapterRegistered(AnotherDtoAdapter().typeId)) {
-    //   Hive.registerAdapter(AnotherDtoAdapter());
-    //   log.i('[HiveService] AnotherDtoAdapter registered');
-    // }
   }
 
   /// 🧹 리소스 정리 (디버그 모드에서만 실행)
@@ -116,6 +153,17 @@ class HiveService {
         log.i('[HiveService] "$_tradeBoxName" box closed');
       }
 
+      // 🔥 MarketMood Box들 정리 추가
+      if (_marketMoodVolumeBox.isOpen) {
+        await _marketMoodVolumeBox.close();
+        log.i('[HiveService] "$_marketMoodVolumeBoxName" box closed');
+      }
+
+      if (_marketMoodCacheBox.isOpen) {
+        await _marketMoodCacheBox.close();
+        log.i('[HiveService] "$_marketMoodCacheBoxName" box closed');
+      }
+
       await Hive.close();
       log.i('[HiveService] 🧹 all Hive resources disposed');
       
@@ -129,9 +177,21 @@ class HiveService {
   /// 🔍 디버깅용: 현재 상태 정보
   Map<String, Object> get debugInfo => {
     'initialized': _initialized,
-    'boxName': _tradeBoxName,
-    'boxOpen': _initialized ? _tradeBox.isOpen : false,
-    'boxLength': _initialized ? _tradeBox.length : 0,
+    'tradeBox': {
+      'name': _tradeBoxName,
+      'open': _initialized ? _tradeBox.isOpen : false,
+      'length': _initialized ? _tradeBox.length : 0,
+    },
+    'marketMoodVolumeBox': { // 🔥 추가
+      'name': _marketMoodVolumeBoxName,
+      'open': _initialized ? _marketMoodVolumeBox.isOpen : false,
+      'length': _initialized ? _marketMoodVolumeBox.length : 0,
+    },
+    'marketMoodCacheBox': { // 🔥 추가
+      'name': _marketMoodCacheBoxName,
+      'open': _initialized ? _marketMoodCacheBox.isOpen : false,
+      'length': _initialized ? _marketMoodCacheBox.length : 0,
+    },
     'initInProgress': _initFuture != null,
   };
 
@@ -148,9 +208,23 @@ class HiveService {
     }
     
     log.d('[HiveService] Box Details:');
-    log.d('  - Name: $_tradeBoxName');
-    log.d('  - Length: ${_tradeBox.length}');
-    log.d('  - Keys sample: ${_tradeBox.keys.take(5).toList()}');
-    log.d('  - Is open: ${_tradeBox.isOpen}');
+    log.d('  Trade Box:');
+    log.d('    - Name: $_tradeBoxName');
+    log.d('    - Length: ${_tradeBox.length}');
+    log.d('    - Keys sample: ${_tradeBox.keys.take(5).toList()}');
+    log.d('    - Is open: ${_tradeBox.isOpen}');
+    
+    // 🔥 MarketMood Box 정보 추가
+    log.d('  MarketMood Volume Box:');
+    log.d('    - Name: $_marketMoodVolumeBoxName');
+    log.d('    - Length: ${_marketMoodVolumeBox.length}');
+    log.d('    - Keys sample: ${_marketMoodVolumeBox.keys.take(5).toList()}');
+    log.d('    - Is open: ${_marketMoodVolumeBox.isOpen}');
+    
+    log.d('  MarketMood Cache Box:');
+    log.d('    - Name: $_marketMoodCacheBoxName');
+    log.d('    - Length: ${_marketMoodCacheBox.length}');
+    log.d('    - Keys sample: ${_marketMoodCacheBox.keys.take(5).toList()}');
+    log.d('    - Is open: ${_marketMoodCacheBox.isOpen}');
   }
 }
