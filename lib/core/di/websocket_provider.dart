@@ -1,6 +1,5 @@
 // lib/core/di/websocket_provider.dart
 
-import 'dart:async';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../config/app_config.dart';
@@ -14,7 +13,7 @@ class WebSocketStats {
   final DateTime? connectTime;
   final int reconnectCount;
   final int totalSessions;
-  final Duration cumulativeConnectTime;
+  final Duration _storedCumulativeTime;
   final int connectionAttempts;
   final DateTime? lastStateChangeTime;
   
@@ -22,10 +21,10 @@ class WebSocketStats {
     this.connectTime,
     this.reconnectCount = 0,
     this.totalSessions = 0,
-    this.cumulativeConnectTime = Duration.zero,
+    Duration cumulativeConnectTime = Duration.zero,
     this.connectionAttempts = 0,
     this.lastStateChangeTime,
-  });
+  }) : _storedCumulativeTime = cumulativeConnectTime;
 
   /// 연결 지속 시간 계산
   Duration? get uptime {
@@ -33,7 +32,19 @@ class WebSocketStats {
     return DateTime.now().difference(connectTime!);
   }
 
-  /// 평균 연결 지속 시간
+  /// 실시간 누적 연결 시간
+  Duration get cumulativeConnectTime {
+    Duration total = _storedCumulativeTime;
+    
+    // 현재 연결 중이면 현재 세션 시간도 포함
+    if (connectTime != null) {
+      total += DateTime.now().difference(connectTime!);
+    }
+    
+    return total;
+  }
+
+  /// 실시간 평균 연결 지속 시간
   Duration get averageSessionDuration {
     if (totalSessions == 0) return Duration.zero;
     return Duration(

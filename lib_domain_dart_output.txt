@@ -1,0 +1,2833 @@
+\n\n// ====== lib/domain/repositories/surge_repository.dart ======\n
+// lib/domain/repositories/surge_repository.dart
+import '../entities/surge.dart';
+
+/// 급등/급락 데이터의 시간대별 변동률 추적 및 리셋을 관리하는 Repository
+abstract class SurgeRepository {
+  /// 시간대별 변동률 스트림 제공 (Surge 엔티티 리스트)
+  /// [timeFrame]: 시간대 (예: "1m", "5m", "15m")
+  /// [markets]: 모니터링할 마켓 코드 리스트
+  /// Returns: Surge 엔티티 리스트 (변동률 절댓값 순 정렬)
+  Stream<List<Surge>> watchSurgeByTimeFrame(String timeFrame, List<String> markets);
+  
+  /// 특정 시간대 수동 리셋
+  /// [timeFrame]: 리셋할 시간대
+  void resetTimeFrame(String timeFrame);
+  
+  /// 모든 시간대 수동 리셋
+  void resetAllTimeFrames();
+  
+  /// 다음 리셋 예정 시간 조회
+  /// [timeFrame]: 시간대
+  /// Returns: 다음 리셋 시간 (null이면 리셋 정보 없음)
+  DateTime? getNextResetTime(String timeFrame);
+  
+  /// 활성화된 시간대 목록 조회
+  /// Returns: 사용 가능한 시간대 리스트 (예: ["1m", "5m", "15m"])
+  List<String> getActiveTimeFrames();
+  
+  /// 특정 시간대가 활성화되어 있는지 확인
+  /// [timeFrame]: 확인할 시간대
+  /// Returns: 활성화 여부
+  bool isTimeFrameActive(String timeFrame);
+  
+  /// 리소스 해제
+  Future<void> dispose();
+}\n\n// ====== lib/domain/repositories/market_mood_repository.dart ======\n
+// lib/domain/repositories/market_mood_repository.dart
+// 🎯 Domain Layer: Repository 인터페이스 (클린 아키텍처 준수)
+
+import '../entities/market_mood.dart';
+
+/// 📊 마켓무드 저장소 인터페이스
+/// Data Layer에서 구현해야 할 계약을 정의 (Domain → Data 의존성 제거)
+abstract class MarketMoodRepository {
+  // ═══════════════════════════════════════════════════════════
+  // 📡 원격 데이터 (CoinGecko API)
+  // ═══════════════════════════════════════════════════════════
+
+  /// 글로벌 마켓 데이터 스트림 (30분 주기)
+  Stream<MarketMoodData> getMarketDataStream();
+
+  /// 현재 마켓 데이터 한 번 조회
+  Future<MarketMoodData?> getCurrentMarketData();
+
+  /// 현재 USD/KRW 환율 조회 (캐시 포함)
+  Future<double> getExchangeRate();
+
+  /// 환율 수동 새로고침
+  Future<void> refreshExchangeRate();
+
+  // ═══════════════════════════════════════════════════════════
+  // 💾 로컬 데이터 (Hive 볼륨 버퍼)
+  // ═══════════════════════════════════════════════════════════
+
+  /// 볼륨 데이터 추가 (30분마다)
+  Future<void> addVolumeData(VolumeData volume);
+
+  /// N분 전 볼륨 데이터 조회
+  Future<VolumeData?> getVolumeNMinutesAgo(int minutes);
+
+  /// 특정 기간의 평균 볼륨 계산
+  Future<double?> getAverageVolume(int days);
+
+  /// 수집된 데이터 개수 확인
+  Future<int> getCollectedDataCount();
+
+  /// 앱 시작 시간 조회
+  DateTime getAppStartTime();
+
+  // ═══════════════════════════════════════════════════════════
+  // 🧹 관리 기능
+  // ═══════════════════════════════════════════════════════════
+
+  /// 백그라운드 복귀 시 누락된 슬롯 보정
+  Future<void> syncMissingData();
+
+  /// 오래된 데이터 정리
+  Future<void> clearOldData();
+
+  /// 시스템 헬스체크
+  Future<Map<String, dynamic>> getSystemHealth();
+
+  /// 현재 상태 로깅
+  Future<void> logCurrentStatus();
+
+  // ═══════════════════════════════════════════════════════════
+  // 🛠️ 개발/테스트용 기능
+  // ═══════════════════════════════════════════════════════════
+
+  /// 테스트 데이터 주입
+  Future<void> injectTestVolumeData(List<VolumeData> testData);
+
+  // ═══════════════════════════════════════════════════════════
+  // 🧹 리소스 정리
+  // ═══════════════════════════════════════════════════════════
+
+  /// 리소스 정리 및 스트림 종료
+  Future<void> dispose();
+}\n\n// ====== lib/domain/repositories/momentary_repository.dart ======\n
+\n\n// ====== lib/domain/repositories/settings_repository.dart ======\n
+import 'package:flutter/material.dart';
+import '../entities/app_settings.dart';
+
+abstract class SettingsRepository {
+ /// 현재 앱 설정 가져오기
+ Future<AppSettings> getSettings();
+
+ /// 테마 모드 업데이트
+ Future<void> updateThemeMode(ThemeMode mode);
+
+ /// 화면 항상 켜기 설정 업데이트
+ Future<void> updateKeepScreenOn(bool value);
+
+ /// 슬라이더 위치 업데이트
+ Future<void> updateSliderPosition(SliderPosition position);
+
+ /// 코인명 표시 방식 업데이트
+ Future<void> updateDisplayMode(DisplayMode mode);
+
+ /// 금액 표시 방식 업데이트
+ Future<void> updateAmountDisplayMode(AmountDisplayMode mode);
+
+ /// 반짝임 효과 업데이트
+ Future<void> updateBlinkEnabled(bool enabled);
+
+ /// 폰트 패밀리 업데이트
+ Future<void> updateFontFamily(FontFamily font);
+
+ /// 햅틱 피드백 설정 업데이트
+ Future<void> updateHapticEnabled(bool enabled);    // 🆕 추가
+
+ /// 화면 회전 잠금 설정 업데이트
+ Future<void> updatePortraitLocked(bool locked);    // 🆕 추가
+
+ /// 캐시 비우기
+ Future<void> clearCache();
+
+ /// 모든 설정 초기화
+ Future<void> resetSettings();
+}\n\n// ====== lib/domain/repositories/signal_repository.dart ======\n
+import '../entities/signal.dart';
+
+/// 🚀 Signal Repository 인터페이스 V4.1 - 온라인 지표 연동
+/// 
+/// 주요 개선사항:
+/// - 온라인 지표 시스템 헬스 체크
+/// - 패턴별 고급 설정 지원
+/// - 시스템 성능 모니터링
+/// - 설정 내보내기/가져오기
+/// - 실시간 다이버전스 감지
+abstract class SignalRepository {
+  // ==========================================================================
+  // 기본 시그널 스트림 (기존 호환성)
+  // ==========================================================================
+  
+  /// 특정 패턴의 시그널 스트림 감시
+  Stream<List<Signal>> watchSignalsByPattern(
+    PatternType patternType,
+    List<String> markets,
+  );
+
+  /// 모든 패턴의 시그널 스트림 감시
+  Stream<List<Signal>> watchAllSignals(List<String> markets);
+
+  // ==========================================================================
+  // 패턴 설정 관리 (기존 + V4.1 확장)
+  // ==========================================================================
+  
+  /// 패턴별 임계값 업데이트
+  void updatePatternThreshold(PatternType patternType, double threshold);
+
+  /// 현재 설정된 패턴별 임계값 조회
+  double getPatternThreshold(PatternType patternType);
+
+  /// 패턴별 활성화/비활성화 설정
+  void setPatternEnabled(PatternType patternType, bool enabled);
+
+  /// 패턴 활성화 상태 조회
+  bool isPatternEnabled(PatternType patternType);
+
+  /// 감지된 시그널 목록 초기화
+  void clearSignals(PatternType? patternType);
+
+  // ==========================================================================
+  // 🆕 V4.1 온라인 지표 확장 기능
+  // ==========================================================================
+  
+  /// 패턴별 고급 설정 업데이트 (zScoreThreshold, buyRatioMin 등)
+  void updatePatternConfig(PatternType pattern, String key, double value);
+
+  /// 패턴 프리셋 적용 (conservative, aggressive, balanced)
+  void applyPatternPreset(String presetName);
+
+  /// 패턴별 통계 정보 조회 (신호 개수, 마지막 감지 시간 등)
+  Future<Map<String, dynamic>> getPatternStats(PatternType type);
+
+  /// 전체 시스템 헬스 체크 (온라인 지표 포함)
+  Future<Map<String, dynamic>> getSystemHealth();
+
+  /// 마켓별 데이터 품질 조회 (온라인 지표 건강성 포함)
+  Map<String, dynamic> getMarketDataQuality();
+
+  /// 성능 메트릭스 실시간 모니터링
+  Stream<Map<String, dynamic>> watchPerformanceMetrics();
+
+  // ==========================================================================
+  // 🆕 V4.1 설정 관리 (백테스팅, A/B 테스트 지원)
+  // ==========================================================================
+  
+  /// 현재 설정 내보내기 (JSON 형태)
+  Map<String, dynamic> exportConfiguration();
+
+  /// 설정 가져오기 (백업 복원, 프리셋 적용)
+  void importConfiguration(Map<String, dynamic> config);
+
+  // ==========================================================================
+  // 리소스 정리
+  // ==========================================================================
+  
+  /// 리소스 정리 (온라인 지표 포함)
+  Future<void> dispose();
+}\n\n// ====== lib/domain/repositories/trade_repository.dart ======\n
+// lib/domain/repositories/trade_repository.dart
+import '../entities/trade.dart';
+
+/// Provides streams of trade data and handles resource cleanup.
+abstract class TradeRepository {
+ /// Streams raw [Trade] events for the given list of market codes.
+ Stream<Trade> watchTrades(List<String> markets);
+ 
+ /// Streams lists of [Trade] filtered by a minimum total trade value.
+ /// => markets 파라미터 추가
+ Stream<List<Trade>> watchFilteredTrades(double threshold, List<String> markets);
+ 
+ /// Streams aggregated [Trade] events over a merge window.
+ Stream<Trade> watchAggregatedTrades();
+ 
+ /// 🎯 새로 추가: 동적 임계값 업데이트
+ void updateThreshold(double threshold);
+ 
+ /// 🆕 새로 추가: 구간/누적 모드 업데이트
+ void updateRangeMode(bool isRangeMode);
+ 
+ /// Releases any held resources (e.g., WebSocket connections, Hive boxes).
+ Future<void> dispose();
+}\n\n// ====== lib/domain/repositories/volume_repository.dart ======\n
+// lib/domain/repositories/volume_repository.dart
+
+import '../entities/volume.dart'; // 🆕 Volume 엔티티 import
+
+/// 볼륨 데이터의 시간대별 누적 및 리셋을 관리하는 Repository
+abstract class VolumeRepository {
+  /// 시간대별 거래량 스트림 제공 (Volume 엔티티 리스트)
+  /// [timeFrame]: 시간대 (예: "1m", "5m", "15m")
+  /// [markets]: 모니터링할 마켓 코드 리스트
+  /// Returns: Volume 엔티티 리스트 (볼륨순 정렬)
+  Stream<List<Volume>> watchVolumeByTimeFrame(String timeFrame, List<String> markets);
+  
+  /// 특정 시간대 수동 리셋
+  /// [timeFrame]: 리셋할 시간대
+  void resetTimeFrame(String timeFrame);
+  
+  /// 모든 시간대 수동 리셋
+  void resetAllTimeFrames();
+  
+  /// 다음 리셋 예정 시간 조회
+  /// [timeFrame]: 시간대
+  /// Returns: 다음 리셋 시간 (null이면 리셋 정보 없음)
+  DateTime? getNextResetTime(String timeFrame);
+  
+  /// 활성화된 시간대 목록 조회
+  /// Returns: 사용 가능한 시간대 리스트 (예: ["1m", "5m", "15m"])
+  List<String> getActiveTimeFrames();
+  
+  /// 특정 시간대가 활성화되어 있는지 확인
+  /// [timeFrame]: 확인할 시간대
+  /// Returns: 활성화 여부
+  bool isTimeFrameActive(String timeFrame);
+  
+  /// 리소스 해제
+  Future<void> dispose();
+}\n\n// ====== lib/domain/usecases/signal_usecase.dart ======\n
+import '../entities/signal.dart';
+import '../repositories/signal_repository.dart';
+
+/// 🚀 Signal UseCase V4.1 - 온라인 지표 비즈니스 로직
+/// 
+/// 주요 개선사항:
+/// - V4.1 온라인 지표 시스템 연동
+/// - 고급 패턴 설정 비즈니스 규칙
+/// - 시스템 헬스 모니터링
+/// - 백테스팅 지원
+/// - 성능 최적화된 필터링
+class SignalUseCase {
+  final SignalRepository _repository;
+
+  const SignalUseCase(this._repository);
+
+  // ==========================================================================
+  // 기본 시그널 스트림 (기존 호환성)
+  // ==========================================================================
+
+  /// 특정 패턴의 시그널 스트림 감시
+  Stream<List<Signal>> watchSignalsByPattern(
+    PatternType patternType,
+    List<String> markets,
+  ) {
+    return _repository.watchSignalsByPattern(patternType, markets);
+  }
+
+  /// 모든 패턴의 시그널 스트림 감시
+  Stream<List<Signal>> watchAllSignals(List<String> markets) {
+    return _repository.watchAllSignals(markets);
+  }
+
+  // ==========================================================================
+  // 패턴 설정 관리 (비즈니스 규칙 포함)
+  // ==========================================================================
+
+  /// 패턴별 임계값 업데이트 (비즈니스 규칙 검증)
+  void updatePatternThreshold(PatternType patternType, double threshold) {
+    // 기본 검증
+    if (threshold <= 0) {
+      throw ArgumentError('Threshold must be positive: $threshold');
+    }
+
+    // V4.1 패턴별 임계값 범위 검증 (완화된 기준 적용)
+    switch (patternType) {
+      case PatternType.surge:
+        if (threshold < 0.1 || threshold > 50.0) {
+          throw ArgumentError('Surge threshold must be between 0.1% and 50%: $threshold');
+        }
+        break;
+      case PatternType.flashFire:
+        if (threshold < 1.1 || threshold > 10.0) {
+          throw ArgumentError('FlashFire threshold must be between 1.1x and 10x: $threshold');
+        }
+        break;
+      case PatternType.stackUp:
+        if (threshold < 2 || threshold > 10) {
+          throw ArgumentError('StackUp threshold must be between 2 and 10: $threshold');
+        }
+        break;
+      case PatternType.stealthIn:
+        // V4.1 완화된 기준: 300만 ~ 1억
+        if (threshold < 3000000 || threshold > 100000000) {
+          throw ArgumentError('StealthIn threshold must be between 3M and 100M: $threshold');
+        }
+        break;
+      case PatternType.blackHole:
+        // V4.1 완화된 기준: 0.5% ~ 5%
+        if (threshold < 0.5 || threshold > 5.0) {
+          throw ArgumentError('BlackHole threshold must be between 0.5% and 5%: $threshold');
+        }
+        break;
+      case PatternType.reboundShot:
+        if (threshold < 0.5 || threshold > 20.0) {
+          throw ArgumentError('ReboundShot threshold must be between 0.5% and 20%: $threshold');
+        }
+        break;
+    }
+
+    _repository.updatePatternThreshold(patternType, threshold);
+  }
+
+  /// 패턴별 임계값 조회
+  double getPatternThreshold(PatternType patternType) {
+    return _repository.getPatternThreshold(patternType);
+  }
+
+  /// 패턴 활성화/비활성화 설정
+  void setPatternEnabled(PatternType patternType, bool enabled) {
+    _repository.setPatternEnabled(patternType, enabled);
+  }
+
+  /// 패턴 활성화 상태 조회
+  bool isPatternEnabled(PatternType patternType) {
+    return _repository.isPatternEnabled(patternType);
+  }
+
+  /// 특정 패턴의 시그널 목록 초기화
+  void clearPatternSignals(PatternType patternType) {
+    _repository.clearSignals(patternType);
+  }
+
+  /// 모든 시그널 목록 초기화
+  void clearAllSignals() {
+    _repository.clearSignals(null);
+  }
+
+  // ==========================================================================
+  // 🆕 V4.1 고급 패턴 설정 (비즈니스 규칙 포함)
+  // ==========================================================================
+
+  /// 고급 패턴 설정 업데이트 (비즈니스 규칙 검증)
+  void updateAdvancedPatternConfig(PatternType pattern, String key, double value) {
+    // 설정 키별 비즈니스 규칙 검증
+    switch (key) {
+      case 'zScoreThreshold':
+        if (value < 0.5 || value > 5.0) {
+          throw ArgumentError('Z-Score threshold must be between 0.5 and 5.0: $value');
+        }
+        break;
+      case 'buyRatioMin':
+        if (value < 0.0 || value > 1.0) {
+          throw ArgumentError('Buy ratio must be between 0.0 and 1.0: $value');
+        }
+        break;
+      case 'buyRatioMax':
+        if (value < 0.0 || value > 1.0) {
+          throw ArgumentError('Buy ratio max must be between 0.0 and 1.0: $value');
+        }
+        break;
+      case 'cvThreshold':
+        if (value < 0.001 || value > 0.5) {
+          throw ArgumentError('CV threshold must be between 0.001 and 0.5: $value');
+        }
+        break;
+      case 'rSquaredMin':
+        if (value < 0.0 || value > 1.0) {
+          throw ArgumentError('R-squared must be between 0.0 and 1.0: $value');
+        }
+        break;
+      default:
+        // 일반적인 양수 검증
+        if (value < 0) {
+          throw ArgumentError('Configuration value must be non-negative: $value');
+        }
+    }
+
+    _repository.updatePatternConfig(pattern, key, value);
+  }
+
+  /// 패턴 프리셋 적용 (비즈니스 로직 검증)
+  void applyPatternPreset(String presetName) {
+    final validPresets = ['conservative', 'aggressive', 'balanced'];
+    if (!validPresets.contains(presetName.toLowerCase())) {
+      throw ArgumentError('Invalid preset name. Valid options: ${validPresets.join(', ')}');
+    }
+
+    _repository.applyPatternPreset(presetName);
+  }
+
+  // ==========================================================================
+  // 🆕 V4.1 시스템 모니터링 및 분석
+  // ==========================================================================
+
+  /// 패턴별 성능 통계
+  Future<PatternPerformanceStats> getPatternPerformance(PatternType pattern) async {
+    final stats = await _repository.getPatternStats(pattern);
+    final systemHealth = await _repository.getSystemHealth();
+    
+    return PatternPerformanceStats(
+      patternType: pattern,
+      totalSignals: stats['totalSignals'] ?? 0,
+      recentSignals: stats['recentSignals'] ?? 0,
+      lastSignalTime: stats['lastSignalTime'] != null 
+          ? DateTime.parse(stats['lastSignalTime'])
+          : null,
+      isEnabled: stats['isEnabled'] ?? false,
+      config: Map<String, double>.from(stats['config'] ?? {}),
+      cooldownStatus: Map<String, dynamic>.from(stats['cooldownStatus'] ?? {}),
+      onlineMetricsHealth: systemHealth['onlineMetricsSystem'],
+    );
+  }
+
+  /// 전체 시스템 헬스 체크
+  Future<SystemHealthReport> getSystemHealthReport() async {
+    final health = await _repository.getSystemHealth();
+    final dataQuality = _repository.getMarketDataQuality();
+    
+    return SystemHealthReport(
+      version: health['version'] ?? 'Unknown',
+      status: health['status'] ?? 'Unknown',
+      uptime: health['uptime'] ?? 0,
+      totalProcessedTrades: health['totalProcessedTrades'] ?? 0,
+      activePatterns: health['activePatterns'] ?? 0,
+      trackedMarkets: health['trackedMarkets'] ?? 0,
+      onlineMetricsHealth: health['onlineMetricsSystem'],
+      marketDataQuality: dataQuality,
+      lastProcessingTime: health['lastProcessingTime'] != null 
+          ? DateTime.parse(health['lastProcessingTime'])
+          : null,
+    );
+  }
+
+  /// 성능 메트릭스 스트림 (필터링 포함)
+  Stream<PerformanceMetrics> watchFilteredPerformanceMetrics() {
+    return _repository.watchPerformanceMetrics().map((raw) {
+      return PerformanceMetrics(
+        timestamp: DateTime.parse(raw['timestamp']),
+        version: raw['version'] ?? 'Unknown',
+        totalProcessedTrades: raw['totalProcessedTrades'] ?? 0,
+        activeMarkets: raw['activeMarkets'] ?? 0,
+        signalCounts: Map<String, int>.from(raw['signalCounts'] ?? {}),
+        memoryUsage: Map<String, dynamic>.from(raw['memoryUsage'] ?? {}),
+        onlineMetrics: Map<String, dynamic>.from(raw['onlineMetrics'] ?? {}),
+        architecture: raw['architecture'] ?? 'Unknown',
+      );
+    });
+  }
+
+  // ==========================================================================
+  // 시그널 분석 및 필터링 (개선된 로직)
+  // ==========================================================================
+
+  /// 시그널 통계 정보 계산 (V4.1 온라인 지표 포함)
+  SignalStats calculateSignalStats(List<Signal> signals) {
+    if (signals.isEmpty) {
+      return const SignalStats(
+        totalCount: 0,
+        patternCounts: {},
+        avgChangePercent: 0.0,
+        maxChangePercent: 0.0,
+        minChangePercent: 0.0,
+        totalTradeAmount: 0.0,
+        avgConfidence: 0.0,
+        onlineMetricsCount: 0,
+      );
+    }
+
+    final patternCounts = <PatternType, int>{};
+    double totalChangePercent = 0.0;
+    double maxChangePercent = signals.first.changePercent;
+    double minChangePercent = signals.first.changePercent;
+    double totalTradeAmount = 0.0;
+    double totalConfidence = 0.0;
+    int onlineMetricsCount = 0;
+
+    for (final signal in signals) {
+      // 패턴별 카운트
+      patternCounts[signal.patternType] = 
+          (patternCounts[signal.patternType] ?? 0) + 1;
+
+      // 변화율 통계
+      totalChangePercent += signal.changePercent;
+      if (signal.changePercent > maxChangePercent) {
+        maxChangePercent = signal.changePercent;
+      }
+      if (signal.changePercent < minChangePercent) {
+        minChangePercent = signal.changePercent;
+      }
+
+      // 거래대금 합계
+      totalTradeAmount += signal.tradeAmount;
+      
+      // V4.1 신뢰도 통계
+      final confidence = signal.confidence ?? 0.0;
+      totalConfidence += confidence;
+      
+      // V4.1 온라인 지표 기반 신호 카운트
+      if (signal.hasOnlineMetrics) {
+        onlineMetricsCount++;
+      }
+    }
+
+    return SignalStats(
+      totalCount: signals.length,
+      patternCounts: patternCounts,
+      avgChangePercent: totalChangePercent / signals.length,
+      maxChangePercent: maxChangePercent,
+      minChangePercent: minChangePercent,
+      totalTradeAmount: totalTradeAmount,
+      avgConfidence: totalConfidence / signals.length,
+      onlineMetricsCount: onlineMetricsCount,
+    );
+  }
+
+  /// 고급 시그널 필터링 (V4.1 확장)
+  List<Signal> filterSignals(
+    List<Signal> signals, {
+    double? minChangePercent,
+    double? maxChangePercent,
+    double? minTradeAmount,
+    double? maxTradeAmount,
+    Set<PatternType>? patternTypes,
+    Duration? timeWindow,
+    double? minConfidence,
+    bool? requireOnlineMetrics,
+    Set<String>? markets,
+  }) {
+    return signals.where((signal) {
+      // 기존 필터들
+      if (minChangePercent != null && signal.changePercent < minChangePercent) {
+        return false;
+      }
+      if (maxChangePercent != null && signal.changePercent > maxChangePercent) {
+        return false;
+      }
+      if (minTradeAmount != null && signal.tradeAmount < minTradeAmount) {
+        return false;
+      }
+      if (maxTradeAmount != null && signal.tradeAmount > maxTradeAmount) {
+        return false;
+      }
+      if (patternTypes != null && !patternTypes.contains(signal.patternType)) {
+        return false;
+      }
+      if (timeWindow != null) {
+        final cutoff = DateTime.now().subtract(timeWindow);
+        if (signal.detectedAt.isBefore(cutoff)) {
+          return false;
+        }
+      }
+      
+      // V4.1 새로운 필터들
+      if (minConfidence != null && (signal.confidence ?? 0.0) < minConfidence) {
+        return false;
+      }
+      if (requireOnlineMetrics == true && !signal.hasOnlineMetrics) {
+        return false;
+      }
+      if (markets != null && !markets.contains(signal.market)) {
+        return false;
+      }
+
+      return true;
+    }).toList();
+  }
+
+  // ==========================================================================
+  // 🆕 V4.1 백테스팅 및 설정 관리
+  // ==========================================================================
+
+  /// 현재 설정 백업
+  SignalConfiguration exportCurrentConfiguration() {
+    final config = _repository.exportConfiguration();
+    return SignalConfiguration.fromJson(config);
+  }
+
+  /// 설정 복원
+  void importConfiguration(SignalConfiguration configuration) {
+    _repository.importConfiguration(configuration.toJson());
+  }
+
+  /// 설정 비교 (A/B 테스트용)
+  ConfigurationDiff compareConfigurations(
+    SignalConfiguration configA,
+    SignalConfiguration configB,
+  ) {
+    return ConfigurationDiff.compare(configA, configB);
+  }
+
+  // ==========================================================================
+  // 리소스 정리
+  // ==========================================================================
+
+  /// 리소스 정리
+  Future<void> dispose() async {
+    await _repository.dispose();
+  }
+}
+
+// ==========================================================================
+// 🆕 V4.1 확장 데이터 클래스들
+// ==========================================================================
+
+/// V4.1 향상된 Signal 통계 정보
+class SignalStats {
+  final int totalCount;
+  final Map<PatternType, int> patternCounts;
+  final double avgChangePercent;
+  final double maxChangePercent;
+  final double minChangePercent;
+  final double totalTradeAmount;
+  final double avgConfidence;
+  final int onlineMetricsCount;
+
+  const SignalStats({
+    required this.totalCount,
+    required this.patternCounts,
+    required this.avgChangePercent,
+    required this.maxChangePercent,
+    required this.minChangePercent,
+    required this.totalTradeAmount,
+    required this.avgConfidence,
+    required this.onlineMetricsCount,
+  });
+
+  double get onlineMetricsRatio => 
+      totalCount > 0 ? onlineMetricsCount / totalCount : 0.0;
+
+   /// 🆕 V4.1 JSON 직렬화
+  Map<String, dynamic> toJson() {
+    return {
+      'totalCount': totalCount,
+      'patternCounts': patternCounts.map((k, v) => MapEntry(k.name, v)),
+      'avgChangePercent': avgChangePercent,
+      'maxChangePercent': maxChangePercent,
+      'minChangePercent': minChangePercent,
+      'totalTradeAmount': totalTradeAmount,
+      'avgConfidence': avgConfidence,
+      'onlineMetricsCount': onlineMetricsCount,
+      'onlineMetricsRatio': onlineMetricsRatio,
+    };
+  }
+
+  @override
+  String toString() {
+    return 'SignalStats(total: $totalCount, avg: ${avgChangePercent.toStringAsFixed(2)}%, '
+        'confidence: ${(avgConfidence * 100).toStringAsFixed(1)}%, '
+        'online: ${(onlineMetricsRatio * 100).toStringAsFixed(1)}%)';
+  }
+}
+
+/// 패턴별 성능 통계
+class PatternPerformanceStats {
+  final PatternType patternType;
+  final int totalSignals;
+  final int recentSignals;
+  final DateTime? lastSignalTime;
+  final bool isEnabled;
+  final Map<String, double> config;
+  final Map<String, dynamic> cooldownStatus;
+  final Map<String, dynamic>? onlineMetricsHealth;
+
+  const PatternPerformanceStats({
+    required this.patternType,
+    required this.totalSignals,
+    required this.recentSignals,
+    this.lastSignalTime,
+    required this.isEnabled,
+    required this.config,
+    required this.cooldownStatus,
+    this.onlineMetricsHealth,
+  });
+}
+
+/// 시스템 헬스 리포트
+class SystemHealthReport {
+  final String version;
+  final String status;
+  final int uptime;
+  final int totalProcessedTrades;
+  final int activePatterns;
+  final int trackedMarkets;
+  final Map<String, dynamic>? onlineMetricsHealth;
+  final Map<String, dynamic> marketDataQuality;
+  final DateTime? lastProcessingTime;
+
+  const SystemHealthReport({
+    required this.version,
+    required this.status,
+    required this.uptime,
+    required this.totalProcessedTrades,
+    required this.activePatterns,
+    required this.trackedMarkets,
+    this.onlineMetricsHealth,
+    required this.marketDataQuality,
+    this.lastProcessingTime,
+  });
+
+  bool get isHealthy => status == 'healthy';
+}
+
+/// 성능 메트릭스
+class PerformanceMetrics {
+  final DateTime timestamp;
+  final String version;
+  final int totalProcessedTrades;
+  final int activeMarkets;
+  final Map<String, int> signalCounts;
+  final Map<String, dynamic> memoryUsage;
+  final Map<String, dynamic> onlineMetrics;
+  final String architecture;
+
+  const PerformanceMetrics({
+    required this.timestamp,
+    required this.version,
+    required this.totalProcessedTrades,
+    required this.activeMarkets,
+    required this.signalCounts,
+    required this.memoryUsage,
+    required this.onlineMetrics,
+    required this.architecture,
+  });
+}
+
+/// 설정 정보
+class SignalConfiguration {
+  final String version;
+  final DateTime timestamp;
+  final Map<String, dynamic> patternConfig;
+  final Map<String, bool> patternEnabled;
+  final Map<String, dynamic> systemSettings;
+
+  const SignalConfiguration({
+    required this.version,
+    required this.timestamp,
+    required this.patternConfig,
+    required this.patternEnabled,
+    required this.systemSettings,
+  });
+
+  factory SignalConfiguration.fromJson(Map<String, dynamic> json) {
+    return SignalConfiguration(
+      version: json['version'] ?? 'Unknown',
+      timestamp: DateTime.parse(json['timestamp']),
+      patternConfig: Map<String, dynamic>.from(json['patternConfig'] ?? {}),
+      patternEnabled: Map<String, bool>.from(json['patternEnabled'] ?? {}),
+      systemSettings: Map<String, dynamic>.from(json['systemSettings'] ?? {}),
+    );
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'version': version,
+      'timestamp': timestamp.toIso8601String(),
+      'patternConfig': patternConfig,
+      'patternEnabled': patternEnabled,
+      'systemSettings': systemSettings,
+    };
+  }
+}
+
+/// 설정 비교 결과
+class ConfigurationDiff {
+  final List<String> changedPatterns;
+  final List<String> changedSettings;
+  final Map<String, dynamic> differences;
+
+  const ConfigurationDiff({
+    required this.changedPatterns,
+    required this.changedSettings,
+    required this.differences,
+  });
+
+  static ConfigurationDiff compare(
+    SignalConfiguration configA,
+    SignalConfiguration configB,
+  ) {
+    // 간단한 비교 로직 (실제로는 더 정교하게 구현)
+    return const ConfigurationDiff(
+      changedPatterns: [],
+      changedSettings: [],
+      differences: {},
+    );
+  }
+
+  bool get hasChanges => changedPatterns.isNotEmpty || changedSettings.isNotEmpty;
+}\n\n// ====== lib/domain/usecases/settings_usecase.dart ======\n
+import 'package:flutter/material.dart';
+import '../entities/app_settings.dart';
+import '../repositories/settings_repository.dart';
+
+/// 앱 설정 관련 비즈니스 로직
+class SettingsUsecase {
+ final SettingsRepository _repo;
+
+ SettingsUsecase(this._repo);
+
+ Future<AppSettings> getSettings() {
+   return _repo.getSettings();
+ }
+
+ Future<void> updateThemeMode(ThemeMode mode) {
+   return _repo.updateThemeMode(mode);
+ }
+
+ Future<void> updateKeepScreenOn(bool on) {
+   return _repo.updateKeepScreenOn(on);
+ }
+
+ Future<void> updateSliderPosition(SliderPosition pos) {
+   return _repo.updateSliderPosition(pos);
+ }
+
+ Future<void> updateDisplayMode(DisplayMode mode) {
+   return _repo.updateDisplayMode(mode);
+ }
+
+ Future<void> updateAmountDisplayMode(AmountDisplayMode mode) {
+   return _repo.updateAmountDisplayMode(mode);
+ }
+
+ Future<void> updateBlinkEnabled(bool enabled) {
+   return _repo.updateBlinkEnabled(enabled);
+ }
+
+ Future<void> updateFontFamily(FontFamily font) {
+   return _repo.updateFontFamily(font);
+ }
+
+ Future<void> updateHapticEnabled(bool enabled) {    // 🆕 추가
+   return _repo.updateHapticEnabled(enabled);
+ }
+
+ Future<void> updatePortraitLocked(bool locked) {    // 🆕 추가
+   return _repo.updatePortraitLocked(locked);
+ }
+
+ Future<void> clearCache() {
+   return _repo.clearCache();
+ }
+
+ Future<void> resetSettings() {
+   return _repo.resetSettings();
+ }
+}\n\n// ====== lib/domain/usecases/market_mood_usecase.dart ======\n
+// lib/domain/usecases/market_mood_usecase.dart
+// 🎯 Domain Layer: 비즈니스 로직 (순수 계산 알고리즘)
+
+import 'dart:async';
+import 'dart:math';
+import '../entities/market_mood.dart';
+import '../repositories/market_mood_repository.dart';
+
+/// 💰 마켓 무드 계산기 (순수 비즈니스 로직)
+class MarketMoodCalculator {
+  static MarketMood calculateMoodByComparison(double current, double previous) {
+    if (previous <= 0) return MarketMood.sideways;
+    final changePercent = ((current - previous) / previous) * 100;
+    
+    // [수정] 요청하신 임계값 (10, 5, -5, -10)으로 변경
+    if (changePercent >= 10) return MarketMood.bull;
+    if (changePercent >= 5) return MarketMood.weakBull;
+    if (changePercent >= -5) return MarketMood.sideways;
+    if (changePercent >= -10) return MarketMood.bear;
+    return MarketMood.deepBear;
+  }
+
+  static MarketMood calculateMoodByAbsolute(double volumeUsd) {
+    if (volumeUsd >= 150e9) return MarketMood.bull;
+    if (volumeUsd >= 100e9) return MarketMood.weakBull;
+    if (volumeUsd >= 70e9) return MarketMood.sideways;
+    if (volumeUsd >= 50e9) return MarketMood.bear;
+    return MarketMood.deepBear;
+  }
+}
+
+/// 🧮 볼륨 비교 계산기 (순수 계산 로직)
+class VolumeComparator {
+  final MarketMoodRepository _repository;
+
+  VolumeComparator(this._repository);
+
+  double _calculateChangePercent(double current, double previous) {
+    if (previous <= 0) return 0.0;
+    return ((current - previous) / previous) * 100;
+  }
+
+  double _calculateProgress(int targetMinutes) {
+    final elapsed = DateTime.now().difference(_repository.getAppStartTime()).inMinutes;
+    if (elapsed < targetMinutes) {
+      return min(elapsed / targetMinutes, 1.0);
+    }
+    final cycleElapsed = (elapsed - targetMinutes) % targetMinutes;
+    return cycleElapsed / targetMinutes;
+  }
+
+  double _calculateLongTermProgress(int targetMinutes) {
+    final elapsed = DateTime.now().difference(_repository.getAppStartTime()).inMinutes;
+    return min(elapsed / targetMinutes, 1.0);
+  }
+
+  Future<ComparisonResult> _compareGeneric({
+    required double currentVolume,
+    required int targetMinutes,
+    required bool isLongTermAverage,
+    required int daysForAverage,
+  }) async {
+    final elapsed = DateTime.now().difference(_repository.getAppStartTime()).inMinutes;
+
+    if (isLongTermAverage) {
+      if (elapsed < targetMinutes) {
+        return ComparisonResult.collecting(_calculateLongTermProgress(targetMinutes));
+      }
+      final average = await _repository.getAverageVolume(daysForAverage);
+      if (average == null) {
+        return ComparisonResult.unavailable('샘플 부족');
+      }
+      return ComparisonResult.ready(_calculateChangePercent(currentVolume, average));
+    }
+
+    if (elapsed < targetMinutes) {
+      return ComparisonResult.collecting(_calculateProgress(targetMinutes));
+    }
+    final past = await _repository.getVolumeNMinutesAgo(targetMinutes);
+    if (past == null) {
+      return ComparisonResult.collecting(_calculateProgress(targetMinutes));
+    }
+    return ComparisonResult.ready(_calculateChangePercent(currentVolume, past.volumeUsd));
+  }
+
+  Future<ComparisonResult> compare30Minutes(double currentVolume) =>
+      _compareGeneric(currentVolume: currentVolume, targetMinutes: 30, isLongTermAverage: false, daysForAverage: 0);
+
+  Future<ComparisonResult> compare1Hour(double currentVolume) =>
+      _compareGeneric(currentVolume: currentVolume, targetMinutes: 60, isLongTermAverage: false, daysForAverage: 0);
+
+  Future<ComparisonResult> compare2Hours(double currentVolume) =>
+      _compareGeneric(currentVolume: currentVolume, targetMinutes: 120, isLongTermAverage: false, daysForAverage: 0);
+
+  Future<ComparisonResult> compare4Hours(double currentVolume) =>
+      _compareGeneric(currentVolume: currentVolume, targetMinutes: 240, isLongTermAverage: false, daysForAverage: 0);
+
+  Future<ComparisonResult> compare8Hours(double currentVolume) =>
+      _compareGeneric(currentVolume: currentVolume, targetMinutes: 480, isLongTermAverage: false, daysForAverage: 0);
+
+  Future<ComparisonResult> compare12Hours(double currentVolume) =>
+      _compareGeneric(currentVolume: currentVolume, targetMinutes: 720, isLongTermAverage: false, daysForAverage: 0);
+
+  Future<ComparisonResult> compare24Hours(double currentVolume) =>
+      _compareGeneric(currentVolume: currentVolume, targetMinutes: 1440, isLongTermAverage: false, daysForAverage: 0);
+
+  Future<ComparisonResult> compare3DayAverage(double currentVolume) =>
+      _compareGeneric(currentVolume: currentVolume, targetMinutes: 4320, isLongTermAverage: true, daysForAverage: 3);
+
+  Future<ComparisonResult> compareWeeklyAverage(double currentVolume) =>
+      _compareGeneric(currentVolume: currentVolume, targetMinutes: 10080, isLongTermAverage: true, daysForAverage: 7);
+
+  /// [개선] 전체 비교 데이터 계산 (병렬 처리)
+  Future<ComparisonData> calculateAll(double currentVolume) async {
+    final results = await Future.wait([
+      compare30Minutes(currentVolume),
+      compare1Hour(currentVolume),
+      compare2Hours(currentVolume),
+      compare4Hours(currentVolume),
+      compare8Hours(currentVolume),
+      compare12Hours(currentVolume),
+      compare24Hours(currentVolume),
+      compare3DayAverage(currentVolume),
+      compareWeeklyAverage(currentVolume),
+    ]);
+
+    return ComparisonData(
+      thirtyMin: results[0],
+      oneHour: results[1],
+      twoHour: results[2],
+      fourHour: results[3],
+      eightHour: results[4],
+      twelveHour: results[5],
+      twentyFourHour: results[6],
+      threeDayAverage: results[7],
+      weeklyAverage: results[8],
+    );
+  }
+}
+
+/// 🎯 마켓무드 UseCase (전체 비즈니스 로직 조합) - Provider와 매칭
+class MarketMoodUsecase {
+  final MarketMoodRepository _repository;
+  final VolumeComparator _comparator;
+
+  MarketMoodUsecase(this._repository) : _comparator = VolumeComparator(_repository);
+
+  Future<void> addVolumeData(double volumeUsd) async {
+    final volumeData = VolumeData(
+      timestamp: DateTime.now(),
+      volumeUsd: volumeUsd,
+    );
+    await _repository.addVolumeData(volumeData);
+  }
+
+  /// [수정] 현재 마켓무드 계산 기준을 2시간으로 변경
+  Future<MarketMood> calculateCurrentMood(double currentVolume) async {
+    // 2시간 = 120분
+    final twoHoursAgo = await _repository.getVolumeNMinutesAgo(120);
+    
+    if (twoHoursAgo != null) {
+      return MarketMoodCalculator.calculateMoodByComparison(
+        currentVolume, 
+        twoHoursAgo.volumeUsd
+      );
+    }
+    return MarketMoodCalculator.calculateMoodByAbsolute(currentVolume);
+  }
+
+  Future<ComparisonData> calculateVolumeComparison(double currentVolume) {
+    return _comparator.calculateAll(currentVolume);
+  }
+
+  MarketMoodSystemState createSystemState({
+    required MarketMoodData? marketData,
+    required ComparisonData comparisonData,
+    required MarketMood currentMood,
+    required double exchangeRate,
+    required bool isLoading,
+    required bool hasError,
+  }) {
+    return MarketMoodSystemState(
+      marketData: marketData,
+      comparisonData: comparisonData,
+      currentMood: currentMood,
+      exchangeRate: exchangeRate,
+      isLoading: isLoading,
+      hasError: hasError,
+    );
+  }
+
+  String generateMoodSummary(MarketMood mood) {
+    switch (mood) {
+      case MarketMood.bull: return '🚀 불장';
+      case MarketMood.weakBull: return '🔥 약불장';
+      case MarketMood.sideways: return '⚖️ 중간장';
+      case MarketMood.bear: return '💧 물장';
+      case MarketMood.deepBear: return '🧊 얼음장';
+    }
+  }
+
+  Future<void> handleBackgroundResume() async {
+    await _repository.syncMissingData();
+  }
+
+  Future<Map<String, dynamic>> getSystemHealth() async {
+    return await _repository.getSystemHealth();
+  }
+
+  Future<void> logSystemStatus() async {
+    await _repository.logCurrentStatus();
+  }
+
+  Future<int> getCollectedDataCount() async {
+    return await _repository.getCollectedDataCount();
+  }
+
+  DateTime getAppStartTime() {
+    return _repository.getAppStartTime();
+  }
+
+  Future<double> getExchangeRate() async {
+    return await _repository.getExchangeRate();
+  }
+
+  Future<void> refreshExchangeRate() async {
+    await _repository.refreshExchangeRate();
+  }
+}\n\n// ====== lib/domain/usecases/volume_usecase.dart ======\n
+// lib/domain/usecases/volume_usecase.dart
+
+import 'dart:async';
+import '../../core/error/app_exception.dart';
+import '../../core/extensions/result.dart';
+import '../entities/volume.dart';
+import '../repositories/volume_repository.dart';
+
+/// Volume 관련 비즈니스 로직을 제공하는 UseCase
+class VolumeUsecase {
+  final VolumeRepository _repository;
+
+  VolumeUsecase(this._repository);
+
+  /// 시간대별 볼륨 랭킹 스트림 반환 (에러 처리 포함)
+  Stream<Result<List<Volume>, AppException>> getVolumeRanking(
+    String timeFrame,
+    List<String> markets,
+  ) {
+    return _repository
+        .watchVolumeByTimeFrame(timeFrame, markets)
+        .transform(_wrapWithErrorHandling<List<Volume>>('Volume ranking failed'));
+  }
+
+  /// 특정 시간대 수동 리셋
+  Result<void, AppException> resetTimeFrame(String timeFrame) {
+    try {
+      _repository.resetTimeFrame(timeFrame);
+      return const Ok(null);
+    } catch (e) {
+      return Err(AppException('Reset timeframe failed: $e'));
+    }
+  }
+
+  /// 모든 시간대 수동 리셋
+  Result<void, AppException> resetAllTimeFrames() {
+    try {
+      _repository.resetAllTimeFrames();
+      return const Ok(null);
+    } catch (e) {
+      return Err(AppException('Reset all timeframes failed: $e'));
+    }
+  }
+
+  /// 다음 리셋 시간 조회
+  Result<DateTime?, AppException> getNextResetTime(String timeFrame) {
+    try {
+      final resetTime = _repository.getNextResetTime(timeFrame);
+      return Ok(resetTime);
+    } catch (e) {
+      return Err(AppException('Get reset time failed: $e'));
+    }
+  }
+
+  /// 활성 시간대 목록 조회
+  Result<List<String>, AppException> getActiveTimeFrames() {
+    try {
+      final timeFrames = _repository.getActiveTimeFrames();
+      return Ok(timeFrames);
+    } catch (e) {
+      return Err(AppException('Get active timeframes failed: $e'));
+    }
+  }
+
+  /// 시간대 유효성 검증
+  Result<bool, AppException> validateTimeFrame(String timeFrame) {
+    try {
+      final isActive = _repository.isTimeFrameActive(timeFrame);
+      return Ok(isActive);
+    } catch (e) {
+      return Err(AppException('Validate timeframe failed: $e'));
+    }
+  }
+
+  /// 볼륨 데이터 유효성 검증 (비즈니스 로직)
+  Result<List<Volume>, AppException> validateVolumeData(List<Volume> volumes) {
+    try {
+      // 비즈니스 규칙: 볼륨이 있는 것만, 중복 제거, 정렬 확인
+      final validVolumes = volumes
+          .where((v) => v.hasVolume && v.market.isNotEmpty)
+          .toSet() // 중복 제거
+          .toList();
+
+      // 정렬 확인 (볼륨 내림차순)
+      final isSorted = _isVolumeSorted(validVolumes);
+      if (!isSorted) {
+        validVolumes.sort((a, b) => b.totalVolume.compareTo(a.totalVolume));
+      }
+
+      return Ok(validVolumes);
+    } catch (e) {
+      return Err(AppException('Volume data validation failed: $e'));
+    }
+  }
+
+  /// 시간대별 볼륨 비교 (비즈니스 로직)
+  Result<Map<String, double>, AppException> compareVolumeAcrossTimeFrames(
+    String market,
+    List<String> timeFrames,
+  ) {
+    try {
+      // 여러 시간대의 특정 코인 볼륨 비교
+      // 실제 구현은 Repository에서 여러 스트림을 조합해야 함
+      final comparison = <String, double>{};
+      
+      // TODO: 실제 구현 시 여러 timeFrame의 데이터를 조합
+      // 현재는 단순 예시
+      for (final tf in timeFrames) {
+        comparison[tf] = 0.0; // 실제 데이터 조회 필요
+      }
+      
+      return Ok(comparison);
+    } catch (e) {
+      return Err(AppException('Volume comparison failed: $e'));
+    }
+  }
+
+  /// 헬퍼: 볼륨 정렬 확인
+  bool _isVolumeSorted(List<Volume> volumes) {
+    if (volumes.length <= 1) return true;
+    
+    for (int i = 0; i < volumes.length - 1; i++) {
+      if (volumes[i].totalVolume < volumes[i + 1].totalVolume) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /// 헬퍼: 에러 처리 변환기
+  StreamTransformer<T, Result<T, AppException>> _wrapWithErrorHandling<T>(String errorMsg) {
+    return StreamTransformer.fromHandlers(
+      handleData: (data, sink) => sink.add(Ok(data)),
+      handleError: (error, stack, sink) =>
+          sink.add(Err(AppException('$errorMsg: $error'))),
+    );
+  }
+}\n\n// ====== lib/domain/usecases/surge_usecase.dart ======\n
+// lib/domain/usecases/surge_usecase.dart
+import 'dart:async';
+import '../../core/error/app_exception.dart';
+import '../../core/extensions/result.dart';
+import '../entities/surge.dart';
+import '../repositories/surge_repository.dart';
+
+/// Surge(급등/급락) 관련 비즈니스 로직을 제공하는 UseCase
+class SurgeUsecase {
+  final SurgeRepository _repository;
+
+  SurgeUsecase(this._repository);
+
+  /// 시간대별 급등/급락 랭킹 스트림 반환 (에러 처리 포함)
+  Stream<Result<List<Surge>, AppException>> getSurgeRanking(
+    String timeFrame,
+    List<String> markets,
+  ) {
+    return _repository
+        .watchSurgeByTimeFrame(timeFrame, markets)
+        .transform(_wrapWithErrorHandling<List<Surge>>('Surge ranking failed'));
+  }
+
+  /// 특정 시간대 수동 리셋
+  Result<void, AppException> resetTimeFrame(String timeFrame) {
+    try {
+      _repository.resetTimeFrame(timeFrame);
+      return const Ok(null);
+    } catch (e) {
+      return Err(AppException('Reset timeframe failed: $e'));
+    }
+  }
+
+  /// 모든 시간대 수동 리셋
+  Result<void, AppException> resetAllTimeFrames() {
+    try {
+      _repository.resetAllTimeFrames();
+      return const Ok(null);
+    } catch (e) {
+      return Err(AppException('Reset all timeframes failed: $e'));
+    }
+  }
+
+  /// 다음 리셋 시간 조회
+  Result<DateTime?, AppException> getNextResetTime(String timeFrame) {
+    try {
+      final resetTime = _repository.getNextResetTime(timeFrame);
+      return Ok(resetTime);
+    } catch (e) {
+      return Err(AppException('Get reset time failed: $e'));
+    }
+  }
+
+  /// 활성 시간대 목록 조회
+  Result<List<String>, AppException> getActiveTimeFrames() {
+    try {
+      final timeFrames = _repository.getActiveTimeFrames();
+      return Ok(timeFrames);
+    } catch (e) {
+      return Err(AppException('Get active timeframes failed: $e'));
+    }
+  }
+
+  /// 시간대 유효성 검증
+  Result<bool, AppException> validateTimeFrame(String timeFrame) {
+    try {
+      final isActive = _repository.isTimeFrameActive(timeFrame);
+      return Ok(isActive);
+    } catch (e) {
+      return Err(AppException('Validate timeframe failed: $e'));
+    }
+  }
+
+  /// 급등/급락 데이터 유효성 검증 (비즈니스 로직)
+  Result<List<Surge>, AppException> validateSurgeData(List<Surge> surges) {
+    try {
+      // 비즈니스 규칙: 변동이 있는 것만, 중복 제거, 정렬 확인
+      final validSurges = surges
+          .where((s) => s.hasChange && s.market.isNotEmpty)
+          .toSet() // 중복 제거
+          .toList();
+
+      // 정렬 확인 (변동률 절댓값 내림차순)
+      final isSorted = _isSurgeSorted(validSurges);
+      if (!isSorted) {
+        validSurges.sort((a, b) => b.absChangePercent.compareTo(a.absChangePercent));
+      }
+
+      return Ok(validSurges);
+    } catch (e) {
+      return Err(AppException('Surge data validation failed: $e'));
+    }
+  }
+
+  /// 급등/급락 필터링 (비즈니스 로직)
+  Result<List<Surge>, AppException> filterSurgesByType(
+    List<Surge> surges,
+    SurgeFilterType filterType,
+  ) {
+    try {
+      List<Surge> filtered;
+      
+      switch (filterType) {
+        case SurgeFilterType.all:
+          filtered = surges;
+          break;
+        case SurgeFilterType.risingOnly:
+          filtered = surges.where((s) => s.isRising).toList();
+          break;
+        case SurgeFilterType.fallingOnly:
+          filtered = surges.where((s) => s.isFalling).toList();
+          break;
+      }
+
+      return Ok(filtered);
+    } catch (e) {
+      return Err(AppException('Surge filtering failed: $e'));
+    }
+  }
+
+  /// 시간대별 급등/급락 비교 (비즈니스 로직)
+  Result<Map<String, double>, AppException> compareSurgeAcrossTimeFrames(
+    String market,
+    List<String> timeFrames,
+  ) {
+    try {
+      // 여러 시간대의 특정 코인 변동률 비교
+      // 실제 구현은 Repository에서 여러 스트림을 조합해야 함
+      final comparison = <String, double>{};
+      
+      // TODO: 실제 구현 시 여러 timeFrame의 데이터를 조합
+      // 현재는 단순 예시
+      for (final tf in timeFrames) {
+        comparison[tf] = 0.0; // 실제 데이터 조회 필요
+      }
+      
+      return Ok(comparison);
+    } catch (e) {
+      return Err(AppException('Surge comparison failed: $e'));
+    }
+  }
+
+  /// 급등/급락 통계 계산 (비즈니스 로직)
+  Result<SurgeStatistics, AppException> calculateSurgeStatistics(List<Surge> surges) {
+    try {
+      if (surges.isEmpty) {
+        return Ok(SurgeStatistics.empty());
+      }
+
+      final risingCount = surges.where((s) => s.isRising).length;
+      final fallingCount = surges.where((s) => s.isFalling).length;
+      final maxRising = surges.where((s) => s.isRising).isNotEmpty 
+          ? surges.where((s) => s.isRising).map((s) => s.changePercent).reduce((a, b) => a > b ? a : b)
+          : 0.0;
+      final maxFalling = surges.where((s) => s.isFalling).isNotEmpty 
+          ? surges.where((s) => s.isFalling).map((s) => s.changePercent).reduce((a, b) => a < b ? a : b)
+          : 0.0;
+
+      return Ok(SurgeStatistics(
+        totalCount: surges.length,
+        risingCount: risingCount,
+        fallingCount: fallingCount,
+        maxRisingPercent: maxRising,
+        maxFallingPercent: maxFalling,
+      ));
+    } catch (e) {
+      return Err(AppException('Surge statistics calculation failed: $e'));
+    }
+  }
+
+  /// 헬퍼: 급등/급락 정렬 확인
+  bool _isSurgeSorted(List<Surge> surges) {
+    if (surges.length <= 1) return true;
+    
+    for (int i = 0; i < surges.length - 1; i++) {
+      if (surges[i].absChangePercent < surges[i + 1].absChangePercent) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /// 헬퍼: 에러 처리 변환기
+  StreamTransformer<T, Result<T, AppException>> _wrapWithErrorHandling<T>(String errorMsg) {
+    return StreamTransformer.fromHandlers(
+      handleData: (data, sink) => sink.add(Ok(data)),
+      handleError: (error, stack, sink) =>
+          sink.add(Err(AppException('$errorMsg: $error'))),
+    );
+  }
+}
+
+/// 급등/급락 필터 타입
+enum SurgeFilterType {
+  all,            // 전체 (급등 + 급락)
+  risingOnly,     // 상승만
+  fallingOnly,    // 하락만
+}
+
+/// 급등/급락 통계 데이터
+class SurgeStatistics {
+  final int totalCount;
+  final int risingCount;
+  final int fallingCount;
+  final double maxRisingPercent;
+  final double maxFallingPercent;
+
+  const SurgeStatistics({
+    required this.totalCount,
+    required this.risingCount,
+    required this.fallingCount,
+    required this.maxRisingPercent,
+    required this.maxFallingPercent,
+  });
+
+  factory SurgeStatistics.empty() {
+    return const SurgeStatistics(
+      totalCount: 0,
+      risingCount: 0,
+      fallingCount: 0,
+      maxRisingPercent: 0.0,
+      maxFallingPercent: 0.0,
+    );
+  }
+
+  /// 급등 비율 (0.0 ~ 1.0)
+  double get risingRatio => totalCount > 0 ? risingCount / totalCount : 0.0;
+  
+  /// 급락 비율 (0.0 ~ 1.0)
+  double get fallingRatio => totalCount > 0 ? fallingCount / totalCount : 0.0;
+  
+  /// 급등 우세 여부
+  bool get isRisingDominant => risingCount > fallingCount;
+  
+  /// 급락 우세 여부
+  bool get isFallingDominant => fallingCount > risingCount;
+}\n\n// ====== lib/domain/usecases/trade_usecase.dart ======\n
+// lib/domain/usecases/trade_usecase.dart
+
+import 'dart:async';
+import '../../core/error/app_exception.dart';
+import '../../core/extensions/result.dart';
+import '../entities/trade.dart';
+import '../repositories/trade_repository.dart';
+
+/// Trade 관련 비즈니스 로직을 제공하는 UseCase
+class TradeUsecase {
+  final TradeRepository _repository;
+
+  TradeUsecase(this._repository);
+
+  /// threshold와 markets를 기준으로 필터링된 거래 목록 스트림 반환
+  Stream<Result<List<Trade>, AppException>> filterTrades(
+    double threshold,
+    List<String> markets,
+  ) {
+    return _repository
+        .watchFilteredTrades(threshold, markets)
+        .transform(_wrap<List<Trade>>('Filter trades failed'));
+  }
+
+  /// 집계된 거래 스트림 반환
+  Stream<Result<Trade, AppException>> aggregateTrades() {
+    return _repository
+        .watchAggregatedTrades()
+        .transform(_wrap<Trade>('Aggregate trades failed'));
+  }
+
+  StreamTransformer<T, Result<T, AppException>> _wrap<T>(String errorMsg) {
+    return StreamTransformer.fromHandlers(
+      handleData: (data, sink) => sink.add(Ok(data)),
+      handleError: (error, stack, sink) =>
+          sink.add(Err(AppException('$errorMsg: $error'))),
+    );
+  }
+}\n\n// ====== lib/domain/usecases/filter_params.dart ======\n
+// ===== lib/domain/usecases/filter_params.dart =====
+import '../entities/signal.dart'; // PatternType import 추가
+
+class FilterParams {
+  final double? minChangePercent;
+  final double? maxChangePercent;
+  final double? minTradeAmount;
+  final double? maxTradeAmount;
+  final Set<PatternType>? patternTypes; // ✅ 수정: 올바른 import
+  final Duration? timeWindow;
+  final double? minSeverityScore;
+
+  const FilterParams({
+    this.minChangePercent,
+    this.maxChangePercent,
+    this.minTradeAmount,
+    this.maxTradeAmount,
+    this.patternTypes, // ✅ 수정: 올바른 import
+    this.timeWindow,
+    this.minSeverityScore,
+  });
+
+  FilterParams copyWith({
+    double? minChangePercent,
+    double? maxChangePercent,
+    double? minTradeAmount,
+    double? maxTradeAmount,
+    Set<PatternType>? patternTypes, // ✅ 수정: 올바른 import
+    Duration? timeWindow,
+    double? minSeverityScore,
+  }) {
+    return FilterParams(
+      minChangePercent: minChangePercent ?? this.minChangePercent,
+      maxChangePercent: maxChangePercent ?? this.maxChangePercent,
+      minTradeAmount: minTradeAmount ?? this.minTradeAmount,
+      maxTradeAmount: maxTradeAmount ?? this.maxTradeAmount,
+      patternTypes: patternTypes ?? this.patternTypes,
+      timeWindow: timeWindow ?? this.timeWindow,
+      minSeverityScore: minSeverityScore ?? this.minSeverityScore,
+    );
+  }
+}
+\n\n// ====== lib/domain/entities/app_settings.dart ======\n
+import 'package:flutter/material.dart';
+import 'package:equatable/equatable.dart';
+
+/// 슬라이더 위치를 표현하는 enum
+enum SliderPosition { top, bottom }
+
+/// 🆕 코인명 표시 방식을 표현하는 enum
+enum DisplayMode {
+ ticker, // BTC, ETH, XRP
+ korean, // 비트코인, 이더리움, 리플
+ english, // Bitcoin, Ethereum, Ripple
+}
+
+/// 💰 금액 표시 방식을 표현하는 enum
+enum AmountDisplayMode {
+ number, // 1,234만 (숫자)
+ icon, // 💵 (아이콘)
+}
+
+/// 🔤 폰트 패밀리를 표현하는 enum (✨ pubspec.yaml 기준으로 정리)
+enum FontFamily {
+ // --- 기본 ---
+ pretendard,
+ // --- 전체 추가 폰트 ---
+ dotGothic16,
+ dynaPuff,
+ gloriaHallelujah,
+ gowunDodum,
+ gugi,
+ ibmPlexSansKRLight,
+ inconsolata,
+ kirangHaerang,
+ nanumGothicCoding,
+ notoSerifKR,
+ novaMono,
+ novaSquare,
+ permanentMarker,
+ pixelifySans,
+ sunflowerLight,
+ syneMono;
+
+ // 실제 폰트명 매핑 (✨ pubspec.yaml 기준으로 정리)
+ String get fontName {
+   switch (this) {
+     case FontFamily.pretendard: return 'Pretendard';
+     case FontFamily.dotGothic16: return 'DotGothic16-Regular';
+     case FontFamily.dynaPuff: return 'DynaPuff-VariableFont_wdth,wght';
+     case FontFamily.gloriaHallelujah: return 'GloriaHallelujah-Regular';
+     case FontFamily.gowunDodum: return 'GowunDodum-Regular';
+     case FontFamily.gugi: return 'Gugi-Regular';
+     case FontFamily.ibmPlexSansKRLight: return 'IBMPlexSansKR-Light';
+     case FontFamily.inconsolata: return 'Inconsolata-VariableFont_wdth,wght';
+     case FontFamily.kirangHaerang: return 'KirangHaerang-Regular';
+     case FontFamily.nanumGothicCoding: return 'NanumGothicCoding-Regular';
+     case FontFamily.notoSerifKR: return 'NotoSerifKR-VariableFont_wght';
+     case FontFamily.novaMono: return 'NovaMono-Regular';
+     case FontFamily.novaSquare: return 'NovaSquare-Regular';
+     case FontFamily.permanentMarker: return 'PermanentMarker-Regular';
+     case FontFamily.pixelifySans: return 'PixelifySans-VariableFont_wght';
+     case FontFamily.sunflowerLight: return 'Sunflower-Light';
+     case FontFamily.syneMono: return 'SyneMono-Regular';
+   }
+ }
+}
+
+class AppSettings extends Equatable {
+ final ThemeMode themeMode;
+ final bool keepScreenOn;
+ final SliderPosition sliderPosition;
+ final DisplayMode displayMode;
+ final AmountDisplayMode amountDisplayMode;
+ final bool blinkEnabled;
+ final FontFamily fontFamily;
+ final bool isHapticEnabled;      // 🆕 햅틱 피드백 설정
+ final bool isPortraitLocked;     // 🆕 화면 회전 잠금 설정
+
+ const AppSettings({
+   this.themeMode = ThemeMode.system,
+   this.keepScreenOn = false,
+   this.sliderPosition = SliderPosition.top,
+   this.displayMode = DisplayMode.ticker,
+   this.amountDisplayMode = AmountDisplayMode.number,
+   this.blinkEnabled = true,
+   this.fontFamily = FontFamily.pretendard,
+   this.isHapticEnabled = true,      // 🆕 기본값: 활성화
+   this.isPortraitLocked = false,    // 🆕 기본값: 자동 회전
+ });
+
+ AppSettings copyWith({
+   ThemeMode? themeMode,
+   bool? keepScreenOn,
+   SliderPosition? sliderPosition,
+   DisplayMode? displayMode,
+   AmountDisplayMode? amountDisplayMode,
+   bool? blinkEnabled,
+   FontFamily? fontFamily,
+   bool? isHapticEnabled,           // 🆕 추가
+   bool? isPortraitLocked,          // 🆕 추가
+ }) =>
+     AppSettings(
+       themeMode: themeMode ?? this.themeMode,
+       keepScreenOn: keepScreenOn ?? this.keepScreenOn,
+       sliderPosition: sliderPosition ?? this.sliderPosition,
+       displayMode: displayMode ?? this.displayMode,
+       amountDisplayMode: amountDisplayMode ?? this.amountDisplayMode,
+       blinkEnabled: blinkEnabled ?? this.blinkEnabled,
+       fontFamily: fontFamily ?? this.fontFamily,
+       isHapticEnabled: isHapticEnabled ?? this.isHapticEnabled,        // 🆕 추가
+       isPortraitLocked: isPortraitLocked ?? this.isPortraitLocked,     // 🆕 추가
+     );
+
+ @override
+ List<Object?> get props => [
+   themeMode,
+   keepScreenOn,
+   sliderPosition,
+   displayMode,
+   amountDisplayMode,
+   blinkEnabled,
+   fontFamily,
+   isHapticEnabled,      // 🆕 추가
+   isPortraitLocked,     // 🆕 추가
+ ];
+}\n\n// ====== lib/domain/entities/momentary.dart ======\n
+\n\n// ====== lib/domain/entities/trade.dart ======\n
+import 'package:equatable/equatable.dart';
+
+/// 순수 도메인 모델: 비즈니스 로직만 포함
+class Trade extends Equatable {
+  /// 시장 코드 (예: "KRW-BTC")
+  final String market;
+
+  /// 체결 단가
+  final double price;
+
+  /// 체결 수량
+  final double volume;
+
+  /// 'BID' 또는 'ASK'
+  final String side;
+
+  /// 가격 변동량
+  final double changePrice;
+
+  /// 변동 상태 ('RISE'/'FALL'/'EVEN')
+  final String changeState;
+
+  /// UTC 밀리초 타임스탬프
+  final int timestampMs;
+
+  /// 중복 제거용 고유 ID
+  final String sequentialId;
+
+  const Trade({
+    required this.market,
+    required this.price,
+    required this.volume,
+    required this.side,
+    required this.changePrice,
+    required this.changeState,
+    required this.timestampMs,
+    required this.sequentialId,
+  });
+
+  @override
+  List<Object?> get props => [
+        market,
+        price,
+        volume,
+        side,
+        changePrice,
+        changeState,
+        timestampMs,
+        sequentialId,
+      ];
+
+  /// 총 체결 금액
+  double get total => price * volume;
+
+  /// 매수 여부
+  bool get isBuy => side == 'BID';
+
+  /// DateTime 변환
+  DateTime get timestamp => DateTime.fromMillisecondsSinceEpoch(timestampMs);
+}
+\n\n// ====== lib/domain/entities/surge.dart ======\n
+// lib/domain/entities/surge.dart
+import 'package:equatable/equatable.dart';
+import '../../core/config/app_config.dart';
+
+/// 순수 도메인 모델: 급등/급락 데이터 비즈니스 로직
+class Surge extends Equatable {
+  /// 시장 코드 (예: "KRW-BTC")
+  final String market;
+  
+  /// 해당 시간대 변동률 (퍼센트 기준)
+  final double changePercent;
+  
+  /// 시간대 시작 가격
+  final double basePrice;
+  
+  /// 현재 가격
+  final double currentPrice;
+  
+  /// 마지막 업데이트 시간 (UTC 밀리초)
+  final int lastUpdatedMs;
+  
+  /// 시간대 (예: "1m", "5m", "15m")
+  final String timeFrame;
+  
+  /// 해당 시간대 시작 시간 (UTC 밀리초)
+  final int timeFrameStartMs;
+
+  const Surge({
+    required this.market,
+    required this.changePercent,
+    required this.basePrice,
+    required this.currentPrice,
+    required this.lastUpdatedMs,
+    required this.timeFrame,
+    required this.timeFrameStartMs,
+  });
+
+  @override
+  List<Object?> get props => [
+    market,
+    changePercent,
+    basePrice,
+    currentPrice,
+    lastUpdatedMs,
+    timeFrame,
+    timeFrameStartMs,
+  ];
+
+  /// 마지막 업데이트 DateTime 변환
+  DateTime get lastUpdated => DateTime.fromMillisecondsSinceEpoch(lastUpdatedMs);
+  
+  /// 시간대 시작 DateTime 변환
+  DateTime get timeFrameStart => DateTime.fromMillisecondsSinceEpoch(timeFrameStartMs);
+  
+  /// 시간대 종료 예정 시간
+  DateTime get timeFrameEnd {
+    final duration = _getTimeFrameDuration();
+    return timeFrameStart.add(duration);
+  }
+  
+  /// 현재 시간대 남은 시간 (초)
+  int get remainingSeconds {
+    final now = DateTime.now();
+    final remaining = timeFrameEnd.difference(now).inSeconds;
+    return remaining > 0 ? remaining : 0;
+  }
+  
+  /// 현재 시간대 남은 시간 포맷 (예: "3:42", "12:18")
+  String get remainingTimeFormatted {
+    final remaining = remainingSeconds;
+    if (remaining <= 0) return "00:00";
+    
+    final hours = remaining ~/ 3600;
+    final minutes = (remaining % 3600) ~/ 60;
+    final seconds = remaining % 60;
+    
+    if (hours > 0) {
+      return "${hours.toString().padLeft(2, '0')}:${minutes.toString().padLeft(2, '0')}:${seconds.toString().padLeft(2, '0')}";
+    } else {
+      return "${minutes.toString().padLeft(2, '0')}:${seconds.toString().padLeft(2, '0')}";
+    }
+  }
+  
+  /// 시간대별 Duration 계산 (AppConfig.timeFrames 활용)
+  Duration _getTimeFrameDuration() {
+    // timeFrame에서 분 단위 추출 ("15m" → 15)
+    final minutes = int.tryParse(timeFrame.replaceAll('m', ''));
+    if (minutes != null && AppConfig.timeFrames.contains(minutes)) {
+      return Duration(minutes: minutes);
+    }
+    return const Duration(minutes: 15); // 기본값
+  }
+  
+  /// 변동이 유의미한지 체크 (0이 아님)
+  bool get hasChange => changePercent != 0;
+  
+  /// 급등인지 체크 (양수)
+  bool get isRising => changePercent > 0;
+  
+  /// 급락인지 체크 (음수)
+  bool get isFalling => changePercent < 0;
+  
+  /// 변동률 절댓값
+  double get absChangePercent => changePercent.abs();
+  
+  /// 코인 티커만 추출 (KRW- 제거)
+  String get ticker => market.replaceFirst('KRW-', '');
+  
+  /// 변동률 포맷팅 (예: "+12.34%", "-5.67%")
+  String get formattedChangePercent {
+    final sign = changePercent >= 0 ? '+' : '';
+    return '$sign${changePercent.toStringAsFixed(2)}%';
+  }
+  
+  /// 복사본 생성 (불변성 유지)
+  Surge copyWith({
+    String? market,
+    double? changePercent,
+    double? basePrice,
+    double? currentPrice,
+    int? lastUpdatedMs,
+    String? timeFrame,
+    int? timeFrameStartMs,
+  }) {
+    return Surge(
+      market: market ?? this.market,
+      changePercent: changePercent ?? this.changePercent,
+      basePrice: basePrice ?? this.basePrice,
+      currentPrice: currentPrice ?? this.currentPrice,
+      lastUpdatedMs: lastUpdatedMs ?? this.lastUpdatedMs,
+      timeFrame: timeFrame ?? this.timeFrame,
+      timeFrameStartMs: timeFrameStartMs ?? this.timeFrameStartMs,
+    );
+  }
+}\n\n// ====== lib/domain/entities/volume.dart ======\n
+// lib/domain/entities/volume.dart
+
+import 'package:equatable/equatable.dart';
+import '../../core/config/app_config.dart';
+
+/// 순수 도메인 모델: 볼륨 데이터 비즈니스 로직
+class Volume extends Equatable {
+  /// 시장 코드 (예: "KRW-BTC")
+  final String market;
+  
+  /// 해당 시간대 총 거래량 (원화 기준)
+  final double totalVolume;
+  
+  /// 마지막 업데이트 시간 (UTC 밀리초)
+  final int lastUpdatedMs;
+  
+  /// 시간대 (예: "1m", "5m", "15m")
+  final String timeFrame;
+  
+  /// 해당 시간대 시작 시간 (UTC 밀리초)
+  final int timeFrameStartMs;
+
+  const Volume({
+    required this.market,
+    required this.totalVolume,
+    required this.lastUpdatedMs,
+    required this.timeFrame,
+    required this.timeFrameStartMs,
+  });
+
+  @override
+  List<Object?> get props => [
+    market,
+    totalVolume,
+    lastUpdatedMs,
+    timeFrame,
+    timeFrameStartMs,
+  ];
+
+  /// 마지막 업데이트 DateTime 변환
+  DateTime get lastUpdated => DateTime.fromMillisecondsSinceEpoch(lastUpdatedMs);
+  
+  /// 시간대 시작 DateTime 변환
+  DateTime get timeFrameStart => DateTime.fromMillisecondsSinceEpoch(timeFrameStartMs);
+  
+  /// 시간대 종료 예정 시간
+  DateTime get timeFrameEnd {
+    final duration = _getTimeFrameDuration();
+    return timeFrameStart.add(duration);
+  }
+  
+  /// 현재 시간대 남은 시간 (초)
+  int get remainingSeconds {
+    final now = DateTime.now();
+    final remaining = timeFrameEnd.difference(now).inSeconds;
+    return remaining > 0 ? remaining : 0;
+  }
+  
+  /// 현재 시간대 남은 시간 포맷 (예: "3:42", "12:18")
+  String get remainingTimeFormatted {
+    final remaining = remainingSeconds;
+    if (remaining <= 0) return "00:00";
+    
+    final hours = remaining ~/ 3600;
+    final minutes = (remaining % 3600) ~/ 60;
+    final seconds = remaining % 60;
+    
+    if (hours > 0) {
+      return "${hours.toString().padLeft(2, '0')}:${minutes.toString().padLeft(2, '0')}:${seconds.toString().padLeft(2, '0')}";
+    } else {
+      return "${minutes.toString().padLeft(2, '0')}:${seconds.toString().padLeft(2, '0')}";
+    }
+  }
+  
+  /// 시간대별 Duration 계산 (AppConfig.timeFrames 활용)
+  Duration _getTimeFrameDuration() {
+    // timeFrame에서 분 단위 추출 ("15m" → 15)
+    final minutes = int.tryParse(timeFrame.replaceAll('m', ''));
+    if (minutes != null && AppConfig.timeFrames.contains(minutes)) {
+      return Duration(minutes: minutes);
+    }
+    return const Duration(minutes: 15); // 기본값
+  }
+  
+  /// 볼륨이 유의미한지 체크 (0보다 큼)
+  bool get hasVolume => totalVolume > 0;
+  
+  /// 코인 티커만 추출 (KRW- 제거)
+  String get ticker => market.replaceFirst('KRW-', '');
+  
+  /// 복사본 생성 (불변성 유지)
+  Volume copyWith({
+    String? market,
+    double? totalVolume,
+    int? lastUpdatedMs,
+    String? timeFrame,
+    int? timeFrameStartMs,
+  }) {
+    return Volume(
+      market: market ?? this.market,
+      totalVolume: totalVolume ?? this.totalVolume,
+      lastUpdatedMs: lastUpdatedMs ?? this.lastUpdatedMs,
+      timeFrame: timeFrame ?? this.timeFrame,
+      timeFrameStartMs: timeFrameStartMs ?? this.timeFrameStartMs,
+    );
+  }
+}\n\n// ====== lib/domain/entities/signal.dart ======\n
+// lib/domain/entities/signal.dart
+
+/// 🚀 Signal Entity V4.1 - 온라인 지표 연동
+/// 
+/// 주요 개선사항:
+/// - 온라인 RSI/MACD 정보 포함
+/// - 다이버전스 감지 결과
+/// - 신뢰도 동적 조정
+/// - 스트림 건강성 정보
+/// - 패턴별 고급 메타데이터
+
+/// Signal 패턴 타입 정의 (V4.1 확장)
+enum PatternType {
+  surge,       // 1. 급등 (1분 전 대비 0.4% 상승)
+  flashFire,   // 2. 불티🔥 (3분 거래대금 급증)
+  stackUp,     // 3. 스택업💰 (1분씩 연속 증가)
+  stealthIn,   // 4. 침투자👣 (소량 지속 유입) - 완화됨
+  blackHole,   // 5. 블랙홀🕳️ (거래대금↑ 가격변동↓) - 완화됨
+  reboundShot, // 6. 쇼트터치⚡ (급락 후 반등)
+}
+
+extension PatternTypeExtension on PatternType {
+  String get displayName {
+    switch (this) {
+      case PatternType.surge:
+        return '급등';
+      case PatternType.flashFire:
+        return '불티🔥';
+      case PatternType.stackUp:
+        return '스택업💰';
+      case PatternType.stealthIn:
+        return '침투자👣';
+      case PatternType.blackHole:
+        return '블랙홀🕳️';
+      case PatternType.reboundShot:
+        return '쇼트터치⚡';
+    }
+  }
+
+  String get description {
+    switch (this) {
+      case PatternType.surge:
+        return '1분 전 대비 0.4% 이상 상승 (V4.1)';
+      case PatternType.flashFire:
+        return '3분 거래대금 급증 + RSI 확인';
+      case PatternType.stackUp:
+        return '연속 매집 + MACD 모멘텀';
+      case PatternType.stealthIn:
+        return '은밀한 유입 (완화된 기준)';
+      case PatternType.blackHole:
+        return '이상 체결 (완화된 기준)';
+      case PatternType.reboundShot:
+        return '과매도 반등 + 온라인 지표';
+    }
+  }
+
+  /// V4.1 패턴별 기본 임계값 (완화됨)
+  double get defaultThreshold {
+    switch (this) {
+      case PatternType.surge:
+        return 0.4; // 0.4% 상승 (기존 1.1%에서 완화)
+      case PatternType.flashFire:
+        return 2.0; // 2배 급증
+      case PatternType.stackUp:
+        return 2.0; // 2연속 (기존 3에서 완화)
+      case PatternType.stealthIn:
+        return 5000000.0; // 500만원 (기존 2000만에서 대폭 완화)
+      case PatternType.blackHole:
+        return 2.0; // 2% 이하 변동 (기존 1%에서 완화)
+      case PatternType.reboundShot:
+        return 1.5; // 1.5% 급락 후 반등
+    }
+  }
+
+  /// 패턴별 시간 윈도우 (분)
+  int get timeWindowMinutes {
+    switch (this) {
+      case PatternType.surge:
+        return 1; // 1분
+      case PatternType.flashFire:
+        return 1; // 1분 (V4.1 단축)
+      case PatternType.stackUp:
+        return 1; // 1분
+      case PatternType.stealthIn:
+        return 5; // 5분
+      case PatternType.blackHole:
+        return 5; // 5분 (V4.1 확장)
+      case PatternType.reboundShot:
+        return 1; // 1분
+    }
+  }
+
+  /// V4.1 패턴별 기본 쿨다운 시간 (초)
+  int get defaultCooldownSeconds {
+    switch (this) {
+      case PatternType.surge:
+        return 3; // 빠른 감지
+      case PatternType.flashFire:
+        return 2; // 가장 빠름
+      case PatternType.stackUp:
+        return 4; // 중간
+      case PatternType.stealthIn:
+        return 8; // 느림 (은밀함 특성)
+      case PatternType.blackHole:
+        return 10; // 가장 느림 (안정성 특성)
+      case PatternType.reboundShot:
+        return 5; // 중간
+    }
+  }
+
+  /// V4.1 패턴별 신뢰도 기본값
+  double get defaultConfidence {
+    switch (this) {
+      case PatternType.surge:
+        return 0.8; // 높음
+      case PatternType.flashFire:
+        return 0.85; // 매우 높음
+      case PatternType.stackUp:
+        return 0.75; // 중간
+      case PatternType.stealthIn:
+        return 0.7; // 낮음 (은밀함)
+      case PatternType.blackHole:
+        return 0.8; // 높음 (안정성)
+      case PatternType.reboundShot:
+        return 0.9; // 매우 높음 (명확함)
+    }
+  }
+}
+
+/// 🆕 V4.1 온라인 지표 정보
+class OnlineIndicatorInfo {
+  final double? rsi;
+  final double? macd;
+  final double? macdSignal;
+  final double? macdHistogram;
+  final bool isStale;
+  final DateTime lastUpdate;
+
+  const OnlineIndicatorInfo({
+    this.rsi,
+    this.macd,
+    this.macdSignal,
+    this.macdHistogram,
+    required this.isStale,
+    required this.lastUpdate,
+  });
+
+  /// RSI/MACD가 유효한지 체크
+  bool get hasValidData => !isStale && (rsi != null || macd != null);
+
+  /// RSI 과매수/과매도 상태
+  String get rsiState {
+    if (rsi == null) return 'N/A';
+    if (rsi! >= 70) return 'Overbought';
+    if (rsi! <= 30) return 'Oversold';
+    return 'Neutral';
+  }
+
+  /// MACD 신호 상태
+  String get macdState {
+    if (macd == null || macdSignal == null) return 'N/A';
+    if (macd! > macdSignal!) return 'Bullish';
+    if (macd! < macdSignal!) return 'Bearish';
+    return 'Neutral';
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'rsi': rsi,
+      'macd': macd,
+      'macdSignal': macdSignal,
+      'macdHistogram': macdHistogram,
+      'isStale': isStale,
+      'lastUpdate': lastUpdate.toIso8601String(),
+      'rsiState': rsiState,
+      'macdState': macdState,
+    };
+  }
+}
+
+/// 🆕 V4.1 다이버전스 정보
+class DivergenceInfo {
+  final bool isBullish;
+  final bool isBearish;
+  final double strength;
+  final String source; // 'online-rsi', 'online-macd' 등
+
+  const DivergenceInfo({
+    required this.isBullish,
+    required this.isBearish,
+    required this.strength,
+    required this.source,
+  });
+
+  /// 다이버전스 타입
+  String get type {
+    if (isBullish) return 'Bullish';
+    if (isBearish) return 'Bearish';
+    return 'None';
+  }
+
+  /// 신뢰도 (강도 기반)
+  String get confidenceLevel {
+    if (strength >= 0.8) return 'Very High';
+    if (strength >= 0.6) return 'High';
+    if (strength >= 0.4) return 'Medium';
+    if (strength >= 0.2) return 'Low';
+    return 'Very Low';
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'isBullish': isBullish,
+      'isBearish': isBearish,
+      'strength': strength,
+      'source': source,
+      'type': type,
+      'confidenceLevel': confidenceLevel,
+    };
+  }
+}
+
+/// 🚀 Signal 감지 결과 엔티티 V4.1
+class Signal {
+  final String market;
+  final String name;
+  final double currentPrice;
+  final double changePercent;
+  final double volume;
+  final double tradeAmount;
+  final DateTime detectedAt;
+  final PatternType patternType;
+  final Map<String, dynamic> patternDetails;
+
+  const Signal({
+    required this.market,
+    required this.name,
+    required this.currentPrice,
+    required this.changePercent,
+    required this.volume,
+    required this.tradeAmount,
+    required this.detectedAt,
+    required this.patternType,
+    required this.patternDetails,
+  });
+
+  /// 거래 총액 계산
+  double get total => currentPrice * volume;
+
+  /// 코인 티커만 추출 (KRW- 제거)
+  String get ticker => market.replaceFirst('KRW-', '');
+
+  /// 🆕 V4.1 신뢰도 (동적 조정된 최종 신뢰도)
+  double? get confidence {
+    final finalConf = patternDetails['finalConfidence'] as double?;
+    final originalConf = patternDetails['confidence'] as double?;
+    return finalConf ?? originalConf;
+  }
+
+  /// 🆕 V4.1 온라인 지표 정보 조회
+  OnlineIndicatorInfo? get onlineIndicators {
+    final rsi = patternDetails['rsi'] as double?;
+    final macd = patternDetails['macd'] as double?;
+    final macdSignal = patternDetails['macdSignal'] as double?;
+    final macdHistogram = patternDetails['macdHistogram'] as double?;
+    
+    if (rsi == null && macd == null) return null;
+    
+    return OnlineIndicatorInfo(
+      rsi: rsi,
+      macd: macd,
+      macdSignal: macdSignal,
+      macdHistogram: macdHistogram,
+      isStale: false, // Signal 생성시점에는 최신
+      lastUpdate: detectedAt,
+    );
+  }
+
+  /// 🆕 V4.1 다이버전스 정보 조회
+  DivergenceInfo? get divergence {
+    final divData = patternDetails['divergence'] as Map<String, dynamic>?;
+    if (divData == null) return null;
+    
+    return DivergenceInfo(
+      isBullish: divData['isBullish'] as bool? ?? false,
+      isBearish: divData['isBearish'] as bool? ?? false,
+      strength: (divData['strength'] as num?)?.toDouble() ?? 0.0,
+      source: divData['source'] as String? ?? 'unknown',
+    );
+  }
+
+  /// 🆕 온라인 지표 기반 신호인지 체크
+  bool get hasOnlineMetrics {
+    return onlineIndicators?.hasValidData ?? false;
+  }
+
+  /// 🆕 V4.1 버전 정보
+  String? get version => patternDetails['version'] as String?;
+
+  /// 패턴별 특화 정보 getter들
+  
+  /// Surge 전용: 기준가 (1분 전 가격)
+  double? get basePrice => patternDetails['basePrice'] as double?;
+  
+  /// FlashFire 전용: 급증 배율
+  double? get surgeMultiplier => patternDetails['surgeMultiplier'] as double?;
+  
+  /// StackUp 전용: 연속 증가 횟수
+  int? get consecutiveCount => patternDetails['consecutiveCount'] as int?;
+  
+  /// StealthIn 전용: 지속 시간 (초)
+  int? get sustainedSeconds => patternDetails['sustainedSeconds'] as int?;
+  
+  /// BlackHole 전용: 가격 변동률
+  double? get priceStability => patternDetails['priceStability'] as double?;
+  
+  /// ReboundShot 전용: 반등 강도
+  double? get reboundStrength => patternDetails['reboundStrength'] as double?;
+
+  /// 🆕 V4.1 고급 지표들
+  double? get liquidityVortex => patternDetails['liquidityVortex'] as double?;
+  double? get flashPulse => patternDetails['flashPulse'] as double?;
+  double? get microBurstRadar => patternDetails['microBurstRadar'] as double?;
+  double? get machineRush => patternDetails['machineRush'] as double?;
+  double? get jumpScore => patternDetails['jumpScore'] as double?;
+  double? get zScore => patternDetails['zScore'] as double?;
+
+  /// 🆕 신뢰도 레벨 (텍스트)
+  String get confidenceLevel {
+    final conf = confidence ?? 0.0;
+    if (conf >= 0.9) return 'Excellent';
+    if (conf >= 0.8) return 'Very High';
+    if (conf >= 0.7) return 'High';
+    if (conf >= 0.6) return 'Good';
+    if (conf >= 0.5) return 'Medium';
+    if (conf >= 0.3) return 'Low';
+    return 'Very Low';
+  }
+
+  /// 🆕 신호 강도 (종합 점수)
+  String get signalStrength {
+    double score = 0.0;
+    
+    // 기본 점수 (변화율 기반)
+    score += (changePercent.abs() / 10.0).clamp(0.0, 1.0);
+    
+    // 신뢰도 점수
+    score += (confidence ?? 0.0);
+    
+    // 온라인 지표 보너스
+    if (hasOnlineMetrics) score += 0.3;
+    
+    // 다이버전스 보너스
+    final div = divergence;
+    if (div != null && div.strength > 0.5) score += 0.2;
+    
+    score = score.clamp(0.0, 3.0) / 3.0; // 0-1 정규화
+    
+    if (score >= 0.8) return 'Very Strong';
+    if (score >= 0.6) return 'Strong';
+    if (score >= 0.4) return 'Moderate';
+    if (score >= 0.2) return 'Weak';
+    return 'Very Weak';
+  }
+
+  /// 🆕 상세 정보 (디버깅용)
+  Map<String, dynamic> get debugInfo {
+    return {
+      'market': market,
+      'pattern': patternType.name,
+      'confidence': confidence,
+      'hasOnlineMetrics': hasOnlineMetrics,
+      'onlineIndicators': onlineIndicators?.toJson(),
+      'divergence': divergence?.toJson(),
+      'signalStrength': signalStrength,
+      'version': version,
+      'detectedAt': detectedAt.toIso8601String(),
+    };
+  }
+
+  Signal copyWith({
+    String? market,
+    String? name,
+    double? currentPrice,
+    double? changePercent,
+    double? volume,
+    double? tradeAmount,
+    DateTime? detectedAt,
+    PatternType? patternType,
+    Map<String, dynamic>? patternDetails,
+  }) {
+    return Signal(
+      market: market ?? this.market,
+      name: name ?? this.name,
+      currentPrice: currentPrice ?? this.currentPrice,
+      changePercent: changePercent ?? this.changePercent,
+      volume: volume ?? this.volume,
+      tradeAmount: tradeAmount ?? this.tradeAmount,
+      detectedAt: detectedAt ?? this.detectedAt,
+      patternType: patternType ?? this.patternType,
+      patternDetails: patternDetails ?? this.patternDetails,
+    );
+  }
+
+  @override
+  String toString() {
+    final confText = confidence != null 
+        ? '${(confidence! * 100).toStringAsFixed(1)}%' 
+        : 'N/A';
+    final onlineText = hasOnlineMetrics ? '[Online]' : '';
+    
+    return 'Signal(${patternType.displayName} $onlineText: $market '
+        '${changePercent.toStringAsFixed(2)}% @ $currentPrice, '
+        'Conf: $confText, at: ${detectedAt.toString().substring(11, 19)})';
+  }
+
+  @override
+  bool operator ==(Object other) {
+    if (identical(this, other)) return true;
+    return other is Signal &&
+        other.market == market &&
+        other.detectedAt == detectedAt &&
+        other.patternType == patternType;
+  }
+
+  @override
+  int get hashCode {
+    return market.hashCode ^ detectedAt.hashCode ^ patternType.hashCode;
+  }
+
+  /// 🆕 V4.1 JSON 직렬화 (저장/로드용)
+  Map<String, dynamic> toJson() {
+    return {
+      'market': market,
+      'name': name,
+      'currentPrice': currentPrice,
+      'changePercent': changePercent,
+      'volume': volume,
+      'tradeAmount': tradeAmount,
+      'detectedAt': detectedAt.toIso8601String(),
+      'patternType': patternType.name,
+      'patternDetails': patternDetails,
+      'version': 'V4.1-Online',
+    };
+  }
+
+  /// 🆕 V4.1 JSON 역직렬화
+  factory Signal.fromJson(Map<String, dynamic> json) {
+    return Signal(
+      market: json['market'] as String,
+      name: json['name'] as String,
+      currentPrice: (json['currentPrice'] as num).toDouble(),
+      changePercent: (json['changePercent'] as num).toDouble(),
+      volume: (json['volume'] as num).toDouble(),
+      tradeAmount: (json['tradeAmount'] as num).toDouble(),
+      detectedAt: DateTime.parse(json['detectedAt'] as String),
+      patternType: PatternType.values.firstWhere(
+        (e) => e.name == json['patternType'],
+        orElse: () => PatternType.surge,
+      ),
+      patternDetails: Map<String, dynamic>.from(json['patternDetails'] as Map),
+    );
+  }
+}\n\n// ====== lib/domain/entities/market_mood.dart ======\n
+// lib/domain/entities/market_mood.dart
+// 🎯 Domain Layer: 순수 엔티티들 (VolumeData 추가)
+
+import '../../core/utils/date_time.dart'; // DateTime extension
+
+/// 🕒 볼륨 관련 상수 정의
+class VolumeConstants {
+ static const int minutesPerSlot = 30;
+ static const int slotsPerHour = 60 ~/ minutesPerSlot; // 2
+ static const int hoursPerDay = 24;
+ static const int daysInBuffer = 7;
+ static const int totalSlots = slotsPerHour * hoursPerDay * daysInBuffer; // 336
+ static const int maxMinutesBuffer = minutesPerSlot * totalSlots; // 10080
+ static const String volumeBoxName = 'market_volumes';
+}
+
+/// 🔥 시장 분위기 enum
+enum MarketMood {
+ bull,       // 🚀 불장
+ weakBull,   // 🔥 약불장
+ sideways,   // ⚖️ 중간장
+ bear,       // 💧 물장
+ deepBear,   // 🧊 얼음장
+}
+
+/// 📈 볼륨 데이터 엔티티 (30분 단위)
+class VolumeData {
+ final DateTime timestamp;
+ final double volumeUsd;
+
+ const VolumeData({
+   required this.timestamp,
+   required this.volumeUsd,
+ });
+
+ /// DateTime extension 활용
+ String get formattedTime => timestamp.yyyyMMddhhmm();
+ String get timeAgoText => timestamp.timeAgo();
+ String get shortTime => timestamp.hhmmss();
+
+ /// JSON 직렬화
+ Map<String, dynamic> toJson() => {
+   'timestamp': timestamp.toIso8601String(),
+   'volume_usd': volumeUsd,
+ };
+
+ factory VolumeData.fromJson(Map<String, dynamic> json) {
+   return VolumeData(
+     timestamp: DateTime.parse(json['timestamp']),
+     volumeUsd: (json['volume_usd'] as num).toDouble(),
+   );
+ }
+
+ @override
+ bool operator ==(Object other) =>
+     identical(this, other) ||
+     other is VolumeData &&
+         runtimeType == other.runtimeType &&
+         timestamp == other.timestamp &&
+         volumeUsd == other.volumeUsd;
+
+ @override
+ int get hashCode => timestamp.hashCode ^ volumeUsd.hashCode;
+
+ @override
+ String toString() =>
+     'VolumeData(${volumeUsd.toStringAsFixed(0)}B USD at ${timestamp.hhmmss()})';
+}
+
+/// 📊 마켓 무드 데이터 엔티티
+class MarketMoodData {
+ final double totalMarketCapUsd;
+ final double totalVolumeUsd;
+ final double btcDominance;
+ final double marketCapChange24h;
+ final DateTime updatedAt;
+
+ const MarketMoodData({
+   required this.totalMarketCapUsd,
+   required this.totalVolumeUsd,
+   required this.btcDominance,
+   required this.marketCapChange24h,
+   required this.updatedAt,
+ });
+
+ /// JSON 직렬화 (DTO 호환용)
+ Map<String, dynamic> toJson() => {
+   'total_market_cap_usd': totalMarketCapUsd,
+   'total_volume_usd': totalVolumeUsd,
+   'btc_dominance': btcDominance,
+   'market_cap_change_24h': marketCapChange24h,
+   'updated_at': updatedAt.toIso8601String(),
+ };
+
+ @override
+ bool operator ==(Object other) =>
+     identical(this, other) ||
+     other is MarketMoodData &&
+         runtimeType == other.runtimeType &&
+         totalMarketCapUsd == other.totalMarketCapUsd &&
+         totalVolumeUsd == other.totalVolumeUsd &&
+         btcDominance == other.btcDominance &&
+         marketCapChange24h == other.marketCapChange24h;
+
+ @override
+ int get hashCode =>
+     totalMarketCapUsd.hashCode ^
+     totalVolumeUsd.hashCode ^
+     btcDominance.hashCode ^
+     marketCapChange24h.hashCode;
+
+ @override
+ String toString() =>
+     'MarketMoodData(volume: ${totalVolumeUsd.toStringAsFixed(0)}, '
+     'cap: ${totalMarketCapUsd.toStringAsFixed(0)}, '
+     'btc: ${btcDominance.toStringAsFixed(1)}%)';
+}
+
+/// 📊 비교 결과 엔티티
+class ComparisonResult {
+ final bool isReady;
+ final double? changePercent;
+ final double progressPercent;
+ final String status;
+
+ const ComparisonResult({
+   required this.isReady,
+   this.changePercent,
+   required this.progressPercent,
+   required this.status,
+ });
+
+ factory ComparisonResult.collecting(double progress) {
+   return ComparisonResult(
+     isReady: false,
+     changePercent: null,
+     progressPercent: progress,
+     status: '수집중',
+   );
+ }
+
+ factory ComparisonResult.ready(double changePercent) {
+   return ComparisonResult(
+     isReady: true,
+     changePercent: changePercent,
+     progressPercent: 1.0,
+     status: '완료',
+   );
+ }
+
+ factory ComparisonResult.unavailable(String message) {
+   return ComparisonResult(
+     isReady: false,
+     changePercent: null,
+     progressPercent: 0.0,
+     status: message,
+   );
+ }
+
+ @override
+ bool operator ==(Object other) =>
+     identical(this, other) ||
+     other is ComparisonResult &&
+         runtimeType == other.runtimeType &&
+         isReady == other.isReady &&
+         changePercent == other.changePercent &&
+         progressPercent == other.progressPercent &&
+         status == other.status;
+
+ @override
+ int get hashCode =>
+     isReady.hashCode ^
+     changePercent.hashCode ^
+     progressPercent.hashCode ^
+     status.hashCode;
+
+ @override
+ String toString() =>
+     'ComparisonResult(ready: $isReady, change: $changePercent%, progress: ${(progressPercent * 100).round()}%)';
+}
+
+/// 📈 전체 비교 데이터 엔티티
+class ComparisonData {
+ final ComparisonResult thirtyMin;
+ final ComparisonResult oneHour;
+ final ComparisonResult twoHour;
+ final ComparisonResult fourHour;
+ final ComparisonResult eightHour;
+ final ComparisonResult twelveHour;
+ final ComparisonResult twentyFourHour;
+ final ComparisonResult threeDayAverage;
+ final ComparisonResult weeklyAverage;
+
+ const ComparisonData({
+   required this.thirtyMin,
+   required this.oneHour,
+   required this.twoHour,
+   required this.fourHour,
+   required this.eightHour,
+   required this.twelveHour,
+   required this.twentyFourHour,
+   required this.threeDayAverage,
+   required this.weeklyAverage,
+ });
+
+ factory ComparisonData.loading() {
+   final loading = ComparisonResult.collecting(0.0);
+   return ComparisonData(
+     thirtyMin: loading,
+     oneHour: loading,
+     twoHour: loading,
+     fourHour: loading,
+     eightHour: loading,
+     twelveHour: loading,
+     twentyFourHour: loading,
+     threeDayAverage: loading,
+     weeklyAverage: loading,
+   );
+ }
+
+ factory ComparisonData.error() {
+   final error = ComparisonResult.unavailable('오류');
+   return ComparisonData(
+     thirtyMin: error,
+     oneHour: error,
+     twoHour: error,
+     fourHour: error,
+     eightHour: error,
+     twelveHour: error,
+     twentyFourHour: error,
+     threeDayAverage: error,
+     weeklyAverage: error,
+   );
+ }
+
+ /// 모든 비교 결과를 리스트로 반환
+ List<ComparisonResult> get allResults => [
+       thirtyMin,
+       oneHour,
+       twoHour,
+       fourHour,
+       eightHour,
+       twelveHour,
+       twentyFourHour,
+       threeDayAverage,
+       weeklyAverage,
+     ];
+
+ /// 준비된 비교 결과 개수
+ int get readyCount => allResults.where((r) => r.isReady).length;
+
+ /// 전체 진행률 (0.0 ~ 1.0)
+ double get overallProgress =>
+     allResults.map((r) => r.progressPercent).reduce((a, b) => a + b) / 9;
+
+ @override
+ bool operator ==(Object other) =>
+     identical(this, other) ||
+     other is ComparisonData &&
+         runtimeType == other.runtimeType &&
+         thirtyMin == other.thirtyMin &&
+         oneHour == other.oneHour &&
+         twoHour == other.twoHour &&
+         fourHour == other.fourHour &&
+         eightHour == other.eightHour &&
+         twelveHour == other.twelveHour &&
+         twentyFourHour == other.twentyFourHour &&
+         threeDayAverage == other.threeDayAverage &&
+         weeklyAverage == other.weeklyAverage;
+
+ @override
+ int get hashCode => Object.hash(
+       thirtyMin,
+       oneHour,
+       twoHour,
+       fourHour,
+       eightHour,
+       twelveHour,
+       twentyFourHour,
+       threeDayAverage,
+       weeklyAverage,
+     );
+
+ @override
+ String toString() =>
+     'ComparisonData(ready: $readyCount/9, progress: ${(overallProgress * 100).round()}%)';
+}
+
+/// 📦 전체 시스템 상태 엔티티
+class MarketMoodSystemState {
+ final MarketMoodData? marketData;
+ final ComparisonData comparisonData;
+ final MarketMood currentMood;
+ final double exchangeRate;
+ final bool isLoading;
+ final bool hasError;
+
+ const MarketMoodSystemState({
+   required this.marketData,
+   required this.comparisonData,
+   required this.currentMood,
+   required this.exchangeRate,
+   required this.isLoading,
+   required this.hasError,
+ });
+
+ /// 시스템이 정상 작동 중인지 확인
+ bool get isHealthy => !hasError && marketData != null;
+
+ /// 데이터 수집 진행률 (0.0 ~ 1.0)
+ double get dataProgress => comparisonData.overallProgress;
+
+ /// 상태 요약 문자열
+ String get statusSummary {
+   if (hasError) return '오류 발생';
+   if (isLoading) return '로딩 중';
+   if (marketData == null) return '데이터 없음';
+   return '정상 작동';
+ }
+
+ @override
+ bool operator ==(Object other) =>
+     identical(this, other) ||
+     other is MarketMoodSystemState &&
+         runtimeType == other.runtimeType &&
+         marketData == other.marketData &&
+         comparisonData == other.comparisonData &&
+         currentMood == other.currentMood &&
+         exchangeRate == other.exchangeRate &&
+         isLoading == other.isLoading &&
+         hasError == other.hasError;
+
+ @override
+ int get hashCode => Object.hash(
+       marketData,
+       comparisonData,
+       currentMood,
+       exchangeRate,
+       isLoading,
+       hasError,
+     );
+
+ @override
+ String toString() =>
+     'MarketMoodSystemState(mood: $currentMood, status: $statusSummary, progress: ${(dataProgress * 100).round()}%)';
+}

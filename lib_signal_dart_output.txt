@@ -1,0 +1,2324 @@
+\n\n// ====== lib/core/di/signal_provider.dart ======\n
+// lib/core/di/signal_provider.dart
+
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../config/app_config.dart';
+import '../utils/logger.dart';
+import 'trade_provider.dart'; // 전체 import (app_providers.dart 패턴)
+import '../../data/repositories/signal_repository_impl.dart';
+import '../../domain/entities/signal.dart';
+import '../../domain/repositories/signal_repository.dart';
+import '../../domain/usecases/signal_usecase.dart';
+
+/// Signal Repository Provider
+final signalRepoProvider = Provider<SignalRepository>((ref) {
+  final remoteDS = ref.read(remoteDSProvider);
+  return SignalRepositoryImpl(remoteDS);
+});
+
+/// Signal UseCase Provider
+final signalUsecaseProvider = Provider<SignalUseCase>((ref) {
+  final repository = ref.read(signalRepoProvider);
+  return SignalUseCase(repository);
+});
+
+/// 현재 선택된 패턴 인덱스 (슬라이더 위치)
+final signalPatternIndexProvider = StateProvider<int>((_) => 0);
+
+/// 현재 선택된 패턴 타입
+final signalPatternTypeProvider = StateProvider<PatternType>((ref) {
+  final index = ref.watch(signalPatternIndexProvider);
+  final patternName = AppConfig.getSignalPatternByIndex(index);
+  
+  // AppConfig 패턴명을 PatternType으로 변환
+  switch (patternName) {
+    case 'surge':
+      return PatternType.surge;
+    case 'flashFire':
+      return PatternType.flashFire;
+    case 'stackUp':
+      return PatternType.stackUp;
+    case 'stealthIn':
+      return PatternType.stealthIn;
+    case 'blackHole':
+      return PatternType.blackHole;
+    case 'reboundShot':
+      return PatternType.reboundShot;
+    default:
+      return PatternType.surge; // 기본값
+  }
+});
+
+/// 패턴별 임계값 관리 (AppConfig 기본값 기반)
+final signalThresholdProvider = StateProvider.family<double, PatternType>((ref, pattern) {
+  final patternName = _getPatternConfigName(pattern);
+  return AppConfig.getSignalThreshold(patternName);
+});
+
+/// 패턴별 활성화 상태 관리
+final signalPatternEnabledProvider = StateProvider.family<bool, PatternType>((ref, pattern) => true);
+
+/// 현재 패턴의 시그널 스트림
+final signalListProvider = StreamProvider.autoDispose<List<Signal>>((ref) async* {
+  // Prevent immediate dispose on loss of listeners
+  ref.keepAlive();
+
+  // 현재 선택된 패턴과 마켓 정보 구독
+  final patternType = ref.watch(signalPatternTypeProvider);
+  final repository = ref.read(signalRepoProvider);
+
+  // marketsProvider에서 데이터 로드 (Trade와 동일한 패턴)
+  final markets = await ref.watch(marketsProvider.future);
+
+  // 패턴 변경 시 로그
+  if (AppConfig.enableTradeLog) {
+    log.i('Signal pattern changed to: ${patternType.displayName}');
+  }
+
+  // 임계값 변경 감지 및 Repository 업데이트
+  ref.listen<double>(signalThresholdProvider(patternType), (prev, next) {
+    if (prev != null && prev != next) {
+      if (AppConfig.enableTradeLog) {
+        log.i('Signal threshold changed: ${patternType.displayName} ${prev.toStringAsFixed(2)} → ${next.toStringAsFixed(2)}');
+      }
+      repository.updatePatternThreshold(patternType, next);
+    }
+  });
+
+  // 패턴 활성화 상태 변경 감지
+  ref.listen<bool>(signalPatternEnabledProvider(patternType), (prev, next) {
+    if (prev != null && prev != next) {
+      if (AppConfig.enableTradeLog) {
+        log.i('Signal pattern ${next ? "enabled" : "disabled"}: ${patternType.displayName}');
+      }
+      repository.setPatternEnabled(patternType, next);
+    }
+  });
+
+  // 패턴별 시그널 스트림 방출
+  yield* repository.watchSignalsByPattern(patternType, markets);
+});
+
+/// 모든 패턴의 시그널 통합 스트림
+final allSignalsProvider = StreamProvider.autoDispose<List<Signal>>((ref) async* {
+  // Prevent dispose on background
+  ref.keepAlive();
+  
+  final repository = ref.read(signalRepoProvider);
+  
+  // marketsProvider에서 데이터 로드 (Trade와 동일한 패턴)
+  final markets = await ref.watch(marketsProvider.future);
+  
+  if (AppConfig.enableTradeLog) {
+    log.i('All signals stream initialized with ${markets.length} markets');
+  }
+  
+  yield* repository.watchAllSignals(markets);
+});
+
+/// Signal 패턴 컨트롤러
+final signalPatternController = Provider((ref) => SignalPatternController(ref));
+
+class SignalPatternController {
+  final Ref ref;
+  SignalPatternController(this.ref);
+
+  /// 패턴 인덱스 변경 (슬라이더 이동)
+  void updatePatternIndex(int index) {
+    final maxIndex = AppConfig.signalPatterns.length - 1;
+    if (index < 0 || index > maxIndex) {
+      if (AppConfig.enableTradeLog) {
+        log.w('Invalid pattern index: $index (max: $maxIndex)');
+      }
+      return;
+    }
+
+    ref.read(signalPatternIndexProvider.notifier).state = index;
+    
+    if (AppConfig.enableTradeLog) {
+      final patternName = AppConfig.getSignalPatternByIndex(index);
+      log.i('Pattern index updated: $index (${AppConfig.getSignalPatternName(patternName)})');
+    }
+  }
+
+  /// 현재 패턴의 임계값 변경
+  void updateThreshold(double threshold) {
+    final currentPattern = ref.read(signalPatternTypeProvider);
+    ref.read(signalThresholdProvider(currentPattern).notifier).state = threshold;
+  }
+
+  /// 패턴 활성화/비활성화
+  void setPatternEnabled(PatternType pattern, bool enabled) {
+    ref.read(signalPatternEnabledProvider(pattern).notifier).state = enabled;
+  }
+
+  /// 시그널 초기화
+  void clearSignals([PatternType? pattern]) {
+    final repository = ref.read(signalRepoProvider);
+    repository.clearSignals(pattern);
+    
+    if (AppConfig.enableTradeLog) {
+      final message = pattern != null 
+          ? 'Signals cleared for pattern: ${pattern.displayName}'
+          : 'All signals cleared';
+      log.i(message);
+    }
+  }
+
+  /// 현재 상태 조회
+  int get currentIndex => ref.read(signalPatternIndexProvider);
+  PatternType get currentPattern => ref.read(signalPatternTypeProvider);
+  double get currentThreshold => ref.read(signalThresholdProvider(currentPattern));
+  bool get isCurrentPatternEnabled => ref.read(signalPatternEnabledProvider(currentPattern));
+
+  /// 사용 가능한 패턴 정보
+  List<String> get availablePatterns => AppConfig.signalPatterns;
+  List<String> get patternDisplayNames => 
+      AppConfig.signalPatterns.map((p) => AppConfig.getSignalPatternName(p)).toList();
+  List<String> get patternDescriptions => 
+      AppConfig.signalPatterns.map((p) => AppConfig.getSignalPatternDescription(p)).toList();
+
+  /// 패턴별 기본 임계값 조회
+  double getDefaultThreshold(PatternType pattern) {
+    final patternName = _getPatternConfigName(pattern);
+    return AppConfig.getSignalThreshold(patternName);
+  }
+
+  /// 패턴별 시간 윈도우 조회
+  int getTimeWindow(PatternType pattern) {
+    final patternName = _getPatternConfigName(pattern);
+    return AppConfig.getSignalTimeWindow(patternName);
+  }
+
+  /// 패턴 통계 조회 (선택적 기능)
+  Map<String, dynamic> getPatternStats() {
+    final allSignals = ref.read(allSignalsProvider).value ?? [];
+    final patternCounts = <PatternType, int>{};
+    
+    for (final signal in allSignals) {
+      patternCounts[signal.patternType] = 
+          (patternCounts[signal.patternType] ?? 0) + 1;
+    }
+    
+    return {
+      'totalSignals': allSignals.length,
+      'patternCounts': patternCounts,
+      'lastUpdate': allSignals.isNotEmpty ? allSignals.first.detectedAt : null,
+    };
+  }
+}
+
+/// Helper function: PatternType을 AppConfig 패턴명으로 변환
+String _getPatternConfigName(PatternType pattern) {
+  switch (pattern) {
+    case PatternType.surge:
+      return 'surge';
+    case PatternType.flashFire:
+      return 'flashFire';
+    case PatternType.stackUp:
+      return 'stackUp';
+    case PatternType.stealthIn:
+      return 'stealthIn';
+    case PatternType.blackHole:
+      return 'blackHole';
+    case PatternType.reboundShot:
+      return 'reboundShot';
+  }
+}
+
+/// Repository dispose 관리
+final signalRepositoryDisposeProvider = Provider.autoDispose<SignalRepository>((ref) {
+  final repository = ref.watch(signalRepoProvider);
+  
+  ref.onDispose(() async {
+    await repository.dispose();
+    if (AppConfig.enableTradeLog) {
+      log.i('Signal repository disposed');
+    }
+  });
+  
+  return repository;
+});\n\n// ====== lib/core/bridge/signal_bus.dart ======\n
+import 'dart:async';
+
+import '../utils/logger.dart';           // log.d, log.i, log.w, log.e
+import '../event/app_event.dart';        // Json typedef
+
+/// Types of signals carried by the bus.
+enum SignalEventType { trade, orderBook, notification }
+
+/// Supported exchange platforms.
+enum ExchangePlatform { upbit, binance, bybit, bithumb }
+
+/// Global singleton event bus.
+/// Dispatches all AppEvent payloads by type & platform.
+///
+/// ⚠️ Remember to call `SignalBus().dispose()` on app shutdown or via
+/// Riverpod's `ref.onDispose` to clean up streams.
+class SignalBus {
+  SignalBus._();
+  static final SignalBus _instance = SignalBus._();
+  factory SignalBus() => _instance;
+
+  final StreamController<Json> _globalController = StreamController<Json>.broadcast();
+  final Map<SignalEventType, StreamController<Json>> _typeControllers = {};
+  final Map<String, StreamController<Json>> _platformControllers = {};
+  final StreamController<String> _errorController = StreamController<String>.broadcast();
+
+  /// All events as raw JSON maps.
+  Stream<Json> get events => _globalController.stream;
+
+  /// Events of a specific type.
+  Stream<Json> eventsOfType(SignalEventType type) =>
+      _typeControllers.putIfAbsent(type, () {
+        final ctrl = StreamController<Json>.broadcast();
+        log.d('SignalBus: Created type controller for $type');
+        return ctrl;
+      }).stream;
+
+  /// 🆕 타입 안전한 이벤트 스트림 (제네릭)
+  Stream<T> eventsOf<T>(SignalEventType type, T Function(Json) converter) =>
+      eventsOfType(type).map(converter);
+
+  /// Events of a specific type and platform, cached for efficiency.
+  Stream<Json> eventsOfPlatform(SignalEventType type, ExchangePlatform platform) {
+    final key = '${type.name}_${platform.name}';
+    return _platformControllers.putIfAbsent(key, () {
+      final ctrl = StreamController<Json>.broadcast();
+      eventsOfType(type)
+          .where((m) => (m['platform'] as String? ?? '') == platform.name)
+          .listen(
+            ctrl.add,
+            onError: ctrl.addError,
+            onDone: () {
+              ctrl.close();
+              _platformControllers.remove(key);
+              log.d('SignalBus: Closed platform controller for $key');
+            },
+          );
+      log.d('SignalBus: Created platform controller for $key');
+      return ctrl;
+    }).stream;
+  }
+
+  /// 🆕 타입 안전한 플랫폼별 이벤트 스트림
+  Stream<T> eventsOfPlatformTyped<T>(
+    SignalEventType type,
+    ExchangePlatform platform,
+    T Function(Json) converter,
+  ) => eventsOfPlatform(type, platform).map(converter);
+
+  /// Errors from bus internals.
+  Stream<String> get errors => _errorController.stream;
+
+  // ───────────────────────────────────────────────────────────────────────
+  // Emitters for raw payloads
+  // ───────────────────────────────────────────────────────────────────────
+
+  void fireTrade(Json data, {ExchangePlatform platform = ExchangePlatform.upbit}) =>
+      _fire(SignalEventType.trade, data, platform);
+
+  void fireOrderBook(Json data, {ExchangePlatform platform = ExchangePlatform.upbit}) =>
+      _fire(SignalEventType.orderBook, data, platform);
+
+  void fireNotification(Json data, {ExchangePlatform platform = ExchangePlatform.upbit}) =>
+      _fire(SignalEventType.notification, data, platform);
+
+  // ───────────────────────────────────────────────────────────────────────
+  // Emitters for AppEvent
+  // ───────────────────────────────────────────────────────────────────────
+
+  void fireTradeEvent(AppEvent event, {ExchangePlatform platform = ExchangePlatform.upbit}) =>
+      _fire(SignalEventType.trade, event.toJson(), platform);
+
+  void fireOrderBookEvent(AppEvent event, {ExchangePlatform platform = ExchangePlatform.upbit}) =>
+      _fire(SignalEventType.orderBook, event.toJson(), platform);
+
+  void fireNotificationEvent(AppEvent event, {ExchangePlatform platform = ExchangePlatform.upbit}) =>
+      _fire(SignalEventType.notification, event.toJson(), platform);
+
+  // ───────────────────────────────────────────────────────────────────────
+  // Internal dispatch logic
+  // ───────────────────────────────────────────────────────────────────────
+
+  void _fire(SignalEventType type, Json data, ExchangePlatform platform) {
+    try {
+      final enriched = <String, dynamic>{...data, 'platform': platform.name};
+
+      // Broadcast to global subscribers
+      if (!_globalController.isClosed) {
+        _globalController.add(enriched);
+      } else {
+        log.w('SignalBus: Global controller closed, skipping event $type');
+      }
+
+      // Type-specific subscribers
+      final typeCtrl = _typeControllers[type];
+      if (typeCtrl != null && !typeCtrl.isClosed) {
+        typeCtrl.add(enriched);
+      } else if (typeCtrl != null) {
+        log.w('SignalBus: Type controller for $type closed, removing');
+        _typeControllers.remove(type);
+      }
+
+      // Debug preview (limited to 100 chars)
+      final msg = enriched.toString();
+      if (msg.length <= 100) {
+        log.d('SignalBus: $type @${platform.name} → $msg');
+      } else {
+        log.d('SignalBus: $type @${platform.name} → ${msg.substring(0, 100)}…');
+      }
+    } catch (e, st) {
+      final errMsg = 'SignalBus error: $e';
+      log.e(errMsg, e, st);
+      if (!_errorController.isClosed) {
+        _errorController.add(errMsg);
+      } else {
+        log.w('SignalBus: Error controller closed, error not dispatched: $errMsg');
+      }
+    }
+  }
+
+  /// Log current memory status for debugging.
+  void logMemoryStatus() {
+    log.d('SignalBus Memory Status:');
+    log.d('  - Type controllers: ${_typeControllers.length}');
+    log.d('  - Platform controllers: ${_platformControllers.length}');
+    log.d('  - Global controller active: ${_globalController.hasListener}');
+    log.d('  - Error controller active: ${_errorController.hasListener}');
+  }
+
+  /// Close all controllers to free resources and log cleanup.
+  void dispose() {
+    // Close type-specific controllers
+    for (final entry in _typeControllers.entries) {
+      final ctrl = entry.value;
+      if (!ctrl.isClosed) {
+        ctrl.close();
+        log.d('SignalBus: Closed type controller for ${entry.key}');
+      }
+    }
+    _typeControllers.clear();
+
+    // Close platform-specific controllers
+    for (final entry in _platformControllers.entries) {
+      final ctrl = entry.value;
+      if (!ctrl.isClosed) {
+        ctrl.close();
+        log.d('SignalBus: Closed platform controller for ${entry.key}');
+      }
+    }
+    _platformControllers.clear();
+
+    // Close global and error controllers
+    if (!_globalController.isClosed) {
+      _globalController.close();
+      log.d('SignalBus: Closed global controller');
+    }
+    if (!_errorController.isClosed) {
+      _errorController.close();
+      log.d('SignalBus: Closed error controller');
+    }
+
+    log.i('SignalBus: fully disposed');
+  }
+}\n\n// ====== lib/data/repositories/signal_repository_impl.dart ======\n
+import 'dart:async';
+import 'package:flutter/foundation.dart';
+import '../../core/config/app_config.dart';
+import '../../core/utils/logger.dart';
+import '../../core/utils/rolling_window.dart';
+import '../../core/utils/pattern_detector.dart';
+import '../../domain/entities/signal.dart';
+import '../../domain/entities/trade.dart';
+import '../../domain/repositories/signal_repository.dart';
+import '../datasources/trade_remote_ds.dart';
+import '../processors/trade_aggregator.dart';
+
+/// Signal Repository 구현체 - PatternDetector 자체 설정 기반 (AppConfig 의존성 제거)
+class SignalRepositoryImpl implements SignalRepository {
+  final TradeRemoteDataSource _remote;
+  final TradeAggregator _aggregator;
+
+  // 📊 패턴별 상태 관리 (AppConfig 의존성 제거)
+  final Map<PatternType, List<Signal>> _signalLists = {};
+  final Map<PatternType, bool> _patternEnabled = {};
+  final Set<String> _seenIds = {};
+
+  // 🎯 패턴별 스트림 컨트롤러
+  final Map<PatternType, StreamController<List<Signal>>> _patternControllers = {};
+  final StreamController<List<Signal>> _allSignalsController = StreamController<List<Signal>>.broadcast();
+
+  // 🔥 핵심: 브로드캐스트 스트림 관리
+  Stream<Trade>? _signalStream;
+  StreamSubscription<Trade>? _signalSubscription;
+
+  // 🚀 배치 처리를 위한 타이머
+  Timer? _batchUpdateTimer;
+  Timer? _cleanupTimer;
+
+  // 📈 RollingWindow 기반 데이터 관리 (시장별)
+  final Map<String, RollingWindow<double>> _priceWindows = {};
+  final Map<String, RollingWindow<double>> _volumeWindows = {};
+  final Map<String, RollingWindow<double>> _buyRatioWindows = {};
+  final Map<String, RollingWindow<double>> _intervalWindows = {};
+
+  // 🔒 중복 감지 방지 및 쓰로틀링
+  final Map<String, int> _detectedMarkets = {};
+  final Map<String, int> _lastAnalysisTs = {};
+
+  SignalRepositoryImpl(this._remote) 
+      : _aggregator = TradeAggregator() {
+    _initializePatterns();
+    _startCleanupTimer();
+  }
+
+  /// 패턴별 초기화 (AppConfig 의존성 제거)
+  void _initializePatterns() {
+    for (final pattern in PatternType.values) {
+      _signalLists[pattern] = [];
+      _patternEnabled[pattern] = true;
+      _patternControllers[pattern] = StreamController<List<Signal>>.broadcast();
+    }
+
+    if (kDebugMode) {
+      log.i('🎯 Signal patterns initialized: ${PatternType.values.length} patterns (PatternDetector 자체 설정)');
+    }
+  }
+
+  /// 🧹 메모리 정리 타이머 시작
+  void _startCleanupTimer() {
+    _cleanupTimer = Timer.periodic(const Duration(minutes: 5), (_) {
+      _cleanupWindows();
+      final nowMs = DateTime.now().millisecondsSinceEpoch;
+      _detectedMarkets.removeWhere((_, expiryMs) => nowMs >= expiryMs);
+    });
+  }
+
+  /// 🧹 RollingWindow 메모리 정리
+  void _cleanupWindows() {
+    final now = DateTime.now();
+    int removedMarkets = 0;
+
+    final activeMarkets = <String>{};
+    
+    _priceWindows.removeWhere((market, window) {
+      if (window.isEmpty) {
+        removedMarkets++;
+        return true;
+      }
+      final lastUpdate = window.timestamps.isNotEmpty ? window.timestamps.last : now;
+      if (now.difference(lastUpdate).inMinutes > 30) {
+        removedMarkets++;
+        return true;
+      }
+      activeMarkets.add(market);
+      return false;
+    });
+
+    _volumeWindows.removeWhere((market, _) => !activeMarkets.contains(market));
+    _buyRatioWindows.removeWhere((market, _) => !activeMarkets.contains(market));
+    _intervalWindows.removeWhere((market, _) => !activeMarkets.contains(market));
+
+    if (kDebugMode && removedMarkets > 0) {
+      log.d('🧹 Cleanup: $removedMarkets inactive markets removed');
+    }
+  }
+
+  /// 🔥 핵심: 브로드캐스트 스트림 초기화
+  void _initializeSignalStream(List<String> markets) {
+    if (_signalStream != null) return;
+
+    log.i('SignalRepositoryImpl: initializing signal stream for ${markets.length} markets');
+
+    _signalStream = _remote.watch(markets).asBroadcastStream();
+
+    _signalSubscription = _signalStream!.listen(
+      _processRawTradeForSignal,
+      onError: (error, stackTrace) {
+        log.e('Signal stream error', error, stackTrace);
+      },
+      onDone: () {
+        log.i('Signal stream done');
+      },
+    );
+  }
+
+  @override
+  Stream<List<Signal>> watchSignalsByPattern(
+    PatternType patternType,
+    List<String> markets,
+  ) {
+    _initializeSignalStream(markets);
+    return _patternControllers[patternType]?.stream ?? const Stream.empty();
+  }
+
+  @override
+  Stream<List<Signal>> watchAllSignals(List<String> markets) {
+    _initializeSignalStream(markets);
+    return _allSignalsController.stream;
+  }
+
+  /// 📥 원시 거래 데이터를 시그널 분석용으로 처리
+  void _processRawTradeForSignal(Trade trade) {
+    try {
+      final key = '${trade.market}/${trade.sequentialId}';
+
+      if (!_seenIds.add(key)) return;
+
+      if (_seenIds.length > AppConfig.signalCacheSize) {
+        _seenIds.remove(_seenIds.first);
+      }
+
+      _aggregator.processTrade(
+        {
+          'market': trade.market, 'price': trade.price, 'volume': trade.volume,
+          'timestamp': trade.timestampMs, 'isBuy': trade.isBuy, 'sequential_id': trade.sequentialId,
+        },
+        onTradeProcessed: _handleAggregatedTrade,
+      );
+
+    } catch (e, stackTrace) {
+      log.w('_processRawTradeForSignal error', e, stackTrace);
+    }
+  }
+
+  /// 🔄 집계된 거래 데이터로 RollingWindow 업데이트 및 패턴 분석
+  void _handleAggregatedTrade(Map<String, dynamic> aggregatedTrade) {
+    try {
+      final trade = Trade(
+        market: aggregatedTrade['market'] as String,
+        price: aggregatedTrade['price'] as double,
+        volume: aggregatedTrade['volume'] as double,
+        side: (aggregatedTrade['isBuy'] as bool) ? 'BID' : 'ASK',
+        changePrice: 0.0,
+        changeState: 'EVEN',
+        timestampMs: aggregatedTrade['timestamp'] as int,
+        sequentialId: aggregatedTrade['sequential_id'] as String? ?? '',
+      );
+
+      _updateRollingWindows(trade);
+      _analyzePatterns(trade);
+
+    } catch (e, stackTrace) {
+      log.w('_handleAggregatedTrade error', e, stackTrace);
+    }
+  }
+
+  /// 📈 RollingWindow 데이터 업데이트
+  void _updateRollingWindows(Trade trade) {
+    final market = trade.market;
+    final timestamp = DateTime.fromMillisecondsSinceEpoch(trade.timestampMs);
+    _priceWindows.putIfAbsent(market, () => RollingWindow<double>(span: const Duration(seconds: 60))).add(trade.price, timestamp: timestamp);
+    _volumeWindows.putIfAbsent(market, () => RollingWindow<double>(span: const Duration(seconds: 300))).add(trade.total, timestamp: timestamp);
+    final buyRatioWindow = _buyRatioWindows.putIfAbsent(market, () => RollingWindow<double>(span: const Duration(seconds: 180)));
+    buyRatioWindow.add(trade.isBuy ? 1.0 : 0.0, timestamp: timestamp);
+    final intervalWindow = _intervalWindows.putIfAbsent(market, () => RollingWindow<double>(span: const Duration(seconds: 600)));
+    if (intervalWindow.timestamps.isNotEmpty) {
+      final lastTimestamp = intervalWindow.timestamps.last;
+      final intervalSeconds = timestamp.difference(lastTimestamp).inSeconds.toDouble();
+      intervalWindow.add(intervalSeconds > 0 ? intervalSeconds : 1.0, timestamp: timestamp);
+    } else {
+      intervalWindow.add(10.0, timestamp: timestamp);
+    }
+  }
+  
+  /// 가벼운 가드 헬퍼 메서드
+  bool _shouldAnalyze(String mkt, int tsMs) {
+    final last = _lastAnalysisTs[mkt] ?? 0;
+    if (tsMs - last < 100) return false; // 100ms 이내 재분석 방지
+    _lastAnalysisTs[mkt] = tsMs;
+    return true;
+  }
+
+  /// 🎯 RollingWindow 기반 패턴 분석 (AppConfig threshold 제거)
+  void _analyzePatterns(Trade trade) {
+    if (!_shouldAnalyze(trade.market, trade.timestampMs)) return;
+    
+    try {
+      final now = DateTime.fromMillisecondsSinceEpoch(trade.timestampMs);
+      final market = trade.market;
+
+      final priceWindow = _priceWindows[market];
+      final volumeWindow = _volumeWindows[market];
+      final buyRatioWindow = _buyRatioWindows[market];
+      final intervalWindow = _intervalWindows[market];
+
+      if (priceWindow == null || volumeWindow == null) return;
+
+      final detectedSignals = <Signal>[];
+
+      for (final pattern in PatternType.values) {
+        if (!_patternEnabled[pattern]!) continue;
+
+        Signal? detectedSignal;
+
+        try {
+          switch (pattern) {
+            case PatternType.surge:
+              detectedSignal = _analyzeSurgePattern(
+                trade, now, priceWindow, volumeWindow);
+              break;
+            case PatternType.flashFire:
+              detectedSignal = _analyzeFlashFirePattern(
+                trade, now, volumeWindow, buyRatioWindow);
+              break;
+            case PatternType.stackUp:
+              detectedSignal = _analyzeStackUpPattern(
+                trade, now, volumeWindow);
+              break;
+            case PatternType.stealthIn:
+              detectedSignal = _analyzeStealthInPattern(
+                trade, now, priceWindow, volumeWindow, intervalWindow, buyRatioWindow);
+              break;
+            case PatternType.blackHole:
+              detectedSignal = _analyzeBlackHolePattern(
+                trade, now, priceWindow, volumeWindow, buyRatioWindow);
+              break;
+            case PatternType.reboundShot:
+              detectedSignal = _analyzeReboundShotPattern(
+                trade, now, priceWindow, volumeWindow);
+              break;
+          }
+        } catch (e, stackTrace) {
+          log.w('Pattern analysis error: ${pattern.displayName}', e, stackTrace);
+          continue;
+        }
+
+        if (detectedSignal != null) {
+          detectedSignals.add(detectedSignal);
+        }
+      }
+
+      for (final signal in detectedSignals) {
+        _addSignal(signal.patternType, signal);
+      }
+
+      if (detectedSignals.isNotEmpty) {
+        _scheduleBatchUpdate();
+      }
+
+    } catch (e, stackTrace) {
+      log.e('_analyzePatterns error', e, stackTrace);
+    }
+  }
+
+  /// 1️⃣ Surge 패턴 분석 (threshold 파라미터 제거)
+  Signal? _analyzeSurgePattern(
+    Trade trade,
+    DateTime now,
+    RollingWindow<double> priceWindow,
+    RollingWindow<double> volumeWindow,
+  ) {
+    final market = trade.market;
+    final detectionKey = '${market}_surge';
+
+    // 중복 방지 락
+    final unlockTime = _detectedMarkets[detectionKey];
+    if (unlockTime != null && now.millisecondsSinceEpoch < unlockTime) {
+      return null;
+    }
+
+    final signal = PatternDetector.detectSurge(
+      trade: trade,
+      timestamp: now,
+      priceWindow: priceWindow,
+      volumeWindow: volumeWindow,
+    );
+
+    if (signal != null) {
+      _detectedMarkets[detectionKey] = now.add(const Duration(minutes: 1)).millisecondsSinceEpoch;
+    }
+
+    return signal;
+  }
+
+  /// 2️⃣ FlashFire 패턴 분석 (threshold 파라미터 제거)
+  Signal? _analyzeFlashFirePattern(
+    Trade trade,
+    DateTime now,
+    RollingWindow<double> volumeWindow,
+    RollingWindow<double>? buyRatioWindow,
+  ) {
+    return PatternDetector.detectFlashFire(
+      trade: trade,
+      timestamp: now,
+      volumeWindow: volumeWindow,
+      buyRatioWindow: buyRatioWindow ?? RollingWindow<double>(span: const Duration(seconds: 180)),
+    );
+  }
+
+  /// 3️⃣ StackUp 패턴 분석 (threshold 파라미터 제거)
+  Signal? _analyzeStackUpPattern(
+    Trade trade,
+    DateTime now,
+    RollingWindow<double> volumeWindow,
+  ) {
+    return PatternDetector.detectStackUp(
+      trade: trade,
+      timestamp: now,
+      volumeWindow: volumeWindow,
+    );
+  }
+
+  /// 4️⃣ StealthIn 패턴 분석 (priceWindow 파라미터 추가)
+  Signal? _analyzeStealthInPattern(
+    Trade trade,
+    DateTime now,
+    RollingWindow<double> priceWindow,     // ← 추가됨
+    RollingWindow<double> volumeWindow,
+    RollingWindow<double>? intervalWindow,
+    RollingWindow<double>? buyRatioWindow,
+  ) {
+    return PatternDetector.detectStealthIn(
+      trade: trade,
+      timestamp: now,
+      priceWindow: priceWindow,            // ← 추가됨
+      volumeWindow: volumeWindow,
+      intervalWindow: intervalWindow ?? RollingWindow<double>(span: const Duration(seconds: 600)),
+      buyRatioWindow: buyRatioWindow ?? RollingWindow<double>(span: const Duration(seconds: 180)),
+    );
+  }
+
+  /// 5️⃣ BlackHole 패턴 분석 (threshold 파라미터 제거)
+  Signal? _analyzeBlackHolePattern(
+    Trade trade,
+    DateTime now,
+    RollingWindow<double> priceWindow,
+    RollingWindow<double> volumeWindow,
+    RollingWindow<double>? buyRatioWindow,
+  ) {
+    return PatternDetector.detectBlackHole(
+      trade: trade,
+      timestamp: now,
+      priceWindow: priceWindow,
+      volumeWindow: volumeWindow,
+      buyRatioWindow: buyRatioWindow ?? RollingWindow<double>(span: const Duration(seconds: 180)),
+    );
+  }
+
+  /// 6️⃣ ReboundShot 패턴 분석 (threshold 파라미터 제거)
+  Signal? _analyzeReboundShotPattern(
+    Trade trade,
+    DateTime now,
+    RollingWindow<double> priceWindow,
+    RollingWindow<double> volumeWindow,
+  ) {
+    return PatternDetector.detectReboundShot(
+      trade: trade,
+      timestamp: now,
+      priceWindow: priceWindow,
+      volumeWindow: volumeWindow,
+    );
+  }
+
+  /// 🚀 시그널 추가 및 관리
+  void _addSignal(PatternType pattern, Signal signal) {
+    final signalList = _signalLists[pattern]!;
+    
+    final cutoff = signal.detectedAt.subtract(const Duration(minutes: 5));
+    final isDuplicate = signalList.any((existingSignal) =>
+        existingSignal.market == signal.market &&
+        existingSignal.detectedAt.isAfter(cutoff));
+
+    if (isDuplicate) return;
+
+    signalList.insert(0, signal);
+
+    if (signalList.length > AppConfig.maxSignalsPerPattern) {
+      signalList.removeLast();
+    }
+
+    if (kDebugMode) {
+      log.i('🚨 Signal detected: ${signal.patternType.displayName} - ${signal.market} '
+          '(${signal.changePercent.toStringAsFixed(2)}%) [PatternDetector 자체 설정]');
+    }
+  }
+
+  /// 🚀 배치 업데이트 스케줄링
+  void _scheduleBatchUpdate() {
+    if (_batchUpdateTimer?.isActive != true) {
+      _batchUpdateTimer = Timer(AppConfig.signalBatchInterval, _updateSignalStreams);
+    }
+  }
+
+  /// 📊 모든 시그널 스트림 배치 업데이트
+  void _updateSignalStreams() {
+    try {
+      for (final entry in _signalLists.entries) {
+        final pattern = entry.key;
+        final signals = List<Signal>.from(entry.value);
+
+        final controller = _patternControllers[pattern];
+        if (controller != null && !controller.isClosed) {
+          controller.add(signals);
+        }
+      }
+
+      final allSignals = _signalLists.values.expand((list) => list).toList();
+      allSignals.sort((a, b) => b.detectedAt.compareTo(a.detectedAt));
+      final recentSignals = allSignals.take(50).toList();
+
+      if (!_allSignalsController.isClosed) {
+        _allSignalsController.add(recentSignals);
+      }
+
+      if (kDebugMode && allSignals.isNotEmpty) {
+        log.d('🚀 Signal streams updated: ${allSignals.length} total signals [PatternDetector 자체 설정]');
+      }
+    } catch (e, stackTrace) {
+      log.w('_updateSignalStreams error', e, stackTrace);
+    }
+  }
+
+  @override
+  void updatePatternThreshold(PatternType patternType, double threshold) {
+    // PatternDetector 자체 설정 사용으로 변경됨
+    log.i('🎯 Pattern threshold update ignored (using PatternDetector internal config): ${patternType.displayName}');
+  }
+
+  @override
+  double getPatternThreshold(PatternType patternType) {
+    // PatternDetector에서 내부적으로 관리하므로 기본값 반환
+    return 0.0;
+  }
+
+  @override
+  void setPatternEnabled(PatternType patternType, bool enabled) {
+    _patternEnabled[patternType] = enabled;
+    log.i('🔄 Pattern ${enabled ? "enabled" : "disabled"}: ${patternType.displayName}');
+  }
+
+  @override
+  bool isPatternEnabled(PatternType patternType) {
+    return _patternEnabled[patternType] ?? true;
+  }
+
+  @override
+  void clearSignals(PatternType? patternType) {
+    if (patternType != null) {
+      _signalLists[patternType]?.clear();
+    } else {
+      for (final signalList in _signalLists.values) {
+        signalList.clear();
+      }
+      _detectedMarkets.clear();
+    }
+    _scheduleBatchUpdate();
+  }
+  
+  @override
+  Future<void> dispose() async {
+    log.i('SignalRepositoryImpl: dispose() called');
+
+    _batchUpdateTimer?.cancel();
+    _cleanupTimer?.cancel();
+
+    _aggregator.flushTrades(onTradeProcessed: (_) {});
+
+    await _signalSubscription?.cancel();
+    _signalStream = null;
+
+    for (final controller in _patternControllers.values) {
+      await controller.close();
+    }
+    await _allSignalsController.close();
+
+    _priceWindows.clear();
+    _volumeWindows.clear();
+    _buyRatioWindows.clear();
+    _intervalWindows.clear();
+
+    log.i('SignalRepositoryImpl: dispose completed [PatternDetector 자체 설정]');
+  }
+}\n\n// ====== lib/data/factories/signal_stream_factory.dart ======\n
+\n\n// ====== lib/domain/repositories/signal_repository.dart ======\n
+// lib/domain/repositories/signal_repository.dart
+
+import '../entities/signal.dart';
+
+/// Signal Repository 인터페이스
+abstract class SignalRepository {
+  /// 특정 패턴의 시그널 스트림 감시
+  Stream<List<Signal>> watchSignalsByPattern(
+    PatternType patternType,
+    List<String> markets,
+  );
+
+  /// 모든 패턴의 시그널 스트림 감시
+  Stream<List<Signal>> watchAllSignals(List<String> markets);
+
+  /// 패턴별 임계값 업데이트
+  void updatePatternThreshold(PatternType patternType, double threshold);
+
+  /// 현재 설정된 패턴별 임계값 조회
+  double getPatternThreshold(PatternType patternType);
+
+  /// 패턴별 활성화/비활성화 설정
+  void setPatternEnabled(PatternType patternType, bool enabled);
+
+  /// 패턴 활성화 상태 조회
+  bool isPatternEnabled(PatternType patternType);
+
+  /// 감지된 시그널 목록 초기화
+  void clearSignals(PatternType? patternType);
+
+  /// 리소스 정리
+  Future<void> dispose();
+}\n\n// ====== lib/domain/usecases/signal_usecase.dart ======\n
+// lib/domain/usecases/signal_usecase.dart
+
+import '../entities/signal.dart';
+import '../repositories/signal_repository.dart';
+
+/// Signal 관련 비즈니스 로직을 처리하는 UseCase
+class SignalUseCase {
+  final SignalRepository _repository;
+
+  const SignalUseCase(this._repository);
+
+  /// 특정 패턴의 시그널 스트림 감시
+  Stream<List<Signal>> watchSignalsByPattern(
+    PatternType patternType,
+    List<String> markets,
+  ) {
+    return _repository.watchSignalsByPattern(patternType, markets);
+  }
+
+  /// 모든 패턴의 시그널 스트림 감시
+  Stream<List<Signal>> watchAllSignals(List<String> markets) {
+    return _repository.watchAllSignals(markets);
+  }
+
+  /// 패턴별 임계값 업데이트
+  void updatePatternThreshold(PatternType patternType, double threshold) {
+    // 비즈니스 규칙 검증
+    if (threshold <= 0) {
+      throw ArgumentError('Threshold must be positive: $threshold');
+    }
+
+    // 패턴별 임계값 범위 검증
+    switch (patternType) {
+      case PatternType.surge:
+        if (threshold < 0.1 || threshold > 50.0) {
+          throw ArgumentError('Surge threshold must be between 0.1% and 50%: $threshold');
+        }
+        break;
+      case PatternType.flashFire:
+        if (threshold < 1.1 || threshold > 10.0) {
+          throw ArgumentError('FlashFire threshold must be between 1.1x and 10x: $threshold');
+        }
+        break;
+      case PatternType.stackUp:
+        if (threshold < 2 || threshold > 10) {
+          throw ArgumentError('StackUp threshold must be between 2 and 10: $threshold');
+        }
+        break;
+      case PatternType.stealthIn:
+        if (threshold < 1000000 || threshold > 100000000) {
+          throw ArgumentError('StealthIn threshold must be between 1M and 100M: $threshold');
+        }
+        break;
+      case PatternType.blackHole:
+        if (threshold < 0.01 || threshold > 5.0) {
+          throw ArgumentError('BlackHole threshold must be between 0.01% and 5%: $threshold');
+        }
+        break;
+      case PatternType.reboundShot:
+        if (threshold < 0.5 || threshold > 20.0) {
+          throw ArgumentError('ReboundShot threshold must be between 0.5% and 20%: $threshold');
+        }
+        break;
+    }
+
+    _repository.updatePatternThreshold(patternType, threshold);
+  }
+
+  /// 패턴별 임계값 조회
+  double getPatternThreshold(PatternType patternType) {
+    return _repository.getPatternThreshold(patternType);
+  }
+
+  /// 패턴 활성화/비활성화 설정
+  void setPatternEnabled(PatternType patternType, bool enabled) {
+    _repository.setPatternEnabled(patternType, enabled);
+  }
+
+  /// 패턴 활성화 상태 조회
+  bool isPatternEnabled(PatternType patternType) {
+    return _repository.isPatternEnabled(patternType);
+  }
+
+  /// 특정 패턴의 시그널 목록 초기화
+  void clearPatternSignals(PatternType patternType) {
+    _repository.clearSignals(patternType);
+  }
+
+  /// 모든 시그널 목록 초기화
+  void clearAllSignals() {
+    _repository.clearSignals(null);
+  }
+
+  /// 시그널 통계 정보 계산
+  SignalStats calculateStats(List<Signal> signals) {
+    if (signals.isEmpty) {
+      return const SignalStats(
+        totalCount: 0,
+        patternCounts: {},
+        avgChangePercent: 0.0,
+        maxChangePercent: 0.0,
+        minChangePercent: 0.0,
+        totalTradeAmount: 0.0,
+      );
+    }
+
+    final patternCounts = <PatternType, int>{};
+    double totalChangePercent = 0.0;
+    double maxChangePercent = signals.first.changePercent;
+    double minChangePercent = signals.first.changePercent;
+    double totalTradeAmount = 0.0;
+
+    for (final signal in signals) {
+      // 패턴별 카운트
+      patternCounts[signal.patternType] = 
+          (patternCounts[signal.patternType] ?? 0) + 1;
+
+      // 변화율 통계
+      totalChangePercent += signal.changePercent;
+      if (signal.changePercent > maxChangePercent) {
+        maxChangePercent = signal.changePercent;
+      }
+      if (signal.changePercent < minChangePercent) {
+        minChangePercent = signal.changePercent;
+      }
+
+      // 거래대금 합계
+      totalTradeAmount += signal.tradeAmount;
+    }
+
+    return SignalStats(
+      totalCount: signals.length,
+      patternCounts: patternCounts,
+      avgChangePercent: totalChangePercent / signals.length,
+      maxChangePercent: maxChangePercent,
+      minChangePercent: minChangePercent,
+      totalTradeAmount: totalTradeAmount,
+    );
+  }
+
+  /// 시그널 필터링 (변화율, 거래대금 등)
+  List<Signal> filterSignals(
+    List<Signal> signals, {
+    double? minChangePercent,
+    double? maxChangePercent,
+    double? minTradeAmount,
+    double? maxTradeAmount,
+    Set<PatternType>? patternTypes,
+    Duration? timeWindow,
+  }) {
+    return signals.where((signal) {
+      // 변화율 필터
+      if (minChangePercent != null && signal.changePercent < minChangePercent) {
+        return false;
+      }
+      if (maxChangePercent != null && signal.changePercent > maxChangePercent) {
+        return false;
+      }
+
+      // 거래대금 필터
+      if (minTradeAmount != null && signal.tradeAmount < minTradeAmount) {
+        return false;
+      }
+      if (maxTradeAmount != null && signal.tradeAmount > maxTradeAmount) {
+        return false;
+      }
+
+      // 패턴 타입 필터
+      if (patternTypes != null && !patternTypes.contains(signal.patternType)) {
+        return false;
+      }
+
+      // 시간 윈도우 필터
+      if (timeWindow != null) {
+        final cutoff = DateTime.now().subtract(timeWindow);
+        if (signal.detectedAt.isBefore(cutoff)) {
+          return false;
+        }
+      }
+
+      return true;
+    }).toList();
+  }
+
+  /// 리소스 정리
+  Future<void> dispose() async {
+    await _repository.dispose();
+  }
+}
+
+/// Signal 통계 정보 클래스
+class SignalStats {
+  final int totalCount;
+  final Map<PatternType, int> patternCounts;
+  final double avgChangePercent;
+  final double maxChangePercent;
+  final double minChangePercent;
+  final double totalTradeAmount;
+
+  const SignalStats({
+    required this.totalCount,
+    required this.patternCounts,
+    required this.avgChangePercent,
+    required this.maxChangePercent,
+    required this.minChangePercent,
+    required this.totalTradeAmount,
+  });
+
+  @override
+  String toString() {
+    return 'SignalStats(total: $totalCount, avg: ${avgChangePercent.toStringAsFixed(2)}%, '
+        'max: ${maxChangePercent.toStringAsFixed(2)}%, min: ${minChangePercent.toStringAsFixed(2)}%)';
+  }
+}\n\n// ====== lib/domain/entities/signal.dart ======\n
+// lib/domain/entities/signal.dart
+
+/// Signal 패턴 타입 정의
+enum PatternType {
+  surge,       // 1. 급등 (1분 전 대비 1.1% 상승)
+  flashFire,   // 2. 불티🔥 (3분 거래대금 급증)
+  stackUp,     // 3. 스택업💰 (1분씩 3연속 증가)
+  stealthIn,   // 4. 침투자👣 (소량 지속 유입)
+  blackHole,   // 5. 블랙홀🕳️ (거래대금↑ 가격변동↓)
+  reboundShot, // 6. 쇼트터치⚡ (급락 후 반등)
+}
+
+extension PatternTypeExtension on PatternType {
+  String get displayName {
+    switch (this) {
+      case PatternType.surge:
+        return '급등';
+      case PatternType.flashFire:
+        return '불티🔥';
+      case PatternType.stackUp:
+        return '스택업💰';
+      case PatternType.stealthIn:
+        return '침투자👣';
+      case PatternType.blackHole:
+        return '블랙홀🕳️';
+      case PatternType.reboundShot:
+        return '쇼트터치⚡';
+    }
+  }
+
+  String get description {
+    switch (this) {
+      case PatternType.surge:
+        return '1분 전 대비 1.1% 이상 상승';
+      case PatternType.flashFire:
+        return '3분 거래대금 급증 감지';
+      case PatternType.stackUp:
+        return '연속 매집 패턴 감지';
+      case PatternType.stealthIn:
+        return '은밀한 유입 감지';
+      case PatternType.blackHole:
+        return '이상 체결 패턴 감지';
+      case PatternType.reboundShot:
+        return '반등 타이밍 감지';
+    }
+  }
+
+  /// 패턴별 기본 임계값
+  double get defaultThreshold {
+    switch (this) {
+      case PatternType.surge:
+        return 1.1; // 1.1% 상승
+      case PatternType.flashFire:
+        return 2.0; // 2배 급증
+      case PatternType.stackUp:
+        return 3.0; // 3연속
+      case PatternType.stealthIn:
+        return 5000000.0; // 500만원 이상 지속
+      case PatternType.blackHole:
+        return 0.1; // 0.1% 이하 변동
+      case PatternType.reboundShot:
+        return 1.5; // 1.5% 급락 후 반등
+    }
+  }
+
+  /// 패턴별 시간 윈도우 (분)
+  int get timeWindowMinutes {
+    switch (this) {
+      case PatternType.surge:
+        return 1; // 1분
+      case PatternType.flashFire:
+        return 3; // 3분
+      case PatternType.stackUp:
+        return 3; // 3분 (1분씩 3번)
+      case PatternType.stealthIn:
+        return 5; // 5분
+      case PatternType.blackHole:
+        return 3; // 3분
+      case PatternType.reboundShot:
+        return 2; // 2분 (급락 1분 + 반등 1분)
+    }
+  }
+}
+
+/// Signal 감지 결과 엔티티
+class Signal {
+  final String market;
+  final String name;
+  final double currentPrice;
+  final double changePercent;
+  final double volume;
+  final double tradeAmount;
+  final DateTime detectedAt;
+  final PatternType patternType;
+  final Map<String, dynamic> patternDetails;
+
+  const Signal({
+    required this.market,
+    required this.name,
+    required this.currentPrice,
+    required this.changePercent,
+    required this.volume,
+    required this.tradeAmount,
+    required this.detectedAt,
+    required this.patternType,
+    required this.patternDetails,
+  });
+
+  /// 거래 총액 계산
+  double get total => currentPrice * volume;
+
+  /// 코인 티커만 추출 (KRW- 제거)
+  String get ticker => market.replaceFirst('KRW-', '');
+
+  /// 패턴별 특화 정보 getter들
+  
+  /// Surge 전용: 기준가 (1분 전 가격)
+  double? get basePrice => patternDetails['basePrice'] as double?;
+  
+  /// FlashFire 전용: 급증 배율
+  double? get surgeMultiplier => patternDetails['surgeMultiplier'] as double?;
+  
+  /// StackUp 전용: 연속 증가 횟수
+  int? get consecutiveCount => patternDetails['consecutiveCount'] as int?;
+  
+  /// StealthIn 전용: 지속 시간 (초)
+  int? get sustainedSeconds => patternDetails['sustainedSeconds'] as int?;
+  
+  /// BlackHole 전용: 가격 변동률
+  double? get priceStability => patternDetails['priceStability'] as double?;
+  
+  /// ReboundShot 전용: 반등 강도
+  double? get reboundStrength => patternDetails['reboundStrength'] as double?;
+
+  Signal copyWith({
+    String? market,
+    String? name,
+    double? currentPrice,
+    double? changePercent,
+    double? volume,
+    double? tradeAmount,
+    DateTime? detectedAt,
+    PatternType? patternType,
+    Map<String, dynamic>? patternDetails,
+  }) {
+    return Signal(
+      market: market ?? this.market,
+      name: name ?? this.name,
+      currentPrice: currentPrice ?? this.currentPrice,
+      changePercent: changePercent ?? this.changePercent,
+      volume: volume ?? this.volume,
+      tradeAmount: tradeAmount ?? this.tradeAmount,
+      detectedAt: detectedAt ?? this.detectedAt,
+      patternType: patternType ?? this.patternType,
+      patternDetails: patternDetails ?? this.patternDetails,
+    );
+  }
+
+  @override
+  String toString() {
+    return 'Signal(market: $market, pattern: ${patternType.displayName}, '
+        'price: $currentPrice, change: ${changePercent.toStringAsFixed(2)}%, '
+        'at: $detectedAt)';
+  }
+
+  @override
+  bool operator ==(Object other) {
+    if (identical(this, other)) return true;
+    return other is Signal &&
+        other.market == market &&
+        other.detectedAt == detectedAt &&
+        other.patternType == patternType;
+  }
+
+  @override
+  int get hashCode {
+    return market.hashCode ^ detectedAt.hashCode ^ patternType.hashCode;
+  }
+}\n\n// ====== lib/presentation/controllers/signal_controller.dart ======\n
+// lib/presentation/controllers/signal_controller.dart
+
+import 'dart:async';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../core/config/app_config.dart';
+import '../../core/di/signal_provider.dart';
+import '../../core/error/app_exception.dart';
+import '../../core/extensions/result.dart';
+import '../../core/utils/logger.dart';
+import '../../domain/entities/signal.dart';
+import '../../domain/usecases/signal_usecase.dart';
+
+/// Signal 화면 상태를 캡슐화하는 immutable 모델
+class SignalState {
+  final List<Signal> signals;
+  final bool isLoading;
+  final bool isConnected;
+  final PatternType currentPattern;
+  final int selectedIndex;
+  final double threshold;
+  final bool isPatternEnabled;
+  final String? errorMessage;
+
+  const SignalState({
+    this.signals = const [],
+    this.isLoading = false,
+    this.isConnected = false,
+    this.currentPattern = PatternType.surge,
+    this.selectedIndex = 0,
+    this.threshold = 1.1,
+    this.isPatternEnabled = true,
+    this.errorMessage,
+  });
+
+  SignalState copyWith({
+    List<Signal>? signals,
+    bool? isLoading,
+    bool? isConnected,
+    PatternType? currentPattern,
+    int? selectedIndex,
+    double? threshold,
+    bool? isPatternEnabled,
+    String? errorMessage,
+  }) {
+    return SignalState(
+      signals: signals ?? this.signals,
+      isLoading: isLoading ?? this.isLoading,
+      isConnected: isConnected ?? this.isConnected,
+      currentPattern: currentPattern ?? this.currentPattern,
+      selectedIndex: selectedIndex ?? this.selectedIndex,
+      threshold: threshold ?? this.threshold,
+      isPatternEnabled: isPatternEnabled ?? this.isPatternEnabled,
+      errorMessage: errorMessage,
+    );
+  }
+}
+
+/// Signal 화면 전용 ViewModel
+class SignalController extends StateNotifier<SignalState> {
+  final SignalUseCase _usecase;
+  final Ref _ref;
+  StreamSubscription<Result<List<Signal>, AppException>>? _subscription;
+
+  SignalController(this._usecase, this._ref) : super(const SignalState());
+
+  /// 패턴 인덱스 변경 (슬라이더 이동)
+  void setPatternIndex(int index, List<String> markets) {
+    if (index < 0 || index >= AppConfig.signalPatterns.length) {
+      if (AppConfig.enableTradeLog) {
+        log.w('Invalid pattern index: $index');
+      }
+      return;
+    }
+
+    final patternName = AppConfig.getSignalPatternByIndex(index);
+    final patternType = _getPatternTypeFromName(patternName);
+    final defaultThreshold = AppConfig.getSignalThreshold(patternName);
+
+    // Provider 상태 업데이트
+    final controller = _ref.read(signalPatternController);
+    controller.updatePatternIndex(index);
+
+    state = state.copyWith(
+      currentPattern: patternType,
+      selectedIndex: index,
+      threshold: defaultThreshold,
+      isLoading: true,
+      errorMessage: null,
+    );
+
+    // 스트림 재구독
+    _subscribeToPattern(patternType, markets);
+  }
+
+  /// 현재 패턴의 임계값 변경
+  void updateThreshold(double threshold) {
+    final controller = _ref.read(signalPatternController);
+    controller.updateThreshold(threshold);
+
+    state = state.copyWith(threshold: threshold);
+  }
+
+  /// 패턴 활성화/비활성화 토글
+  void togglePatternEnabled() {
+    final newEnabled = !state.isPatternEnabled;
+    final controller = _ref.read(signalPatternController);
+    controller.setPatternEnabled(state.currentPattern, newEnabled);
+
+    state = state.copyWith(isPatternEnabled: newEnabled);
+  }
+
+  /// 시그널 목록 초기화
+  void clearSignals([PatternType? pattern]) {
+    final controller = _ref.read(signalPatternController);
+    controller.clearSignals(pattern);
+
+    if (pattern == null || pattern == state.currentPattern) {
+      state = state.copyWith(signals: []);
+    }
+  }
+
+  /// 패턴별 시그널 스트림 구독
+  void _subscribeToPattern(PatternType patternType, List<String> markets) {
+    _subscription?.cancel();
+    _subscription = _usecase
+        .watchSignalsByPattern(patternType, markets)
+        .map((signals) => Ok<List<Signal>, AppException>(signals))
+        .handleError((error) => Err<List<Signal>, AppException>(
+            AppException(
+              'Signal pattern detection failed: ${error.toString()}',
+              code: 'SIGNAL_PATTERN_ERROR',
+              originalException: error is Exception ? error : null,
+            )))
+        .listen(_handleResult);
+  }
+
+  void _handleResult(Result<List<Signal>, AppException> result) {
+    result.when(
+      ok: (signals) {
+        state = state.copyWith(
+          signals: signals,
+          isLoading: false,
+          isConnected: true,
+          errorMessage: null,
+        );
+      },
+      err: (e) {
+        state = state.copyWith(
+          isLoading: false,
+          isConnected: false,
+          errorMessage: e.message,
+        );
+      },
+    );
+  }
+
+  /// 재연결/새로고침
+  void refresh(List<String> markets) {
+    setPatternIndex(state.selectedIndex, markets);
+  }
+
+  /// 현재 패턴 표시 텍스트 생성
+  String getPatternDisplayText() {
+    final patternName = _getPatternNameFromType(state.currentPattern);
+    final displayName = AppConfig.getSignalPatternName(patternName);
+    final description = AppConfig.getSignalPatternDescription(patternName);
+    return '$displayName: $description';
+  }
+
+  /// 현재 패턴 아이콘/이모지
+  String getPatternIcon() {
+    return state.currentPattern.displayName;
+  }
+
+/// 임계값 표시 텍스트
+  String getThresholdDisplayText() {
+    final threshold = state.threshold;
+
+    switch (state.currentPattern) {
+      case PatternType.surge:
+        return '${threshold.toStringAsFixed(1)}% 상승';
+      case PatternType.flashFire:
+        return '${threshold.toStringAsFixed(1)}배 급증';
+      case PatternType.stackUp:
+        return '${threshold.toInt()}연속 증가';
+      case PatternType.stealthIn:
+        final amountText = threshold >= 1000000 
+            ? '${(threshold / 1000000).toStringAsFixed(0)}백만원'
+            : '${threshold.toStringAsFixed(0)}원';
+        return '$amountText 이상';
+      case PatternType.blackHole:
+        return '${threshold.toStringAsFixed(2)}% 이하 변동';
+      case PatternType.reboundShot:
+        return '${threshold.toStringAsFixed(1)}% 급락 후 반등';
+    }
+  }
+
+  /// 시그널 통계 정보
+  Map<String, dynamic> getSignalStats() {
+    final controller = _ref.read(signalPatternController);
+    return controller.getPatternStats();
+  }
+
+  /// 시그널 필터링 (마켓명)
+  List<Signal> filterByMarket(String? marketFilter) {
+    if (marketFilter == null || marketFilter.isEmpty) {
+      return state.signals;
+    }
+    final upper = marketFilter.toUpperCase();
+    return state.signals.where((s) => s.market.contains(upper)).toList();
+  }
+
+  /// 시그널 정렬
+  void sortSignals(String field, bool ascending) {
+    final list = [...state.signals];
+    list.sort((a, b) {
+      dynamic aValue;
+      dynamic bValue;
+      switch (field) {
+        case 'market':
+          aValue = a.market;
+          bValue = b.market;
+          break;
+        case 'price':
+          aValue = a.currentPrice;
+          bValue = b.currentPrice;
+          break;
+        case 'change':
+          aValue = a.changePercent;
+          bValue = b.changePercent;
+          break;
+        case 'amount':
+          aValue = a.tradeAmount;
+          bValue = b.tradeAmount;
+          break;
+        case 'time':
+          aValue = a.detectedAt.millisecondsSinceEpoch;
+          bValue = b.detectedAt.millisecondsSinceEpoch;
+          break;
+        default:
+          aValue = a.detectedAt.millisecondsSinceEpoch;
+          bValue = b.detectedAt.millisecondsSinceEpoch;
+      }
+      final cmp = aValue is Comparable && bValue is Comparable
+          ? aValue.compareTo(bValue)
+          : 0;
+      return ascending ? cmp : -cmp;
+    });
+    state = state.copyWith(signals: list);
+  }
+
+  /// 시그널 목록 적용 (정렬 등)
+  List<Signal> apply(List<Signal> signals) {
+    final filtered = [...signals];
+    // 최신 시그널 순으로 정렬
+    filtered.sort((a, b) => b.detectedAt.compareTo(a.detectedAt));
+    return filtered;
+  }
+
+  /// 사용 가능한 패턴 목록
+  List<String> get availablePatterns => AppConfig.signalPatterns;
+
+  /// 패턴 표시명 목록
+  List<String> get patternDisplayNames => 
+      AppConfig.signalPatterns.map((p) => AppConfig.getSignalPatternName(p)).toList();
+
+  /// 현재 패턴의 시간 윈도우
+  int get currentTimeWindow {
+    final patternName = _getPatternNameFromType(state.currentPattern);
+    return AppConfig.getSignalTimeWindow(patternName);
+  }
+
+  /// Helper: PatternType을 AppConfig 패턴명으로 변환
+  String _getPatternNameFromType(PatternType pattern) {
+    switch (pattern) {
+      case PatternType.surge:
+        return 'surge';
+      case PatternType.flashFire:
+        return 'flashFire';
+      case PatternType.stackUp:
+        return 'stackUp';
+      case PatternType.stealthIn:
+        return 'stealthIn';
+      case PatternType.blackHole:
+        return 'blackHole';
+      case PatternType.reboundShot:
+        return 'reboundShot';
+    }
+  }
+
+  /// Helper: AppConfig 패턴명을 PatternType으로 변환
+  PatternType _getPatternTypeFromName(String patternName) {
+    switch (patternName) {
+      case 'surge':
+        return PatternType.surge;
+      case 'flashFire':
+        return PatternType.flashFire;
+      case 'stackUp':
+        return PatternType.stackUp;
+      case 'stealthIn':
+        return PatternType.stealthIn;
+      case 'blackHole':
+        return PatternType.blackHole;
+      case 'reboundShot':
+        return PatternType.reboundShot;
+      default:
+        return PatternType.surge; // 기본값
+    }
+  }
+
+  @override
+  void dispose() {
+    _subscription?.cancel();
+    super.dispose();
+  }
+}
+
+/// Provider 선언
+final signalControllerProvider =
+    StateNotifierProvider<SignalController, SignalState>((ref) {
+  final usecase = ref.read(signalUsecaseProvider);
+  return SignalController(usecase, ref);
+});\n\n// ====== lib/presentation/pages/signal_page.dart ======\n
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart'; // HapticFeedback용
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../core/config/app_config.dart';
+import '../../core/di/settings_provider.dart'; // 설정 provider
+import '../../core/di/signal_provider.dart';
+import '../../core/di/trade_provider.dart'; // marketsProvider
+import '../../domain/entities/app_settings.dart'; // SliderPosition enum
+import '../../domain/entities/signal.dart'; // PatternType import
+import '../controllers/signal_controller.dart';
+import '../widgets/signal_tile.dart';
+
+class SignalPage extends ConsumerWidget {
+  final ScrollController scrollController;
+
+  const SignalPage({
+    super.key,
+    required this.scrollController,
+  });
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    // Controller 기반 시스템으로 완전 통일
+    final controller = ref.watch(signalControllerProvider.notifier);
+    final state = ref.watch(signalControllerProvider);
+
+    // 시그널 스트림
+    final signalsAsync = ref.watch(signalListProvider);
+
+    // markets 정보 필요
+    final marketsAsync = ref.watch(marketsProvider);
+
+    // 슬라이더 위치 설정
+    final sliderPosition = ref.watch(appSettingsProvider).sliderPosition;
+
+    // 슬라이더 위젯 생성
+    final sliderWidget = _buildSliderWidget(
+      controller,
+      state,
+      marketsAsync,
+      ref,
+    );
+
+    // 시그널 리스트 위젯 생성
+    final signalListWidget = _buildSignalList(
+      signalsAsync,
+      controller,
+      scrollController,
+      state,
+      context,
+      ref,
+    );
+
+    return PrimaryScrollController(
+      controller: scrollController,
+      child: Column(
+        children: [
+          // 슬라이더 위치에 따른 조건부 배치
+          if (sliderPosition == SliderPosition.top) sliderWidget,
+
+          // 시그널 리스트 (항상 중간)
+          Expanded(child: signalListWidget),
+
+          // 슬라이더가 하단일 때
+          if (sliderPosition == SliderPosition.bottom) sliderWidget,
+        ],
+      ),
+    );
+  }
+
+  /// 슬라이더 위젯 생성 - 2줄로 깔끔하게 정리
+  Widget _buildSliderWidget(
+    SignalController controller,
+    SignalState state,
+    AsyncValue<List<String>> marketsAsync,
+    WidgetRef ref,
+  ) {
+    const patterns = AppConfig.signalPatterns;
+    final patternNames =
+        patterns.map((p) => AppConfig.getSignalPatternName(p)).toList();
+
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // 🎯 첫 번째 줄: 아이콘 + 제목 + 설명 + 활성화 토글
+          Row(
+            children: [
+              // 아이콘 + 제목 + 설명
+              Expanded(
+                child: Row(
+                  children: [
+                    // 패턴 아이콘
+                    Icon(
+                      _getPatternIcon(state.currentPattern),
+                      size: 18,
+                      color: _getPatternColor(state.currentPattern),
+                    ),
+                    const SizedBox(width: 8),
+                    // 제목: 설명 형태
+                    Expanded(
+                      child: Text(
+                        '${_getPatternName(state.currentPattern)}: ${_getPatternDescription(state.currentPattern)}',
+                        style: const TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.bold,
+                        ),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+
+              // 활성화/비활성화 토글 버튼
+              GestureDetector(
+                onTap: () {
+                  if (ref.read(appSettingsProvider).isHapticEnabled) {
+                    HapticFeedback.lightImpact();
+                  }
+                  controller.togglePatternEnabled();
+                },
+                child: Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(
+                      color: Colors.orange,
+                      width: 1.5,
+                    ),
+                    color: state.isPatternEnabled
+                        ? Colors.orange
+                        : Colors.transparent,
+                  ),
+                  child: Text(
+                    state.isPatternEnabled ? '활성' : '비활성',
+                    style: TextStyle(
+                      color:
+                          state.isPatternEnabled ? Colors.white : Colors.orange,
+                      fontSize: 12,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+
+          const SizedBox(height: 2),
+
+          // 🎯 두 번째 줄: 임계값 표시 (원래 형태 유지)
+          Row(
+            children: [
+              const SizedBox(width: 26), // 첫 번째 "임계값:" 자리만큼 공백
+              Text(
+                '임계값: ${controller.getThresholdDisplayText()}',
+                style: const TextStyle(fontSize: 12, color: Colors.grey),
+              ),
+            ],
+          ),
+
+          const SizedBox(height: 8),
+
+          // 패턴 슬라이더 (기능 전환)
+          Slider(
+            value: state.selectedIndex.toDouble(),
+            min: 0,
+            max: (patterns.length - 1).toDouble(),
+            divisions: patterns.length - 1,
+            label: patternNames[state.selectedIndex],
+            onChanged: (v) {
+              if (ref.read(appSettingsProvider).isHapticEnabled) {
+                HapticFeedback.lightImpact();
+              }
+              final index = v.round();
+              // Controller를 통해 패턴 변경
+              marketsAsync.whenData((markets) {
+                controller.setPatternIndex(index, markets);
+              });
+            },
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 패턴별 아이콘 반환
+  IconData _getPatternIcon(PatternType pattern) {
+    switch (pattern) {
+      case PatternType.surge:
+        return Icons.trending_up;
+      case PatternType.flashFire:
+        return Icons.flash_on;
+      case PatternType.stackUp:
+        return Icons.stacked_line_chart;
+      case PatternType.stealthIn:
+        return Icons.visibility_off;
+      case PatternType.blackHole:
+        return Icons.radio_button_unchecked;
+      case PatternType.reboundShot:
+        return Icons.trending_up;
+    }
+  }
+
+  /// 패턴별 색상 반환
+  Color _getPatternColor(PatternType pattern) {
+    switch (pattern) {
+      case PatternType.surge:
+        return Colors.red;
+      case PatternType.flashFire:
+        return Colors.orange;
+      case PatternType.stackUp:
+        return Colors.amber;
+      case PatternType.stealthIn:
+        return Colors.green;
+      case PatternType.blackHole:
+        return Colors.purple;
+      case PatternType.reboundShot:
+        return Colors.blue;
+    }
+  }
+
+  /// 패턴별 이름 반환
+  String _getPatternName(PatternType pattern) {
+    switch (pattern) {
+      case PatternType.surge:
+        return '급등';
+      case PatternType.flashFire:
+        return '불티';
+      case PatternType.stackUp:
+        return '스택업';
+      case PatternType.stealthIn:
+        return '침투자';
+      case PatternType.blackHole:
+        return '블랙홀';
+      case PatternType.reboundShot:
+        return '쇼트터치';
+    }
+  }
+
+  /// 패턴별 설명 반환
+  String _getPatternDescription(PatternType pattern) {
+    switch (pattern) {
+      case PatternType.surge:
+        return '3분 가격 급등감지';
+      case PatternType.flashFire:
+        return '3분 거래대금 급증감지';
+      case PatternType.stackUp:
+        return '연속 매집 감지';
+      case PatternType.stealthIn:
+        return '은밀한 유입 감지';
+      case PatternType.blackHole:
+        return '안정적 흡수 감지';
+      case PatternType.reboundShot:
+        return '단타 반등 감지';
+    }
+  }
+
+  /// 시그널 리스트 위젯 생성 - 스크롤바 개선 (Trade와 동일)
+  Widget _buildSignalList(
+    AsyncValue<List<Signal>> signalsAsync,
+    SignalController controller,
+    ScrollController scrollController,
+    SignalState state,
+    BuildContext context,
+    WidgetRef ref,
+  ) {
+    return signalsAsync.when(
+      data: (list) {
+        final viewList = controller.apply(list);
+
+        if (viewList.isEmpty) {
+          return Center(
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                Icon(
+                  Icons.radar,
+                  size: 64,
+                  color: Theme.of(context).hintColor.withAlpha(128),
+                ),
+                const SizedBox(height: 16),
+                Text(
+                  state.isPatternEnabled
+                      ? '${_getPatternName(state.currentPattern)} 패턴이 감지되지 않았습니다.'
+                      : '패턴 감지가 비활성화되어 있습니다.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                      color: Theme.of(context).hintColor, fontSize: 16),
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  '임계값: ${controller.getThresholdDisplayText()}',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    color: Theme.of(context).hintColor.withAlpha(179),
+                    fontSize: 14,
+                  ),
+                ),
+              ],
+            ),
+          );
+        }
+
+        return RawScrollbar(
+          controller: scrollController,
+          thumbVisibility: false,
+          trackVisibility: false,
+          thickness: 6.4,
+          radius: const Radius.circular(3.2),
+          thumbColor: Colors.orange.withAlpha(128),
+          interactive: true,
+          minThumbLength: 40,
+          child: ListView.builder(
+            controller: scrollController,
+            physics: const BouncingScrollPhysics(
+              parent: AlwaysScrollableScrollPhysics(),
+            ),
+            padding:
+                const EdgeInsets.only(left: 16, right: 20, top: 16, bottom: 16),
+            itemCount: viewList.length,
+            itemBuilder: (_, i) => SignalTile(signal: viewList[i]),
+          ),
+        );
+      },
+      loading: () => const Center(child: CircularProgressIndicator()),
+      error: (e, _) => Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(
+              Icons.error_outline,
+              size: 64,
+              color: Theme.of(context).colorScheme.error.withAlpha(128),
+            ),
+            const SizedBox(height: 16),
+            Text(
+              '시그널 로드 중 오류가 발생했습니다.',
+              style: TextStyle(
+                color: Theme.of(context).colorScheme.error,
+                fontSize: 16,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              '$e',
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                color: Theme.of(context).hintColor,
+                fontSize: 14,
+              ),
+            ),
+            const SizedBox(height: 16),
+            ElevatedButton.icon(
+              onPressed: () {
+                ref.invalidate(signalListProvider);
+              },
+              icon: const Icon(Icons.refresh),
+              label: const Text('다시 시도'),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.orange,
+                foregroundColor: Colors.white,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}\n\n// ====== lib/presentation/widgets/signal_tile.dart ======\n
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:intl/intl.dart';
+import '../../core/di/app_providers.dart'; // appSettingsProvider 추가
+import '../../domain/entities/signal.dart';
+import '../../shared/widgets/amount_display_widget.dart'; // 거래대금 표시
+import '../../shared/widgets/coin_logo_provider.dart'; // 코인 로고 프로바이더
+import '../../shared/utils/tile_common.dart'; // 🎯 공통 유틸리티
+import '../../shared/utils/blink_animation_mixin.dart'; // ✨ 반짝임 헬퍼
+import '../../shared/utils/amount_formatter.dart'; // 💰 포맷터 유틸리티
+
+// 🎯 중복 반짝임 방지를 위한 전역 Set
+final Set<String> _blinkedSignals = {};
+
+class SignalTile extends ConsumerStatefulWidget {
+  final Signal signal;
+
+  const SignalTile({super.key, required this.signal});
+
+  @override
+  ConsumerState<SignalTile> createState() => _SignalTileState();
+}
+
+class _SignalTileState extends ConsumerState<SignalTile>
+    with SingleTickerProviderStateMixin {
+  
+  // 🕒 시간 포맷터만 유지 (고유 기능)
+  static final _timeFormat = DateFormat('HH:mm:ss');
+
+  late AnimationController _blinkController;
+  late Animation<double> _blinkAnimation;
+  bool _shouldBlink = false;
+
+  @override
+  void initState() {
+    super.initState();
+    // ✨ 반짝임 애니메이션 초기화 (기존 방식)
+    _blinkController = AnimationController(
+      duration: const Duration(milliseconds: 800), // Signal은 조금 더 길게
+      vsync: this,
+    );
+    _blinkAnimation = Tween<double>(begin: 1.0, end: 0.2).animate(
+      CurvedAnimation(parent: _blinkController, curve: Curves.easeInOut),
+    );
+
+    _checkNewSignal();
+  }
+
+  /// 🎯 새로운 시그널 감지 및 반짝임 처리 (헬퍼 클래스 사용)
+  void _checkNewSignal() {
+    final signalKey = '${widget.signal.market}_${widget.signal.detectedAt.millisecondsSinceEpoch}';
+    
+    if (BlinkAnimationHelper.checkNewSignal(
+      blinkedSignalsSet: _blinkedSignals,
+      detectedAt: widget.signal.detectedAt,
+      signalKey: signalKey,
+      maxAgeSeconds: 10,
+    )) {
+      _startBlink();
+    }
+  }
+
+  /// 반짝임 시작 (설정 연동 추가)
+  void _startBlink() {
+    final blinkEnabled = ref.read(appSettingsProvider).blinkEnabled;
+    if (!mounted || !blinkEnabled) return; // 🎯 설정 체크 추가!
+    
+    _shouldBlink = true;
+    _blinkController.forward().then((_) {
+      _blinkController.reverse().then((_) {
+        if (mounted) {
+          setState(() {
+            _shouldBlink = false;
+          });
+        }
+      });
+    });
+  }
+
+  @override
+  void dispose() {
+    _blinkController.dispose();
+    super.dispose();
+  }
+
+  /// 🎯 패턴별 상세 정보 텍스트 (기존 유지 - 시그널 전용 로직)
+  String _getPatternDetail() {
+    final pattern = widget.signal.patternType;
+
+    switch (pattern) {
+      case PatternType.surge:
+        final basePrice = widget.signal.basePrice;
+        if (basePrice != null) {
+          return '기준가: ${AmountFormatter.formatPrice(basePrice)}원'; // ✅ 공통 포맷터
+        }
+        return '급등 감지';
+
+      case PatternType.flashFire:
+        final multiplier = widget.signal.surgeMultiplier;
+        if (multiplier != null) {
+          return '${multiplier.toStringAsFixed(1)}배 급증';
+        }
+        return '거래대금 급증';
+
+      case PatternType.stackUp:
+        final count = widget.signal.consecutiveCount;
+        if (count != null) {
+          return '$count연속 증가';
+        }
+        return '연속 매집';
+
+      case PatternType.stealthIn:
+        final seconds = widget.signal.sustainedSeconds;
+        if (seconds != null) {
+          final minutes = (seconds / 60).toInt();
+          return '$minutes분간 유입';
+        }
+        return '은밀한 유입';
+
+      case PatternType.blackHole:
+        final stability = widget.signal.priceStability;
+        if (stability != null) {
+          return '변동: ${stability.toStringAsFixed(2)}%';
+        }
+        return '가격 안정';
+
+      case PatternType.reboundShot:
+        final strength = widget.signal.reboundStrength;
+        if (strength != null) {
+          return '반등: ${strength.toStringAsFixed(1)}%';
+        }
+        return '반등 감지';
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final onSurface = theme.colorScheme.onSurface;
+    final onSurface70 = onSurface.withValues(alpha: 0.7);
+
+    // 🎯 표준 카드 위젯 생성
+    Widget cardWidget = TileCommon.buildStandardCard(
+      child: TileCommon.buildFlexRow(
+        children: [
+          // 🕒 시간 부분: flex 13
+          FlexChild.expanded(
+            Text(
+              _timeFormat.format(widget.signal.detectedAt),
+              style: TextStyle(color: onSurface, fontSize: 11),
+            ),
+            flex: 13,
+          ),
+
+          const FlexChild.fixed(SizedBox(width: 8)),
+
+          // 🎨 코인 로고 부분: 고정 크기
+          FlexChild.fixed(
+            CoinLogoProvider.buildCoinLogo(
+              ticker: widget.signal.market.replaceFirst('KRW-', ''),
+              radius: 14,
+            ),
+          ),
+
+          const FlexChild.fixed(SizedBox(width: 8)),
+
+          // 🪙 코인명 + 패턴 정보: flex 24
+          FlexChild.expanded(
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Flexible(
+                      child: Text(
+                        TileCommon.getDisplayName(ref, widget.signal.market), // ✅ 공통 함수
+                        style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          color: theme.colorScheme.primary,
+                          fontSize: 15,
+                        ),
+                        overflow: TextOverflow.ellipsis,
+                        maxLines: 1,
+                      ),
+                    ),
+                    const SizedBox(width: 4),
+                    // 🆕 NEW 뱃지
+                    if (TileCommon.buildNewBadge(widget.signal.detectedAt) case final badge?) 
+                      badge, // ✅ 공통 함수
+                  ],
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  _getPatternDetail(), // ✅ 시그널 전용 함수
+                  style: TextStyle(
+                    color: onSurface70,
+                    fontSize: 11,
+                  ),
+                  overflow: TextOverflow.ellipsis,
+                  maxLines: 1,
+                ),
+              ],
+            ),
+            flex: 24,
+          ),
+
+          // 💵 가격 + 변화율: flex 18
+          FlexChild.expanded(
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                Text(
+                  '${AmountFormatter.formatPrice(widget.signal.currentPrice)}원', // ✅ 공통 포맷터
+                  style: TextStyle(color: onSurface, fontSize: 13),
+                  overflow: TextOverflow.ellipsis,
+                  maxLines: 1,
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  TileCommon.formatChangePercent(widget.signal.changePercent), // ✅ 공통 함수
+                  style: TextStyle(
+                    color: TileCommon.getChangeColor(widget.signal.changePercent), // ✅ 공통 함수
+                    fontSize: 12,
+                    fontWeight: FontWeight.bold,
+                  ),
+                  overflow: TextOverflow.ellipsis,
+                  maxLines: 1,
+                ),
+              ],
+            ),
+            flex: 18,
+          ),
+
+          const FlexChild.fixed(SizedBox(width: 8)),
+
+          // 💰 거래대금: flex 18 (AmountDisplayWidget 사용)
+          FlexChild.expanded(
+            Align(
+              alignment: Alignment.centerRight,
+              child: AmountDisplayWidget(
+                totalAmount: widget.signal.tradeAmount,
+                isBuy: widget.signal.changePercent >= 0, // 상승이면 매수 색상
+                fontSize: 14,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            flex: 18,
+          ),
+        ],
+      ),
+    );
+
+    // 🎯 반짝임 애니메이션 적용 (설정 체크 추가)
+    final blinkEnabled = ref.watch(appSettingsProvider).blinkEnabled;
+    
+    return blinkEnabled 
+        ? BlinkAnimationHelper.wrapWithBlinkEffect(
+            child: cardWidget,
+            shouldBlink: _shouldBlink,
+            blinkAnimation: _blinkAnimation,
+            blinkColor: widget.signal.patternType == PatternType.surge
+                ? Colors.red
+                : Colors.orange, // 패턴에 따른 색상
+          )
+        : cardWidget;
+  }
+}

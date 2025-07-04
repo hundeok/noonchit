@@ -1,4 +1,3 @@
-// lib/domain/usecases/settings_usecase.dart
 import 'package:flutter/material.dart';
 import '../entities/app_settings.dart';
 import '../repositories/settings_repository.dart';
@@ -25,13 +24,39 @@ class SettingsUsecase {
     return _repo.updateSliderPosition(pos);
   }
 
-  /// 🆕 코인명 표시 방식 업데이트
   Future<void> updateDisplayMode(DisplayMode mode) {
     return _repo.updateDisplayMode(mode);
   }
 
-  /// 💰 금액 표시 방식 업데이트
   Future<void> updateAmountDisplayMode(AmountDisplayMode mode) {
     return _repo.updateAmountDisplayMode(mode);
+  }
+
+  Future<void> updateBlinkEnabled(bool enabled) {
+    return _repo.updateBlinkEnabled(enabled);
+  }
+
+  Future<void> updateHotEnabled(bool enabled) { // 🔥 HOT 설정 추가
+    return _repo.updateHotEnabled(enabled);
+  }
+
+  Future<void> updateFontFamily(FontFamily font) {
+    return _repo.updateFontFamily(font);
+  }
+
+  Future<void> updateHapticEnabled(bool enabled) { // 🆕 추가
+    return _repo.updateHapticEnabled(enabled);
+  }
+
+  Future<void> updatePortraitLocked(bool locked) { // 🆕 추가
+    return _repo.updatePortraitLocked(locked);
+  }
+
+  Future<void> clearCache() {
+    return _repo.clearCache();
+  }
+
+  Future<void> resetSettings() {
+    return _repo.resetSettings();
   }
 }

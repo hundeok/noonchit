@@ -69,68 +69,83 @@ final marketMoodProvider = StreamProvider<MarketMoodData>((ref) {
       .debounceTime(const Duration(milliseconds: 100));
 });
 
-/// 🚀 통합 계산 Provider - 주기적 갱신 및 포그라운드 복귀 시 자동 invalidate 적용
+/// 🚀 통합 계산 Provider - keepAlive 관리 개선
 final marketMoodComputedDataProvider = FutureProvider.autoDispose<MarketMoodComputedData>((ref) async {
   // 1) autoDispose 비활성화 링크 (keepAlive)
   final link = ref.keepAlive();
 
-  // 2) 15분마다 재계산
-  final timer = Timer.periodic(const Duration(minutes: 15), (_) {
+  // 2) 15분마다 재계산 (dispose 체크)
+  Timer? timer;
+  var isDisposed = false;
+  
+  timer = Timer.periodic(const Duration(minutes: 15), (_) {
+    if (isDisposed) {
+      timer?.cancel();
+      return;
+    }
     ref.invalidateSelf();
   });
 
   // 3) 앱 복귀 시 재계산
   ref.onResume(() {
-    ref.invalidateSelf();
+    if (!isDisposed) {
+      ref.invalidateSelf();
+    }
   });
 
-  // 4) 종료 시 정리
+  // 4) 종료 시 정리 (순서 중요!)
   ref.onDispose(() {
-    timer.cancel();
+    isDisposed = true;
+    timer?.cancel();
+    timer = null;
     link.close();
+    log.d('MarketMoodComputedData: 리소스 정리 완료');
   });
 
-  // 기존 로직
-  final moodAsync = ref.watch(marketMoodProvider);
-  final exchangeAsync = ref.watch(exchangeRateProvider);
-  final usecase = ref.read(marketMoodUsecaseProvider);
+  try {
+    // 기존 로직
+    final moodAsync = ref.watch(marketMoodProvider);
+    final exchangeAsync = ref.watch(exchangeRateProvider);
+    final usecase = ref.read(marketMoodUsecaseProvider);
 
-  return moodAsync.when(
-    data: (marketData) async {
-      final exchangeRate = exchangeAsync.asData?.value ?? 1400.0;
-      try {
-        final results = await Future.wait(
-          [
-            usecase.calculateCurrentMood(marketData.totalVolumeUsd),
-            usecase.calculateVolumeComparison(marketData.totalVolumeUsd),
-          ],
-          eagerError: false,
-        );
-        final currentMood = results[0] as MarketMood;
-        final volumeComparison = results[1] as ComparisonData;
-        final moodSummary = usecase.generateMoodSummary(currentMood);
+    return moodAsync.when(
+      data: (marketData) async {
+        final exchangeRate = exchangeAsync.asData?.value ?? 1400.0;
+        try {
+          final results = await Future.wait(
+            [
+              usecase.calculateCurrentMood(marketData.totalVolumeUsd),
+              usecase.calculateVolumeComparison(marketData.totalVolumeUsd),
+            ],
+            eagerError: false,
+          );
+          final currentMood = results[0] as MarketMood;
+          final volumeComparison = results[1] as ComparisonData;
+          final moodSummary = usecase.generateMoodSummary(currentMood);
 
-        return MarketMoodComputedData(
-          marketData: marketData,
-          currentMood: currentMood,
-          volumeComparison: volumeComparison,
-          moodSummary: moodSummary,
-          exchangeRate: exchangeRate,
-          computedAt: DateTime.now(),
-        );
-      } catch (e, st) {
-        // [수정됨] 이름 있는 파라미터(named parameter) 대신 위치 기반 파라미터(positional parameter) 사용
-        log.e('배치 계산 오류: $e', e, st);
+          return MarketMoodComputedData(
+            marketData: marketData,
+            currentMood: currentMood,
+            volumeComparison: volumeComparison,
+            moodSummary: moodSummary,
+            exchangeRate: exchangeRate,
+            computedAt: DateTime.now(),
+          );
+        } catch (e, st) {
+          log.e('배치 계산 오류: $e', e, st);
+          return MarketMoodComputedData.error();
+        }
+      },
+      loading: () async => MarketMoodComputedData.loading(),
+      error: (error, stack) async {
+        log.e('마켓무드 계산 오류: $error', error, stack);
         return MarketMoodComputedData.error();
-      }
-    },
-    loading: () async => MarketMoodComputedData.loading(),
-    error: (error, stack) async {
-      // [수정됨] 이름 있는 파라미터(named parameter) 대신 위치 기반 파라미터(positional parameter) 사용
-      log.e('마켓무드 계산 오류: $error', error, stack);
-      return MarketMoodComputedData.error();
-    },
-  );
+      },
+    );
+  } catch (e, st) {
+    log.e('MarketMoodComputedData Provider 오류: $e', e, st);
+    return MarketMoodComputedData.error();
+  }
 });
 
 /// 🎯 개별 데이터 접근 Provider들 - 메모이제이션된 결과에서 추출

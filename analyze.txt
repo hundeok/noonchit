@@ -1,72 +1,23 @@
 Analyzing noonchit...                                           
 
-warning • The library 'package:noonchit/core/di/market_mood_provider.dart' doesn't export a member with the shown name 'MarketMoodCalculator' • lib/core/di/app_providers.dart:109:9 • undefined_shown_name
-warning • The library 'package:noonchit/core/di/market_mood_provider.dart' doesn't export a member with the shown name 'VolumeComparator' • lib/core/di/app_providers.dart:110:9 • undefined_shown_name
-warning • The library 'package:noonchit/core/di/market_mood_provider.dart' doesn't export a member with the shown name 'MarketMoodUseCase' • lib/core/di/app_providers.dart:111:9 • undefined_shown_name
-   info • The file name 'market_mood_provider copy.dart' isn't a lower_case_with_underscores identifier • lib/core/di/market_mood_provider copy.dart:1:1 • file_names
-  error • The named parameter 'repository' isn't defined • lib/core/di/market_mood_provider.dart:67:31 • undefined_named_parameter
-  error • 1 positional argument expected by 'VolumeComparator.new', but 0 found • lib/core/di/market_mood_provider.dart:73:27 • not_enough_positional_arguments
-  error • The named parameter 'repository' isn't defined • lib/core/di/market_mood_provider.dart:73:27 • undefined_named_parameter
-  error • 1 positional argument expected by 'MarketMoodUseCase.new', but 0 found • lib/core/di/market_mood_provider.dart:83:5 • not_enough_positional_arguments
-  error • The named parameter 'repository' isn't defined • lib/core/di/market_mood_provider.dart:83:5 • undefined_named_parameter
-  error • The named parameter 'calculator' isn't defined • lib/core/di/market_mood_provider.dart:84:5 • undefined_named_parameter
-  error • The named parameter 'comparator' isn't defined • lib/core/di/market_mood_provider.dart:85:5 • undefined_named_parameter
-  error • The method 'getCurrentExchangeRate' isn't defined for the type 'MarketMoodUseCase' • lib/core/di/market_mood_provider.dart:96:24 • undefined_method
-  error • The method 'getMarketDataStream' isn't defined for the type 'MarketMoodUseCase' • lib/core/di/market_mood_provider.dart:102:18 • undefined_method
-  error • The method 'performFullAnalysis' isn't defined for the type 'MarketMoodUseCase' • lib/core/di/market_mood_provider.dart:108:24 • undefined_method
-  error • The method 'getSystemState' isn't defined for the type 'MarketMoodUseCase' • lib/core/di/market_mood_provider.dart:120:24 • undefined_method
-  error • The method 'checkSystemHealth' isn't defined for the type 'MarketMoodUseCase' • lib/core/di/market_mood_provider.dart:126:24 • undefined_method
-warning • The value of the field '_ref' isn't used • lib/core/di/market_mood_provider.dart:136:13 • unused_field
-  error • The method 'getSystemState' isn't defined for the type 'MarketMoodUseCase' • lib/core/di/market_mood_provider.dart:145:42 • undefined_method
-  error • The method 'refreshExchangeRate' isn't defined for the type 'MarketMoodUseCase' • lib/core/di/market_mood_provider.dart:156:22 • undefined_method
-  error • The method 'getSystemState' isn't defined for the type 'MarketMoodUseCase' • lib/core/di/market_mood_provider.dart:157:42 • undefined_method
-  error • The method 'syncAfterBackground' isn't defined for the type 'MarketMoodUseCase' • lib/core/di/market_mood_provider.dart:167:22 • undefined_method
-   info • Don't invoke 'print' in production code • lib/core/di/market_mood_provider.dart:171:7 • avoid_print
-  error • The method 'logCurrentStatus' isn't defined for the type 'MarketMoodUseCase' • lib/core/di/market_mood_provider.dart:177:20 • undefined_method
-  error • The method 'injectTestData' isn't defined for the type 'MarketMoodUseCase' • lib/core/di/market_mood_provider.dart:182:20 • undefined_method
-  error • Undefined name 'Hive' • lib/core/di/market_mood_provider.dart:231:8 • undefined_identifier
-  error • Undefined name 'Hive' • lib/core/di/market_mood_provider.dart:232:5 • undefined_identifier
-  error • Undefined name 'Hive' • lib/core/di/market_mood_provider.dart:236:8 • undefined_identifier
-  error • Undefined name 'Hive' • lib/core/di/market_mood_provider.dart:237:5 • undefined_identifier
-  error • Undefined name 'Hive' • lib/core/di/market_mood_provider.dart:239:8 • undefined_identifier
-  error • Undefined name 'Hive' • lib/core/di/market_mood_provider.dart:240:5 • undefined_identifier
-  error • Undefined name 'Hive' • lib/core/di/market_mood_provider.dart:242:8 • undefined_identifier
-  error • Undefined name 'Hive' • lib/core/di/market_mood_provider.dart:243:5 • undefined_identifier
-  error • Undefined name 'Hive' • lib/core/di/market_mood_provider.dart:245:8 • undefined_identifier
-  error • Undefined name 'Hive' • lib/core/di/market_mood_provider.dart:246:5 • undefined_identifier
-  error • There's no constant named 'neutral' in 'MarketMood' • lib/core/di/market_mood_provider.dart:286:31 • undefined_enum_constant
-  error • There's no constant named 'neutral' in 'MarketMood' • lib/core/di/market_mood_provider.dart:304:31 • undefined_enum_constant
-warning • Unused import: 'dart:async' • lib/core/di/websocket_provider.dart:3:8 • unused_import
-warning • Unused import: 'dart:async' • lib/core/navigation/app_router.dart:1:8 • unused_import
-warning • Unused import: 'package:firebase_messaging/firebase_messaging.dart' • lib/core/navigation/app_router.dart:5:8 • unused_import
-warning • Unused import: '../di/app_providers.dart' • lib/core/navigation/app_router.dart:8:8 • unused_import
-warning • The stack trace variable 'stackTrace' isn't used and can be removed • lib/core/network/api_client_coingecko.dart:59:17 • unused_catch_stack
-   info • Unnecessary braces in a string interpolation • lib/data/datasources/market_mood_local_ds.dart:126:27 • unnecessary_brace_in_string_interps
-  error • The argument type 'CoinGeckoGlobalResponse' can't be assigned to the parameter type 'Map<String, dynamic>?'.  • lib/data/datasources/market_mood_remote_ds.dart:28:60 • argument_type_not_assignable
-  error • The argument type 'CoinGeckoGlobalResponse' can't be assigned to the parameter type 'Map<String, dynamic>?'.  • lib/data/datasources/market_mood_remote_ds.dart:60:58 • argument_type_not_assignable
-warning • The operand can't be 'null', so the condition is always 'false' • lib/data/repositories/market_mood_repository_impl.dart:49:35 • unnecessary_null_comparison
-warning • The '!' will have no effect because the receiver can't be null • lib/data/repositories/market_mood_repository_impl.dart:54:49 • unnecessary_non_null_assertion
-   info • Unnecessary braces in a string interpolation • lib/data/repositories/market_mood_repository_impl.dart:171:19 • unnecessary_brace_in_string_interps
-   info • Unnecessary braces in a string interpolation • lib/data/repositories/market_mood_repository_impl.dart:175:17 • unnecessary_brace_in_string_interps
-warning • Unused import: '../../core/utils/date_time.dart' • lib/domain/entities/market_mood.dart:4:8 • unused_import
-  error • The method 'checkAndFillMissingSlots' isn't defined for the type 'MarketMoodRepository' • lib/domain/usecases/market_mood_usecase.dart:242:23 • undefined_method
-  error • The method 'getDebugInfo' isn't defined for the type 'MarketMoodRepository' • lib/domain/usecases/market_mood_usecase.dart:247:24 • undefined_method
-  error • The method 'logStatus' isn't defined for the type 'MarketMoodRepository' • lib/domain/usecases/market_mood_usecase.dart:252:17 • undefined_method
-   info • The import of '../../domain/entities/market_mood.dart' is unnecessary because all of the used elements are also provided by the import of '../../core/di/app_providers.dart' • lib/presentation/controllers/market_mood_controller.dart:8:8 • unnecessary_import
-  error • The argument type 'AsyncValue<Map<String, dynamic>>' can't be assigned to the parameter type 'MarketMoodSystemState?'.  • lib/presentation/controllers/market_mood_controller.dart:33:22 • argument_type_not_assignable
-  error • The method 'refresh' isn't defined for the type 'AsyncValue' • lib/presentation/controllers/market_mood_controller.dart:46:22 • undefined_method
-  error • The argument type 'FutureProviderFamily<MarketMood, double>' can't be assigned to the parameter type 'ProviderListenable<MarketMood>'.  • lib/presentation/controllers/market_mood_controller.dart:52:22 • argument_type_not_assignable
-  error • The argument type 'FutureProviderFamily<ComparisonData, double>' can't be assigned to the parameter type 'ProviderListenable<ComparisonData>'.  • lib/presentation/controllers/market_mood_controller.dart:63:22 • argument_type_not_assignable
-  error • The method 'getSystemHealth' isn't defined for the type 'AsyncValue' • lib/presentation/controllers/market_mood_controller.dart:70:39 • undefined_method
-  error • The method 'syncMissingData' isn't defined for the type 'AsyncValue' • lib/presentation/controllers/market_mood_controller.dart:85:24 • undefined_method
-warning • Unused import: '../../core/config/app_config.dart' • lib/presentation/controllers/volume_controller.dart:4:8 • unused_import
-   info • The import of '../../domain/entities/market_mood.dart' is unnecessary because all of the used elements are also provided by the import of '../../core/di/app_providers.dart' • lib/presentation/pages/market_mood_page.dart:7:8 • unnecessary_import
-   info • The import of '../controllers/market_mood_controller.dart' is unnecessary because all of the used elements are also provided by the import of '../../core/di/app_providers.dart' • lib/presentation/pages/market_mood_page.dart:8:8 • unnecessary_import
-  error • The argument type 'FutureProviderFamily<ComparisonData, double>' can't be assigned to the parameter type 'ProviderListenable<dynamic>'.  • lib/presentation/pages/market_mood_page.dart:252:38 • argument_type_not_assignable
-  error • The argument type 'FutureProviderFamily<ComparisonData, double>' can't be assigned to the parameter type 'ProviderListenable<dynamic>'.  • lib/presentation/pages/market_mood_page.dart:271:38 • argument_type_not_assignable
-   info • The file name 'common_app_bar copy.dart' isn't a lower_case_with_underscores identifier • lib/shared/widgets/common_app_bar copy.dart:1:1 • file_names
-   info • Use a 'SizedBox' to add whitespace to a layout • lib/shared/widgets/common_app_bar.dart:51:27 • sized_box_for_whitespace
-   info • The import of '../../presentation/controllers/market_mood_controller.dart' is unnecessary because all of the used elements are also provided by the import of '../../core/di/app_providers.dart' • lib/shared/widgets/market_mood_indicator.dart:6:8 • unnecessary_import
-  error • The argument type 'FutureProviderFamily<MarketMood, double>' can't be assigned to the parameter type 'ProviderListenable<dynamic>'.  • lib/shared/widgets/market_mood_indicator.dart:24:35 • argument_type_not_assignable
-   info • Use 'const' for final variables initialized to a constant value • lib/shared/widgets/websocket_modal.dart:38:5 • prefer_const_declarations
+warning • The library 'package:noonchit/core/di/surge_provider.dart' doesn't export a member with the shown name 'surgeRepositoryProvider' • lib/core/di/app_providers.dart:49:1 • undefined_shown_name
+warning • The library 'package:noonchit/core/di/surge_provider.dart' doesn't export a member with the shown name 'surgeUsecaseProvider' • lib/core/di/app_providers.dart:50:1 • undefined_shown_name
+warning • The library 'package:noonchit/core/di/surge_provider.dart' doesn't export a member with the shown name 'surgeTimeFrameIndexProvider' • lib/core/di/app_providers.dart:51:1 • undefined_shown_name
+warning • The library 'package:noonchit/core/di/surge_provider.dart' doesn't export a member with the shown name 'surgeTimeFrameProvider' • lib/core/di/app_providers.dart:52:1 • undefined_shown_name
+warning • The library 'package:noonchit/core/di/surge_provider.dart' doesn't export a member with the shown name 'surgeTimeFrameController' • lib/core/di/app_providers.dart:54:1 • undefined_shown_name
+warning • The value of the local variable 'filteredCount' isn't used • lib/core/di/trade_provider.dart:177:13 • unused_local_variable
+   info • 'stream' is deprecated and shouldn't be used. .stream will be removed in 3.0.0. As a replacement, either listen to the provider itself (AsyncValue) or .future • lib/core/di/trade_provider.dart:481:47 • deprecated_member_use
+   info • 'stream' is deprecated and shouldn't be used. .stream will be removed in 3.0.0. As a replacement, either listen to the provider itself (AsyncValue) or .future • lib/core/di/volume_provider.dart:338:47 • deprecated_member_use
+   info • Don't invoke 'print' in production code • lib/core/utils/cache_utils.dart:140:9 • avoid_print
+   info • The file name 'pattern_detector copy.dart' isn't a lower_case_with_underscores identifier • lib/core/utils/pattern_detector copy.dart:1:1 • file_names
+   info • Unnecessary braces in a string interpolation • lib/core/utils/timeframe_utils.dart:101:15 • unnecessary_brace_in_string_interps
+warning • The value of the field '_tradeRepository' isn't used • lib/domain/usecases/surge_usecase.dart:11:25 • unused_field
+warning • The value of the field '_repository' isn't used • lib/domain/usecases/trade_usecase.dart:12:25 • unused_field
+warning • The value of the field '_volumeRepo' isn't used • lib/domain/usecases/volume_usecase.dart:12:25 • unused_field
+  error • The getter 'resetTimeFrame' isn't defined for the type 'SurgeEvent' • lib/presentation/controllers/surge_controller.dart:43:23 • undefined_getter
+  error • The getter 'resetTimeFrame' isn't defined for the type 'SurgeEvent' • lib/presentation/controllers/surge_controller.dart:44:39 • undefined_getter
+warning • Unused import: '../../core/config/app_config.dart' • lib/presentation/controllers/trade_controller.dart:4:8 • unused_import
+warning • The value of the field '_usecase' isn't used • lib/presentation/controllers/trade_controller.dart:12:22 • unused_field
+warning • Unused import: '../../core/config/app_config.dart' • lib/presentation/pages/surge_page.dart:3:8 • unused_import
+warning • Unused import: '../../core/di/trade_provider.dart' • lib/presentation/pages/trade_page.dart:5:8 • unused_import
 

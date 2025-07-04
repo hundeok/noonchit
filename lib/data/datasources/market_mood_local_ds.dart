@@ -1,5 +1,5 @@
 // lib/data/datasources/market_mood_local_ds.dart
-// 💾 Data Layer: 로컬 데이터 소스 (Hive 기반, DI 패턴)
+// 💾 Data Layer: 로컬 데이터 소스 (Hive 기반, DI 패턴, Box 상태 체크 추가)
 
 import 'package:hive_flutter/hive_flutter.dart';
 import '../../core/services/hive_service.dart';
@@ -16,23 +16,38 @@ class MarketMoodLocalDataSource {
 
   MarketMoodLocalDataSource(this._hiveService);
 
-  /// Volume Box 접근
-  Box<TimestampedVolume> get _volumeBox => _hiveService.marketMoodVolumeBox;
+  /// Volume Box 접근 (상태 체크 추가)
+  Box<TimestampedVolume> get _volumeBox {
+    final box = _hiveService.marketMoodVolumeBox;
+    if (!box.isOpen) {
+      throw StateError('Volume box is not open. Please ensure HiveService is properly initialized.');
+    }
+    return box;
+  }
   
-  /// Cache Box 접근 
-  Box get _cacheBox => _hiveService.marketMoodCacheBox;
+  /// Cache Box 접근 (상태 체크 추가)
+  Box get _cacheBox {
+    final box = _hiveService.marketMoodCacheBox;
+    if (!box.isOpen) {
+      throw StateError('Cache box is not open. Please ensure HiveService is properly initialized.');
+    }
+    return box;
+  }
 
   // ═══════════════════════════════════════════════════════════
-  // 📈 볼륨 데이터 관리
+  // 📈 볼륨 데이터 관리 (안전한 Box 접근)
   // ═══════════════════════════════════════════════════════════
 
   /// 볼륨 데이터 추가 (30분 슬롯)
   Future<void> addVolumeData(TimestampedVolume volume) async {
     try {
+      // Box 상태 체크는 getter에서 처리
+      final box = _volumeBox;
+      
       // 30분 단위로 정규화된 키 생성
       final slotKey = _getSlotKey(volume.timestamp);
       
-      await _volumeBox.put(slotKey, volume);
+      await box.put(slotKey, volume);
       log.d('📈 볼륨 데이터 저장: $slotKey -> ${volume.volumeUsd.toStringAsFixed(0)}B');
     } catch (e, st) {
       log.e('📈 볼륨 데이터 저장 실패', e, st);
@@ -43,10 +58,11 @@ class MarketMoodLocalDataSource {
   /// N분 전 볼륨 데이터 조회
   Future<TimestampedVolume?> getVolumeNMinutesAgo(int minutes) async {
     try {
+      final box = _volumeBox;
       final targetTime = DateTime.now().subtract(Duration(minutes: minutes));
       final slotKey = _getSlotKey(targetTime);
       
-      final volume = _volumeBox.get(slotKey);
+      final volume = box.get(slotKey);
       if (volume != null) {
         log.d('📈 $minutes분 전 볼륨 조회 성공: ${volume.volumeUsd.toStringAsFixed(0)}B');
       } else {
@@ -63,10 +79,11 @@ class MarketMoodLocalDataSource {
   /// 특정 기간의 평균 볼륨 계산
   Future<double?> getAverageVolume(int days) async {
     try {
+      final box = _volumeBox;
       final now = DateTime.now();
       final cutoffTime = now.subtract(Duration(days: days));
       
-      final volumes = _volumeBox.values
+      final volumes = box.values
           .where((volume) => volume.timestamp.isAfter(cutoffTime))
           .map((volume) => volume.volumeUsd)
           .toList();
@@ -89,7 +106,8 @@ class MarketMoodLocalDataSource {
   /// 수집된 데이터 개수 확인
   Future<int> getCollectedDataCount() async {
     try {
-      final count = _volumeBox.length;
+      final box = _volumeBox;
+      final count = box.length;
       log.d('📊 총 데이터 개수: $count');
       return count;
     } catch (e, st) {
@@ -101,15 +119,16 @@ class MarketMoodLocalDataSource {
   /// 누락된 30분 슬롯 확인 및 보정
   Future<void> checkAndFillMissingSlots() async {
     try {
+      final box = _volumeBox;
       final appStartTime = getAppStartTime();
       final now = DateTime.now();
       final totalMinutes = now.difference(appStartTime).inMinutes;
       final expectedSlots = (totalMinutes / 30).floor();
       
-      log.i('🔄 슬롯 체크: 예상 $expectedSlots개, 실제 ${_volumeBox.length}개');
+      log.i('🔄 슬롯 체크: 예상 $expectedSlots개, 실제 ${box.length}개');
       
-      if (_volumeBox.length < expectedSlots) {
-        final missing = expectedSlots - _volumeBox.length;
+      if (box.length < expectedSlots) {
+        final missing = expectedSlots - box.length;
         log.w('⚠️ $missing개 슬롯 누락 감지');
         // 실제 보정 로직은 필요 시 구현
       }
@@ -119,13 +138,14 @@ class MarketMoodLocalDataSource {
   }
 
   // ═══════════════════════════════════════════════════════════
-  // 💱 환율 캐싱
+  // 💱 환율 캐싱 (안전한 Box 접근)
   // ═══════════════════════════════════════════════════════════
 
   /// 환율 캐시 저장
   Future<void> cacheExchangeRate(double rate) async {
     try {
-      await _cacheBox.put(_exchangeRateKey, {
+      final box = _cacheBox;
+      await box.put(_exchangeRateKey, {
         'rate': rate,
         'timestamp': DateTime.now().millisecondsSinceEpoch,
       });
@@ -139,7 +159,8 @@ class MarketMoodLocalDataSource {
   /// 캐시된 환율 조회 (12시간 유효)
   Future<double?> getCachedExchangeRate() async {
     try {
-      final cached = _cacheBox.get(_exchangeRateKey);
+      final box = _cacheBox;
+      final cached = box.get(_exchangeRateKey);
       if (cached == null) return null;
       
       final timestamp = DateTime.fromMillisecondsSinceEpoch(cached['timestamp']);
@@ -160,20 +181,21 @@ class MarketMoodLocalDataSource {
   }
 
   // ═══════════════════════════════════════════════════════════
-  // 🕰️ 시간 관리
+  // 🕰️ 시간 관리 (안전한 Box 접근)
   // ═══════════════════════════════════════════════════════════
 
   /// 앱 시작 시간 조회
   DateTime getAppStartTime() {
     try {
-      final cached = _cacheBox.get(_appStartTimeKey);
+      final box = _cacheBox;
+      final cached = box.get(_appStartTimeKey);
       if (cached != null) {
         return cached as DateTime;
       }
       
       // 최초 실행 시 현재 시간으로 설정
       final now = DateTime.now();
-      _cacheBox.put(_appStartTimeKey, now);
+      box.put(_appStartTimeKey, now);
       log.i('🕰️ 앱 시작 시간 설정: ${now.toIso8601String()}');
       return now;
     } catch (e, st) {
@@ -197,28 +219,31 @@ class MarketMoodLocalDataSource {
   }
 
   // ═══════════════════════════════════════════════════════════
-  // 🔧 유틸리티
+  // 🔧 유틸리티 (안전한 Box 접근)
   // ═══════════════════════════════════════════════════════════
 
   /// 디버깅용 정보 반환
   Map<String, Object> getDebugInfo() {
     try {
+      final volumeBox = _volumeBox;
+      final cacheBox = _cacheBox;
+      
       final volumeInfo = {
-        'total_count': _volumeBox.length,
-        'box_open': _volumeBox.isOpen,
-        'first_entry': _volumeBox.isNotEmpty 
-            ? _volumeBox.values.first.timestamp.toIso8601String() 
+        'total_count': volumeBox.length,
+        'box_open': volumeBox.isOpen,
+        'first_entry': volumeBox.isNotEmpty 
+            ? volumeBox.values.first.timestamp.toIso8601String() 
             : 'none',
-        'last_entry': _volumeBox.isNotEmpty 
-            ? _volumeBox.values.last.timestamp.toIso8601String() 
+        'last_entry': volumeBox.isNotEmpty 
+            ? volumeBox.values.last.timestamp.toIso8601String() 
             : 'none',
       };
       
       final cacheInfo = {
-        'cache_keys': _cacheBox.keys.toList(),
+        'cache_keys': cacheBox.keys.toList(),
         'app_start_time': getAppStartTime().toIso8601String(),
-        'has_exchange_rate': _cacheBox.containsKey(_exchangeRateKey),
-        'box_open': _cacheBox.isOpen,
+        'has_exchange_rate': cacheBox.containsKey(_exchangeRateKey),
+        'box_open': cacheBox.isOpen,
       };
 
       return {
@@ -235,10 +260,26 @@ class MarketMoodLocalDataSource {
     }
   }
 
-  /// 상태 로깅
+  /// Box 상태 검증 (추가 안전장치)
+  bool _isBoxesReady() {
+    try {
+      return _hiveService.marketMoodVolumeBox.isOpen && 
+             _hiveService.marketMoodCacheBox.isOpen;
+    } catch (e) {
+      log.w('Box 상태 체크 실패: $e');
+      return false;
+    }
+  }
+
+  /// 상태 로깅 (Box 상태 포함)
   void logStatus() {
-    final info = getDebugInfo();
-    log.i('💾 MarketMoodLocalDataSource 상태: $info');
+    try {
+      final isReady = _isBoxesReady();
+      final info = getDebugInfo();
+      log.i('💾 MarketMoodLocalDataSource 상태 (Ready: $isReady): $info');
+    } catch (e, st) {
+      log.e('💾 상태 로깅 실패', e, st);
+    }
   }
 
   /// 리소스 정리
@@ -251,11 +292,14 @@ class MarketMoodLocalDataSource {
     }
   }
 
-  /// 개발용: 모든 데이터 삭제
+  /// 개발용: 모든 데이터 삭제 (안전한 Box 접근)
   Future<void> clearAllData() async {
     try {
-      await _volumeBox.clear();
-      await _cacheBox.clear();
+      final volumeBox = _volumeBox;
+      final cacheBox = _cacheBox;
+      
+      await volumeBox.clear();
+      await cacheBox.clear();
       log.w('🗑️ 모든 로컬 데이터 삭제 완료');
     } catch (e, st) {
       log.e('🗑️ 데이터 삭제 실패', e, st);
@@ -263,17 +307,18 @@ class MarketMoodLocalDataSource {
     }
   }
 
-  /// 개발용: 최근 N개 데이터만 유지
+  /// 개발용: 최근 N개 데이터만 유지 (안전한 Box 접근)
   Future<void> trimOldData({int keepCount = 100}) async {
     try {
-      if (_volumeBox.length <= keepCount) return;
+      final volumeBox = _volumeBox;
+      if (volumeBox.length <= keepCount) return;
 
-      final allEntries = _volumeBox.values.toList()
+      final allEntries = volumeBox.values.toList()
         ..sort((a, b) => b.timestamp.compareTo(a.timestamp)); // 최신순
 
       final toKeep = allEntries.take(keepCount).toList();
       
-      await _volumeBox.clear();
+      await volumeBox.clear();
       for (final volume in toKeep) {
         await addVolumeData(volume);
       }

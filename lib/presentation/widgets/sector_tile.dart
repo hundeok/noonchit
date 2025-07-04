@@ -1,47 +1,46 @@
-// lib/presentation/widgets/sector_tile.dart (수정됨)
-
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:intl/intl.dart';
-import '../../core/di/app_providers.dart'; // 🆕 sectorClassificationProvider 추가
-import '../../shared/widgets/sector_names.dart'; // 🆕 섹터 네이밍 추가
-
-// 🎯 순위 추적을 위한 전역 Map (섹터별 이전 순위 저장)
-final Map<String, int> _previousSectorRanks = {};
+import '../../core/di/app_providers.dart';
+import '../../domain/entities/app_settings.dart';
+import '../../shared/widgets/sector_names.dart';
+import '../../shared/widgets/sector_logo_provider.dart';
+import '../../shared/widgets/amount_display_widget.dart';
+import '../../shared/utils/tile_common.dart';
+import '../../shared/utils/blink_animation_mixin.dart';
+import '../../shared/utils/amount_formatter.dart';
+import '../controllers/sector_controller.dart';
 
 class SectorTile extends ConsumerStatefulWidget {
-  final String sectorName; // 섹터명 (예: "모놀리식 블록체인")
-  final double totalVolume; // 섹터별 총 거래대금
-  final int rank; // 🎯 순위 (1위부터)
-  final String timeFrame; // 시간대 (예: "1m", "5m")
-  final DateTime lastUpdated; // 마지막 업데이트 시간
-  final bool showHotIcon; // 🚀 급상승 표시 여부
-  final bool enableBlinkAnimation; // 깜빡임 애니메이션 여부
-  
+  final String sectorName;
+  final double totalVolume;
+  final int rank;
+  final bool isHot;        // ✅ Controller에서 계산된 값
+  final bool shouldBlink;  // ✅ Controller에서 계산된 값
+
   const SectorTile({
-    Key? key, 
+    Key? key,
     required this.sectorName,
     required this.totalVolume,
     required this.rank,
-    required this.timeFrame,
-    required this.lastUpdated,
-    this.showHotIcon = false,
-    this.enableBlinkAnimation = false,
+    required this.isHot,
+    required this.shouldBlink,
   }) : super(key: key);
 
   @override
   ConsumerState<SectorTile> createState() => _SectorTileState();
 }
 
-class _SectorTileState extends ConsumerState<SectorTile> 
+class _SectorTileState extends ConsumerState<SectorTile>
     with SingleTickerProviderStateMixin {
+
   late AnimationController _blinkController;
   late Animation<double> _blinkAnimation;
-  bool _shouldBlink = false;
+  bool _isBlinking = false;
 
   @override
   void initState() {
     super.initState();
+    // ✅ 애니메이션 초기화 (Volume과 완전 동일)
     _blinkController = AnimationController(
       duration: const Duration(milliseconds: 600),
       vsync: this,
@@ -54,29 +53,11 @@ class _SectorTileState extends ConsumerState<SectorTile>
   @override
   void didUpdateWidget(SectorTile oldWidget) {
     super.didUpdateWidget(oldWidget);
-    _checkRankChange();
-  }
-
-  void _checkRankChange() {
-    final previousRank = _previousSectorRanks[widget.sectorName];
-    final currentRank = widget.rank;
     
-    // 이전 순위가 있고, 순위가 올라간 경우에만 반짝
-    if (previousRank != null && currentRank < previousRank) {
-      _shouldBlink = true;
-      _blinkController.forward().then((_) {
-        _blinkController.reverse().then((_) {
-          if (mounted) {
-            setState(() {
-              _shouldBlink = false;
-            });
-          }
-        });
-      });
+    // ✅ shouldBlink props 변화 감지해서 애니메이션 시작 (Volume과 완전 동일)
+    if (widget.shouldBlink && !oldWidget.shouldBlink && !_isBlinking) {
+      _startBlink();
     }
-    
-    // 현재 순위를 저장
-    _previousSectorRanks[widget.sectorName] = currentRank;
   }
 
   @override
@@ -85,271 +66,182 @@ class _SectorTileState extends ConsumerState<SectorTile>
     super.dispose();
   }
 
-  // 🆕 섹터명 표시 로직 (설정에 따라 동적 변경)
-  String _getDisplaySectorName() {
-    final displayMode = ref.watch(appSettingsProvider).displayMode;
+  /// ✅ 블링크 시작 (Volume과 완전 동일한 로직)
+  void _startBlink() {
+    final blinkEnabled = ref.read(appSettingsProvider).blinkEnabled;
+    if (!mounted || !blinkEnabled) return;
     
-    // 🎯 실제 상세/기본 분류 상태 가져오기!
-    final isDetailed = ref.watch(sectorClassificationProvider).isDetailedClassification;
-    
-    return SectorNames.getDisplayName(widget.sectorName, displayMode, isDetailed: isDetailed);
+    _isBlinking = true;
+    _blinkController.forward().then((_) {
+      if (mounted) {
+        _blinkController.reverse().then((_) {
+          if (mounted) {
+            setState(() {
+              _isBlinking = false;
+            });
+            
+            // ✅ 애니메이션 완료 후 Controller에 상태 초기화 요청 (Volume과 동일)
+            ref.read(sectorControllerProvider.notifier).clearBlinkState(widget.sectorName);
+          }
+        });
+      }
+    });
   }
 
-  // 🎯 거래량 포맷팅 (새로운 통합 규칙)
-  String _formatVolume(double totalVolume) {
-    if (totalVolume < 0) return '0원';
-    
-    final decimalFormat = NumberFormat('#,##0.##'); // 소수점 2자리
-    final integerFormat = NumberFormat('#,###'); // 정수용 콤마
-    
-    // 1만원 미만: 1원 ~ 9,999원 (콤마 포함)
-    if (totalVolume < 10000) {
-      return '${integerFormat.format(totalVolume.toInt())}원';
-    }
-    // 1만원 ~ 9999만원: x,xxx만원 (콤마 포함)
-    else if (totalVolume < 100000000) {
-      final man = (totalVolume / 10000).toInt();
-      return '${integerFormat.format(man)}만원';
-    }
-    // 1억 ~ 9999억: x.xx억원 (소수점 2자리)
-    else if (totalVolume < 1000000000000) {
-      final eok = totalVolume / 100000000;
-      return '${decimalFormat.format(eok)}억원';
-    }
-    // 1조 ~ 9999조: x.xx조원 (소수점 2자리)
-    else if (totalVolume < 10000000000000000) {
-      final jo = totalVolume / 1000000000000;
-      return '${decimalFormat.format(jo)}조원';
-    }
-    // 1경 이상: x,xxx경원 (콤마 포함)
-    else {
-      final gyeong = (totalVolume / 10000000000000000).toInt();
-      return '${integerFormat.format(gyeong)}경원';
-    }
+  /// ✅ 섹터 번호 매핑 (섹터만의 고유 로직)
+  int _getSectorNumber(String sectorName) {
+    const sectorNumberMap = {
+      // 상세 분류 (1-28번)
+      '비트코인 그룹': 1, '이더리움 그룹': 2, '스테이킹': 3, '모놀리식 블록체인': 4,
+      '모듈러 블록체인': 5, '스테이블 코인': 6, 'DEX/애그리게이터': 7, '랜딩': 8,
+      '유동화 스테이킹/리스테이킹': 9, 'RWA': 10, '지급결제 인프라': 11, '상호운용성/브릿지': 12,
+      '엔터프라이즈 블록체인': 13, '오라클': 14, '데이터 인프라': 15, '스토리지': 16,
+      'AI': 17, '메타버스': 18, 'NFT/게임': 19, '미디어/스트리밍': 20,
+      '광고': 21, '교육/기타 콘텐츠': 22, '소셜/DAO': 23, '팬토큰': 24,
+      '밈': 25, 'DID': 26, '의료': 27, '월렛/메세징': 28,
+      // 기본 분류 (29-46번)
+      '메이저 코인': 29, '비트코인 계열': 30, '이더리움 생태계': 31, '레이어1 블록체인': 32,
+      '고 시총': 33, '중 시총': 34, '저 시총': 35, '마이너 알트코인': 36,
+      'DeFi 토큰': 37, '스테이블코인': 38, '게임/NFT/메타버스': 39, '한국 프로젝트': 40,
+      '솔라나 생태계': 41, 'AI/기술 토큰': 42, '2023년 신규상장': 43, '2024년 상반기 신규상장': 44,
+      '2024년 하반기 신규상장': 45, '2025년 상반기 신규상장': 46,
+    };
+    return sectorNumberMap[sectorName] ?? 1;
   }
 
-  // 🎯 순위에 따른 색상
-  Color _getRankColor(BuildContext context) {
-    final theme = Theme.of(context);
-    switch (widget.rank) {
-      case 1:
-        return Colors.amber; // 🥇 1위 - 금색
-      case 2:
-        return Colors.grey.shade400; // 🥈 2위 - 은색
-      case 3:
-        return Colors.orange.shade300; // 🥉 3위 - 동색
-      default:
-        return theme.colorScheme.onSurface.withValues(alpha: 0.6); // 기본
-    }
-  }
-
-  // 🎯 순위 아이콘
-  Widget _buildRankWidget(BuildContext context) {
-    final rankColor = _getRankColor(context);
-    final isTopThree = widget.rank <= 3;
-    
-    return Container(
-      width: 32,
-      height: 32,
-      decoration: BoxDecoration(
-        shape: BoxShape.circle,
-        color: isTopThree ? rankColor.withValues(alpha: 0.2) : Colors.transparent,
-        border: isTopThree ? Border.all(color: rankColor, width: 2) : null,
-      ),
-      child: Center(
-        child: Text(
-          '${widget.rank}',
-          style: TextStyle(
-            fontSize: 14,
-            fontWeight: isTopThree ? FontWeight.bold : FontWeight.normal,
-            color: rankColor,
-          ),
-        ),
-      ),
-    );
-  }
-
-  // 🎯 섹터 아이콘/이모지 (나중에 커스텀 아이콘으로 대체 예정)
-  Widget _buildSectorIcon() {
-    return Container(
-      width: 32,
-      height: 32,
-      decoration: BoxDecoration(
-        shape: BoxShape.circle,
-        color: Colors.blue.withValues(alpha: 0.1),
-        border: Border.all(color: Colors.blue.withValues(alpha: 0.3), width: 1),
-      ),
-      child: const Center(
-        child: Text(
-          '📊', // 임시 이모지 (나중에 섹터별 커스텀 아이콘으로)
-          style: TextStyle(fontSize: 16),
-        ),
-      ),
-    );
-  }
-
-  // 🎯 HOT 아이콘 (급상승 시)
-  Widget? _buildHotIcon() {
-    if (!widget.showHotIcon) return null;
-    
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-      decoration: BoxDecoration(
-        color: Colors.red,
-        borderRadius: BorderRadius.circular(8),
-      ),
-      child: const Text(
-        '🚀 HOT',
-        style: TextStyle(
-          color: Colors.white,
-          fontSize: 10,
-          fontWeight: FontWeight.bold,
-        ),
-      ),
-    );
-  }
-  
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final onSurface = theme.colorScheme.onSurface;
-    final onSurface70 = onSurface.withValues(alpha: 0.7);
     
-    // 🎯 깜빡임 애니메이션 (설정에 따라)
-    Widget cardWidget = Card(
-      elevation: 2,
-      margin: const EdgeInsets.symmetric(vertical: 4),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
-        child: Row(
-          children: [
-            // 🏆 순위 부분: 고정 크기
-            _buildRankWidget(context),
-            
-            const SizedBox(width: 12),
-            
-            // 🎨 섹터 아이콘 부분 (나중에 커스텀 아이콘으로 대체)
-            _buildSectorIcon(),
-            
-            const SizedBox(width: 12),
-            
-            // 📱 섹터명 부분: flex 25 (확장 가능) - 🆕 동적 표시 적용!
-            Expanded(
-              flex: 25,
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      Flexible(
-                        child: Text(
-                          _getDisplaySectorName(), // 🆕 설정에 따라 동적 표시!
+    // 🚀 Controller에서 직접 상태 조회 (Volume과 동일한 패턴)
+    final controller = ref.read(sectorControllerProvider.notifier);
+    final displayMode = ref.watch(appSettingsProvider).displayMode;
+    
+    // ✅ 섹터명 표시 (Controller에서 분류 상태 조회)
+    final displaySectorName = SectorNames.getDisplayName(
+      widget.sectorName, 
+      displayMode, 
+      isDetailed: controller.isDetailedClassification, // 🚀 Controller에서 조회!
+    );
+
+    // ✅ 표준 카드 위젯 생성 (Volume과 완전 동일한 구조)
+    Widget cardWidget = TileCommon.buildStandardCard(
+      child: TileCommon.buildFlexRow(
+        children: [
+          // 🏆 순위 부분 (Volume과 동일)
+          FlexChild.fixed(
+            TileCommon.buildRankWidget(context, widget.rank),
+          ),
+
+          const FlexChild.fixed(SizedBox(width: 12)),
+
+          // 🎨 섹터 아이콘 부분 (섹터만의 고유 요소)
+          FlexChild.fixed(
+            SectorLogoProvider.buildSectorIcon(
+              sectorNumber: _getSectorNumber(widget.sectorName),
+              size: 40.0,
+            ),
+          ),
+
+          const FlexChild.fixed(SizedBox(width: 12)),
+
+          // 📱 섹터명 부분 (Volume과 동일한 구조)
+          FlexChild.expanded(
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Flexible(
+                      child: Text(
+                        displaySectorName,
+                        style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          color: theme.colorScheme.primary,
+                          fontSize: 16,
+                        ),
+                        overflow: TextOverflow.ellipsis,
+                        maxLines: 1,
+                      ),
+                    ),
+                    const SizedBox(width: 4),
+                    // 🔥 HOT 아이콘 (설정 체크 - 블링크와 동일한 패턴)
+                    Consumer(
+                      builder: (context, ref, child) {
+                        final hotEnabled = ref.watch(appSettingsProvider).hotEnabled;
+                        if (hotEnabled && widget.isHot) {
+                          return TileCommon.buildHotIcon(true) ?? const SizedBox.shrink();
+                        }
+                        return const SizedBox.shrink();
+                      },
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  SectorNames.getDisplayName(
+                    widget.sectorName, 
+                    DisplayMode.ticker, 
+                    isDetailed: controller.isDetailedClassification, // 🚀 Controller에서 조회!
+                  ),
+                  style: TextStyle(
+                    color: onSurface.withValues(alpha: 0.7),
+                    fontSize: 12,
+                  ),
+                ),
+              ],
+            ),
+            flex: 25,
+          ),
+
+          // 💰 거래량 부분 (Volume과 완전 동일)
+          FlexChild.expanded(
+            Align(
+              alignment: Alignment.centerRight,
+              child: Consumer(
+                builder: (context, ref, child) {
+                  final amountDisplayMode = ref.watch(appSettingsProvider).amountDisplayMode;
+
+                  return amountDisplayMode == AmountDisplayMode.icon
+                      ? AmountDisplayWidget(
+                          totalAmount: widget.totalVolume,
+                          isBuy: true,
+                          fontSize: 15,
+                          fontWeight: FontWeight.w600,
+                        )
+                      : Text(
+                          AmountFormatter.formatVolume(widget.totalVolume),
                           style: TextStyle(
-                            fontWeight: FontWeight.bold,
-                            color: theme.colorScheme.primary,
-                            fontSize: 16,
+                            color: onSurface,
+                            fontSize: 15,
+                            fontWeight: FontWeight.w600,
                           ),
                           overflow: TextOverflow.ellipsis,
                           maxLines: 1,
-                        ),
-                      ),
-                      const SizedBox(width: 4),
-                      // 🚀 HOT 아이콘
-                      if (_buildHotIcon() != null) _buildHotIcon()!,
-                    ],
-                  ),
-                  const SizedBox(height: 2),
-                  // 🎯 상세 설명 공간 (일단 비워둠 - 나중에 섹터 설명 추가)
-                  Text(
-                    '', // 나중에 섹터 상세 설명 추가 예정
-                    style: TextStyle(
-                      color: onSurface70,
-                      fontSize: 12,
-                    ),
-                  ),
-                ],
+                        );
+                },
               ),
             ),
-            
-            // 💰 거래대금 부분: flex 30
-            Expanded(
-              flex: 30,
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  Text(
-                    _formatVolume(widget.totalVolume),
-                    style: TextStyle(
-                      color: onSurface,
-                      fontSize: 15,
-                      fontWeight: FontWeight.w600,
-                    ),
-                    overflow: TextOverflow.ellipsis,
-                    maxLines: 1,
-                  ),
-                  const SizedBox(height: 2),
-                  const Text(
-                    '⏰ 실시간',
-                    style: TextStyle(
-                      color: Colors.orange,
-                      fontSize: 11,
-                      fontWeight: FontWeight.w500,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ],
-        ),
+            flex: 30,
+          ),
+        ],
       ),
     );
 
-    // 🎯 반짝임 애니메이션이 있을 때와 없을 때 분기
-    Widget finalWidget = cardWidget;
-    
-    if (_shouldBlink) {
-      finalWidget = AnimatedBuilder(
-        animation: _blinkAnimation,
-        builder: (context, child) {
-          return Container(
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(12),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.amber.withValues(alpha: 1.0 - _blinkAnimation.value),
-                  blurRadius: 12,
-                  spreadRadius: 3,
-                ),
-              ],
-            ),
-            child: cardWidget,
-          );
-        },
-      );
-    } else if (widget.enableBlinkAnimation) {
-      finalWidget = TweenAnimationBuilder<double>(
-        tween: Tween(begin: 1.0, end: 0.7),
-        duration: const Duration(milliseconds: 300),
-        builder: (context, value, child) {
-          return AnimatedContainer(
-            duration: const Duration(milliseconds: 150),
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(12),
-              boxShadow: [
-                BoxShadow(
-                  color: theme.colorScheme.primary.withValues(alpha: 1.0 - value),
-                  blurRadius: 8,
-                  spreadRadius: 2,
-                ),
-              ],
-            ),
-            child: cardWidget,
-          );
-        },
+    // ✅ 블링크 애니메이션 적용 (Volume과 완전 동일)
+    final blinkEnabled = ref.watch(appSettingsProvider).blinkEnabled;
+
+    // ✅ 블링크 상태에 따른 애니메이션 적용 (Volume과 완전 동일)
+    if (blinkEnabled && (_isBlinking || widget.shouldBlink)) {
+      return BlinkAnimationHelper.wrapWithBlinkEffect(
+        child: cardWidget,
+        shouldBlink: _isBlinking,
+        blinkAnimation: _blinkAnimation,
+        blinkColor: Colors.amber,
       );
     }
-    
-    return finalWidget;
+
+    return cardWidget;
   }
 }

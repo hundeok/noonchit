@@ -1,4 +1,3 @@
-// lib/app.dart
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 // Core
@@ -8,11 +7,12 @@ import 'core/navigation/app_router.dart';
 import 'shared/theme/app_theme.dart';
 // All app-level providers
 import 'core/di/app_providers.dart';
+import 'domain/entities/app_settings.dart';
 
 /// Entry widget for the application
 class MyApp extends ConsumerStatefulWidget {
   final GlobalKey<NavigatorState> navigatorKey;
-  
+
   const MyApp({required this.navigatorKey, Key? key}) : super(key: key);
 
   @override
@@ -38,21 +38,51 @@ class _MyAppState extends ConsumerState<MyApp> {
 
   @override
   Widget build(BuildContext context) {
-    // 🆕 통합 설정 사용
     final settings = ref.watch(appSettingsProvider);
-    // 🔧 기본 upbit 플랫폼 사용 (platformProvider 없으므로)
 
     return MaterialApp.router(
       title: '코인 포착 앱',
       debugShowCheckedModeBanner: AppConfig.isDebugMode,
       
-      // 🆕 기본 upbit 테마 적용
-      theme: AppTheme.light(), // 기본값 사용
-      darkTheme: AppTheme.dark(), // 기본값 사용
-      themeMode: settings.themeMode, // 🎯 실시간 테마 적용!
+      theme: _applyFontFamily(AppTheme.light(), settings.fontFamily),
+      darkTheme: _applyFontFamily(AppTheme.dark(), settings.fontFamily),
+      themeMode: settings.themeMode,
       
       routerConfig: _appRouter.router,
       scaffoldMessengerKey: ref.watch(scaffoldMessengerKeyProvider),
+    );
+  }
+
+  ThemeData _applyFontFamily(ThemeData baseTheme, FontFamily fontFamily) {
+    final fontName = fontFamily.fontName;
+    
+    return baseTheme.copyWith(
+      textTheme: baseTheme.textTheme.apply(
+        fontFamily: fontName,
+      ),
+      primaryTextTheme: baseTheme.primaryTextTheme.apply(
+        fontFamily: fontName,
+      ),
+      appBarTheme: baseTheme.appBarTheme.copyWith(
+        titleTextStyle: baseTheme.appBarTheme.titleTextStyle?.copyWith(
+          fontFamily: fontName,
+        ),
+      ),
+      bottomNavigationBarTheme: baseTheme.bottomNavigationBarTheme.copyWith(
+        selectedLabelStyle: TextStyle(fontFamily: fontName),
+        unselectedLabelStyle: TextStyle(fontFamily: fontName),
+      ),
+      elevatedButtonTheme: ElevatedButtonThemeData(
+        style: baseTheme.elevatedButtonTheme.style?.copyWith(
+          textStyle: WidgetStateProperty.all(
+            TextStyle(
+              fontFamily: fontName,
+              fontSize: 16,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+        ),
+      ),
     );
   }
 }
@@ -96,7 +126,7 @@ class AppProviderObserver extends ProviderObserver {
 /// Initializes critical providers on app start
 class ProviderInitializer extends ConsumerWidget {
   final Widget child;
-  
+
   const ProviderInitializer({required this.child, Key? key}) : super(key: key);
 
   @override
@@ -105,18 +135,15 @@ class ProviderInitializer extends ConsumerWidget {
       if (AppConfig.isDebugMode) {
         debugPrint('[Initializer] ⚡ Initializing providers...');
       }
-      
-      // 🆕 통합 설정 초기화
+
       ref.read(appSettingsProvider);
-      
-      // 🆕 앱 라이프사이클 관리자 초기화 (슬라이더 관련 코드 제거된 버전)
       ref.read(appLifecycleManagerProvider);
-      
+
       if (AppConfig.isDebugMode) {
         debugPrint('[Initializer] ✅ Provider initialization complete.');
       }
     });
-    
+
     return child;
   }
 }

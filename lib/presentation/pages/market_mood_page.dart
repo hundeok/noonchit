@@ -166,7 +166,7 @@ class _MarketMoodPageState extends ConsumerState<MarketMoodPage>
                     const SizedBox(width: 4),
                     Flexible(
                       child: Text(
-                        '$moodName - 😄',
+                        '$moodName - ᖾ ᖽ',
                         style: TextStyle(
                           fontSize: 11,
                           fontWeight: FontWeight.w700,
@@ -374,12 +374,12 @@ class _MarketMoodPageState extends ConsumerState<MarketMoodPage>
               children: [
                 _buildSectionTitle('인트라데이 비교 분석', Icons.schedule),
                 const SizedBox(height: 4),
-                _buildComparisonRow('30분 대비', comparisonData.thirtyMin, Icons.schedule),
-                _buildComparisonRow('1시간 대비', comparisonData.oneHour, Icons.access_time),
-                _buildComparisonRow('2시간 대비', comparisonData.twoHour, Icons.timer),
-                _buildComparisonRow('4시간 대비', comparisonData.fourHour, Icons.timer_3),
+                _buildComparisonRow('30분 대비', comparisonData.thirtyMin, Icons.hourglass_empty),
+                _buildComparisonRow('1시간 대비', comparisonData.oneHour, Icons.hourglass_full),
+                _buildComparisonRow('2시간 대비', comparisonData.twoHour, Icons.access_time),
+                _buildComparisonRow('4시간 대비', comparisonData.fourHour, Icons.timer),
                 _buildComparisonRow('8시간 대비', comparisonData.eightHour, Icons.timer_outlined),
-                _buildComparisonRow('12시간 대비', comparisonData.twelveHour, Icons.access_time_filled),
+                _buildComparisonRow('12시간 대비', comparisonData.twelveHour, Icons.update),
               ],
             );
           },

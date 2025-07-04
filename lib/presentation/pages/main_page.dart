@@ -2,12 +2,18 @@
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:flutter/services.dart'; // 🎯 HapticFeedback용
+import 'package:flutter/services.dart';
 import '../../core/di/app_providers.dart';
 import '../../shared/widgets/common_app_bar.dart';
 import 'trade_page.dart';
-import 'volume_page.dart'; // 🆕 VolumePage import 추가
-import 'sector_page.dart'; // 🆕 SectorPage import 추가
+import 'volume_page.dart';
+import 'sector_page.dart';
+import 'surge_page.dart';
+// 🔥 Controller Provider들 import 추가
+import '../controllers/volume_controller.dart';
+import '../controllers/surge_controller.dart';
+import '../controllers/trade_controller.dart';
+import '../controllers/sector_controller.dart';
 
 /// 🎯 메인 페이지 - PageView로 4개 화면 관리
 class MainPage extends ConsumerStatefulWidget {
@@ -29,26 +35,26 @@ class _MainPageState extends ConsumerState<MainPage> with TickerProviderStateMix
     PageInfo(
       index: 0,
       title: '급등락',
-      icon: Icons.trending_up, // ✅ 그대로 유지
-      builder: (scrollController) => _buildPlaceholderPage('급등락', Icons.trending_up, '급등락 모니터링 페이지'),
+      icon: Icons.trending_up,
+      builder: (scrollController) => SurgePage(scrollController: scrollController),
     ),
     PageInfo(
       index: 1,
       title: '체결',
-      icon: Icons.monetization_on, // ✅ 변경: show_chart → monetization_on 💰
-      builder: (scrollController) => TradePage(scrollController: scrollController), // ✅ ScrollController 전달
+      icon: Icons.monetization_on,
+      builder: (scrollController) => TradePage(scrollController: scrollController),
     ),
     PageInfo(
       index: 2,
       title: '볼륨',
-      icon: Icons.bar_chart, // ✅ 그대로 유지
-      builder: (scrollController) => VolumePage(scrollController: scrollController), // 🆕 VolumePage 연결!
+      icon: Icons.bar_chart,
+      builder: (scrollController) => VolumePage(scrollController: scrollController),
     ),
     PageInfo(
       index: 3,
       title: '섹터',
-      icon: Icons.pie_chart, // ✅ 변경: business → pie_chart 🥧
-      builder: (scrollController) => SectorPage(scrollController: scrollController), // 🆕 SectorPage 연결!
+      icon: Icons.pie_chart,
+      builder: (scrollController) => SectorPage(scrollController: scrollController),
     ),
   ];
 
@@ -73,7 +79,36 @@ class _MainPageState extends ConsumerState<MainPage> with TickerProviderStateMix
     // 초기 페이지 인덱스 설정
     WidgetsBinding.instance.addPostFrameCallback((_) {
       ref.read(selectedTabProvider.notifier).state = 1; // 체결 페이지
+      
+      // 🔥 모든 Controller를 미리 초기화해서 데이터 스트림 시작
+      _initializeAllControllers();
     });
+  }
+
+  /// 🔥 모든 Controller 미리 초기화 - 앱 시작과 동시에 모든 메뉴 실행
+  void _initializeAllControllers() {
+    try {
+      // 1. VolumeController 초기화 (볼륨 메뉴)
+      ref.read(volumeControllerProvider);
+      debugPrint('🔥 VolumeController 초기화 완료');
+      
+      // 2. SurgeController 초기화 (급등락 메뉴)  
+      ref.read(surgeControllerProvider);
+      debugPrint('🔥 SurgeController 초기화 완료');
+      
+      // 3. TradeController 초기화 (체결 메뉴 - 이미 실행중이지만 명시적으로)
+      ref.read(tradeControllerProvider);
+      debugPrint('🔥 TradeController 초기화 완료');
+      
+      // 4. SectorController 초기화 (섹터 메뉴)
+      ref.read(sectorControllerProvider);
+      debugPrint('🔥 SectorController 초기화 완료');
+      
+      debugPrint('✅ 모든 Controller 초기화 완료 - 4개 메뉴 모두 실행 시작!');
+      
+    } catch (e) {
+      debugPrint('❌ Controller 초기화 오류: $e');
+    }
   }
 
   @override
@@ -89,7 +124,6 @@ class _MainPageState extends ConsumerState<MainPage> with TickerProviderStateMix
 
   @override
   Widget build(BuildContext context) {
-    // ✅ GestureDetector 제거 - 순수하게 PrimaryScrollController가 상태바 터치 처리
     return Scaffold(
       appBar: CommonAppBar(
         title: '', // 빈 제목 (슬라이드 인디케이터가 들어갈 자리)
@@ -97,7 +131,7 @@ class _MainPageState extends ConsumerState<MainPage> with TickerProviderStateMix
         pageController: _pageController,
         animationController: _animationController,
       ),
-      body: SafeArea( // ✅ SafeArea 추가
+      body: SafeArea(
         child: PageView.builder(
           controller: _pageController,
           onPageChanged: _onPageChanged,
@@ -118,9 +152,12 @@ class _MainPageState extends ConsumerState<MainPage> with TickerProviderStateMix
     );
   }
 
-  /// 페이지 변경 처리
+  /// 🔥 페이지 변경 처리 - 햅틱 설정 체크 추가
   void _onPageChanged(int index) {
-    HapticFeedback.lightImpact(); // 🎯 스와이프 햅틱 추가!
+    // 🔥 설정 체크 후 햅틱 (다른 위젯들과 동일한 패턴)
+    if (ref.read(appSettingsProvider).isHapticEnabled) {
+      HapticFeedback.lightImpact();
+    }
 
     // Provider 상태 업데이트
     ref.read(selectedTabProvider.notifier).state = index;
@@ -143,57 +180,6 @@ class _MainPageState extends ConsumerState<MainPage> with TickerProviderStateMix
       );
     }
   }
-
-  /// 플레이스홀더 페이지 생성
-  static Widget _buildPlaceholderPage(String title, IconData icon, String description) {
-    return Center(
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Icon(
-            icon,
-            size: 80,
-            color: Colors.orange.withValues(alpha: 0.5),
-          ),
-          const SizedBox(height: 24),
-          Text(
-            title,
-            style: const TextStyle(
-              fontSize: 28,
-              fontWeight: FontWeight.bold,
-              color: Colors.orange,
-            ),
-          ),
-          const SizedBox(height: 12),
-          Text(
-            description,
-            style: TextStyle(
-              fontSize: 16,
-              color: Colors.grey.shade600,
-            ),
-            textAlign: TextAlign.center,
-          ),
-          const SizedBox(height: 40),
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
-            decoration: BoxDecoration(
-              color: Colors.orange.withValues(alpha: 0.1),
-              borderRadius: BorderRadius.circular(8),
-              border: Border.all(color: Colors.orange.withValues(alpha: 0.3)),
-            ),
-            child: const Text(
-              '🚧 개발 예정',
-              style: TextStyle(
-                fontSize: 14,
-                fontWeight: FontWeight.w500,
-                color: Colors.orange,
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
 }
 
 /// 📄 페이지 정보 클래스
@@ -201,7 +187,7 @@ class PageInfo {
   final int index;
   final String title;
   final IconData icon;
-  final Widget Function(ScrollController scrollController) builder; // ✅ ScrollController 파라미터 추가
+  final Widget Function(ScrollController scrollController) builder;
 
   const PageInfo({
     required this.index,

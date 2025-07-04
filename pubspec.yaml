@@ -1,7 +1,7 @@
 name: noonchit
 description: A real-time cryptocurrency trading monitoring application with AI-driven automation.
 publish_to: 'none'
-version: 1.0.1+2
+version: 1.0.2+3
 
 environment:
   sdk: '>=3.0.0 <4.0.0'
@@ -16,7 +16,7 @@ dependencies:
   ## ── UI ──────────────────────────────────────────────────────────────────────
   cupertino_icons: ^1.0.8
   fl_chart: ^0.62.0
-  intl: ^0.19.0
+  intl: ^0.20.2
   flutter_localizations:
     sdk: flutter
   skeletonizer: ^0.5.0
@@ -39,7 +39,7 @@ dependencies:
   ## ── Networking ─────────────────────────────────────────────────────────────
   dio: ^5.3.2
   http: ^0.13.6                 # dio 외부 패키지(예: dart_openai)가 의존
-  web_socket_channel: ^2.4.0
+  web_socket_channel: ^3.0.1
   retry: ^3.1.2
 
   ## ── Firebase ───────────────────────────────────────────────────────────────
@@ -47,7 +47,8 @@ dependencies:
   firebase_messaging: ^14.6.7
   firebase_crashlytics: ^3.3.5
   firebase_analytics: ^10.4.5
-  flutter_local_notifications: ^15.0.0
+  flutter_local_notifications: ^17.2.1+2
+
 
   ## ── AI / OpenAI ────────────────────────────────────────────────────────────
   dart_openai: ^3.0.0
@@ -76,13 +77,15 @@ dependencies:
   hive_flutter: ^1.1.0
   package_info_plus: ^4.1.0
   device_info_plus: ^9.0.3
-  vibration: ^1.8.1
   synchronized: ^3.0.0
   meta: ^1.9.0
   geolocator: ^12.0.0
   shared_preferences: ^2.5.3
   flutter_launcher_icons: ^0.14.3
   video_player: ^2.8.1
+  lru: ^1.0.2
+  fast_immutable_collections: ^10.2.4
+  
 
 ################################################################################
 # 🧪  Dev dependencies
@@ -117,15 +120,19 @@ flutter:
 
   assets:
     - assets/icon.png
+    - assets/common_app_bar_icon.webp
+    - assets/app_information_icon.webp
     - assets/images/
     - assets/animations/
     - assets/sounds/
     - assets/noonchit_intro_84frames.mp4
     - assets/icons/money/
+    - assets/icons/sector/
     - .env  # 추가
 
 
   fonts:
+    # ==================== 기본 폰트 (프리텐다드) ====================
     - family: Pretendard
       fonts:
         - asset: assets/fonts/Pretendard-Regular.otf
@@ -135,7 +142,90 @@ flutter:
         - asset: assets/fonts/Pretendard-Bold.otf
           weight: 700
 
+    # ==================== 선택된 추가 폰트들 (최종) ====================
+ 
+    # 🇯🇵 도트고딕16 (일본어 픽셀)
+    - family: DotGothic16-Regular
+      fonts:
+        - asset: assets/fonts/DotGothic16-Regular.ttf
+        
+    # 🎈 다이나퍼프 (귀여운)
+    - family: DynaPuff-VariableFont_wdth,wght
+      fonts:
+        - asset: assets/fonts/DynaPuff-VariableFont_wdth,wght.ttf
+
+    # ✍️ 글로리아 할렐루야 (손글씨)
+    - family: GloriaHallelujah-Regular
+      fonts:
+        - asset: assets/fonts/GloriaHallelujah-Regular.ttf
+
+    # 🇰🇷 고운돋움 (한글)
+    - family: GowunDodum-Regular
+      fonts:
+        - asset: assets/fonts/GowunDodum-Regular.ttf
+
+    # 🇰🇷 구기 (한글)
+    - family: Gugi-Regular
+      fonts:
+        - asset: assets/fonts/Gugi-Regular.ttf
+
+    # 🇰🇷 IBM 플렉스 산스 (한글)
+    - family: IBMPlexSansKR-Light
+      fonts:
+        - asset: assets/fonts/IBMPlexSansKR-Light.ttf
+    
+    # 💻 인콘솔라타 (모노스페이스)
+    - family: Inconsolata-VariableFont_wdth,wght
+      fonts:
+        - asset: assets/fonts/Inconsolata-VariableFont_wdth,wght.ttf
+
+    # 🇰🇷 키랑해랑 (한글)
+    - family: KirangHaerang-Regular
+      fonts:
+        - asset: assets/fonts/KirangHaerang-Regular.ttf
+    
+    # 🇰🇷 나눔고딕코딩 (한글)
+    - family: NanumGothicCoding-Regular
+      fonts:
+        - asset: assets/fonts/NanumGothicCoding-Regular.ttf
+
+    # 🇰🇷 노토세리프 (한글)
+    - family: NotoSerifKR-VariableFont_wght
+      fonts:
+        - asset: assets/fonts/NotoSerifKR-VariableFont_wght.ttf
+        
+    # 💻 노바 모노 (모노스페이스)
+    - family: NovaMono-Regular
+      fonts:
+        - asset: assets/fonts/NovaMono-Regular.ttf
+
+    # 🔲 노바 스퀘어
+    - family: NovaSquare-Regular
+      fonts:
+        - asset: assets/fonts/NovaSquare-Regular.ttf
+        
+    # ✒️ 퍼머넌트 마커 (마커펜)
+    - family: PermanentMarker-Regular
+      fonts:
+        - asset: assets/fonts/PermanentMarker-Regular.ttf
+
+    # 🎮 픽셀리파이산스 (픽셀)
+    - family: PixelifySans-VariableFont_wght
+      fonts:
+        - asset: assets/fonts/PixelifySans-VariableFont_wght.ttf
+
+    # 🌻 썬플라워 (한글) - Light
+    - family: Sunflower-Light
+      fonts:
+        - asset: assets/fonts/Sunflower-Light.ttf
+
+    # 🎭 사인모노 (모노스페이스)
+    - family: SyneMono-Regular
+      fonts:
+        - asset: assets/fonts/SyneMono-Regular.ttf
+
   generate: true
+
 
 ################################################################################
 # 🔧  Tool configs

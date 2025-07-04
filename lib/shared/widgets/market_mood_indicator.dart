@@ -78,9 +78,11 @@ class MarketMoodIndicator extends ConsumerWidget {
   }
 
   /// 🔥 시장 분위기 모달 표시 - 컨트롤러의 MarketMoodModalManager 사용
-  void _showMarketMoodModal(BuildContext context, WidgetRef ref, Offset globalPosition, MarketMoodData data) {
+void _showMarketMoodModal(BuildContext context, WidgetRef ref, Offset globalPosition, MarketMoodData data) {
+  if (ref.read(appSettingsProvider).isHapticEnabled) {
     HapticFeedback.mediumImpact();
-    Tooltip.dismissAllToolTips();
+  }
+  Tooltip.dismissAllToolTips();
     
     // 화면 크기와 모달 크기 계산
     final screenSize = MediaQuery.of(context).size;

@@ -14,8 +14,13 @@ class SettingsRepositoryImpl implements SettingsRepository {
       themeMode: dataSource.getThemeMode(),
       keepScreenOn: dataSource.getKeepScreenOn(),
       sliderPosition: dataSource.getSliderPosition(),
-      displayMode: dataSource.getDisplayMode(), // 🆕 DisplayMode 로드
-      amountDisplayMode: dataSource.getAmountDisplayMode(), // 💰 AmountDisplayMode 로드
+      displayMode: dataSource.getDisplayMode(),
+      amountDisplayMode: dataSource.getAmountDisplayMode(),
+      blinkEnabled: dataSource.getBlinkEnabled(),
+      hotEnabled: dataSource.getHotEnabled(), // 🔥 HOT 설정 추가
+      fontFamily: dataSource.getFontFamily(),
+      isHapticEnabled: dataSource.getHapticEnabled(), // 🆕 추가
+      isPortraitLocked: dataSource.getPortraitLocked(), // 🆕 추가
     );
   }
 
@@ -36,11 +41,46 @@ class SettingsRepositoryImpl implements SettingsRepository {
 
   @override
   Future<void> updateDisplayMode(DisplayMode mode) async {
-    await dataSource.saveDisplayMode(mode); // 🆕 DisplayMode 저장
+    await dataSource.saveDisplayMode(mode);
   }
 
   @override
   Future<void> updateAmountDisplayMode(AmountDisplayMode mode) async {
-    await dataSource.saveAmountDisplayMode(mode); // 💰 AmountDisplayMode 저장
+    await dataSource.saveAmountDisplayMode(mode);
+  }
+
+  @override
+  Future<void> updateBlinkEnabled(bool enabled) async {
+    await dataSource.saveBlinkEnabled(enabled);
+  }
+
+  @override
+  Future<void> updateHotEnabled(bool enabled) async { // 🔥 HOT 설정 추가
+    await dataSource.saveHotEnabled(enabled);
+  }
+
+  @override
+  Future<void> updateFontFamily(FontFamily font) async {
+    await dataSource.saveFontFamily(font);
+  }
+
+  @override
+  Future<void> updateHapticEnabled(bool enabled) async { // 🆕 추가
+    await dataSource.saveHapticEnabled(enabled);
+  }
+
+  @override
+  Future<void> updatePortraitLocked(bool locked) async { // 🆕 추가
+    await dataSource.savePortraitLocked(locked);
+  }
+
+  @override
+  Future<void> clearCache() async {
+    await dataSource.clearCache();
+  }
+
+  @override
+  Future<void> resetSettings() async {
+    await dataSource.resetAllSettings();
   }
 }

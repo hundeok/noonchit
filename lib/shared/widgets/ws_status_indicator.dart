@@ -43,12 +43,13 @@ class WsStatusIndicator extends ConsumerWidget {
   }
 
   /// WebSocket 상세 모달 표시
-  void _showWebSocketModal(BuildContext context, WidgetRef ref, Offset globalPosition) {
-    // 🎯 햅틱 피드백 추가 (톡~ 소리 복구!)
+void _showWebSocketModal(BuildContext context, WidgetRef ref, Offset globalPosition) {
+  // 🎯 햅틱 피드백 추가 (톡~ 소리 복구!)
+  if (ref.read(appSettingsProvider).isHapticEnabled) {
     HapticFeedback.mediumImpact();
-    
-    // 기존 툴팁 숨기기
-    Tooltip.dismissAllToolTips();
+  }
+  // 기존 툴팁 숨기기
+  Tooltip.dismissAllToolTips();
     
     // 화면 크기 가져오기
     final screenSize = MediaQuery.of(context).size;

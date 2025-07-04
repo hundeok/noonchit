@@ -153,15 +153,15 @@ class MarketMoodUsecase {
     await _repository.addVolumeData(volumeData);
   }
 
-  /// [수정] 현재 마켓무드 계산 기준을 4시간으로 변경
+  /// [수정] 현재 마켓무드 계산 기준을 2시간으로 변경
   Future<MarketMood> calculateCurrentMood(double currentVolume) async {
-    // 4시간 = 240분
-    final fourHoursAgo = await _repository.getVolumeNMinutesAgo(240);
+    // 2시간 = 120분
+    final twoHoursAgo = await _repository.getVolumeNMinutesAgo(120);
     
-    if (fourHoursAgo != null) {
+    if (twoHoursAgo != null) {
       return MarketMoodCalculator.calculateMoodByComparison(
         currentVolume, 
-        fourHoursAgo.volumeUsd
+        twoHoursAgo.volumeUsd
       );
     }
     return MarketMoodCalculator.calculateMoodByAbsolute(currentVolume);

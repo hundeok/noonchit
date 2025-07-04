@@ -35,7 +35,7 @@ class WebSocketStatsOverlay {
   static Offset _calculateModalPosition(BuildContext context, Offset globalPosition, double size) {
     final screenSize = MediaQuery.of(context).size;
     final modalWidth = size * 4.2 * 2.5;
-    final modalHeight = 200.0;
+    const modalHeight = 200.0; // ✅ const 추가 (Line 38)
     
     // 아이콘 중앙 기준으로 모달 중앙 정렬 + 우측으로 이동
     double adjustedX = globalPosition.dx - (modalWidth / 2) + 150; // 🔧 우측으로 50px 이동

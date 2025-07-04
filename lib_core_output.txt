@@ -385,32 +385,276 @@ final wsClientProvider = Provider<TradeWsClient>((ref) {
       }
     },
   );
-});\n\n// ====== lib/core/di/app_providers.dart ======\n
+});\n\n// ====== lib/core/di/sector_provider.dart ======\n
+// lib/core/di/sector_provider.dart
+
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../config/app_config.dart';
+import '../utils/logger.dart';
+import 'volume_provider.dart' show volumeUsecaseProvider;
+import 'trade_provider.dart' show marketsProvider;
+import '../../domain/entities/volume.dart';
+import '../../shared/widgets/sector_classification.dart';
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 🆕 SECTOR 전용 Provider들 (SectorClassificationProvider 연동)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// 🆕 섹터 분류 Provider (SectorClassificationProvider 연동)
+final sectorClassificationProvider = ChangeNotifierProvider<SectorClassificationProvider>(
+  (ref) => SectorClassificationProvider(),
+);
+
+/// 🆕 섹터 시간대 상태 (볼륨과 독립적으로 관리)
+final sectorTimeFrameIndexProvider = StateProvider<int>((ref) => 0);
+
+final sectorTimeFrameProvider = StateProvider<String>((ref) {
+  final index = ref.watch(sectorTimeFrameIndexProvider);
+  final timeFrames = AppConfig.timeFrames.map((tf) => '${tf}m').toList();
+  if (index >= 0 && index < timeFrames.length) {
+    return timeFrames[index];
+  }
+  return '1m';
+});
+
+/// 🆕 섹터별 거래대금 데이터 스트림 (SectorClassificationProvider 활용)
+final sectorVolumeDataProvider = StreamProvider.autoDispose<List<Volume>>((ref) async* {
+  ref.keepAlive();
+
+  try {
+    final timeFrame = ref.watch(sectorTimeFrameProvider);
+    final usecase = ref.read(volumeUsecaseProvider);
+    
+    // markets AsyncValue 처리
+    final marketsAsync = ref.watch(marketsProvider);
+    final markets = marketsAsync.when(
+      data: (data) => data,
+      loading: () => <String>[],
+      error: (_, __) => <String>[],
+    );
+
+    if (markets.isEmpty) {
+      yield <Volume>[];
+      return;
+    }
+
+    if (AppConfig.enableTradeLog) {
+      log.i('Sector volume stream started: $timeFrame, ${markets.length} markets');
+    }
+
+    // 개별 코인 볼륨을 섹터별로 변환
+    yield* usecase.getVolumeRanking(timeFrame, markets).map((result) {
+      return result.when(
+        ok: (coinVolumes) {
+          // SectorClassificationProvider에서 현재 섹터 매핑 가져오기
+          final sectorProvider = ref.read(sectorClassificationProvider);
+          final sectorMapping = sectorProvider.currentSectors;
+          
+          final sectorVolumes = _aggregateVolumesBySector(coinVolumes, sectorMapping);
+          
+          if (AppConfig.enableTradeLog) {
+            log.d('Sector volumes aggregated: ${sectorVolumes.length} sectors from ${coinVolumes.length} coins');
+          }
+          
+          return sectorVolumes;
+        },
+        err: (error) {
+          log.e('Sector Volume error: ${error.message}');
+          return <Volume>[];
+        },
+      );
+    });
+    
+  } catch (e, stackTrace) {
+    log.e('Sector volume stream error: $e', e, stackTrace);
+    yield <Volume>[];
+  }
+});
+
+/// 🎯 핵심 로직: 개별 코인 볼륨을 섹터별로 합산
+List<Volume> _aggregateVolumesBySector(List<Volume> coinVolumes, Map<String, List<String>> sectorMapping) {
+  if (coinVolumes.isEmpty) return [];
+  
+  final Map<String, double> sectorVolumeMap = {};
+  final sampleVolume = coinVolumes.first;
+  
+  // 각 코인을 해당 섹터에 합산
+  for (final coinVolume in coinVolumes) {
+    final ticker = coinVolume.market.replaceFirst('KRW-', '');
+    final sectors = _findSectorsForCoin(ticker, sectorMapping);
+    
+    for (final sector in sectors) {
+      sectorVolumeMap[sector] = (sectorVolumeMap[sector] ?? 0.0) + coinVolume.totalVolume;
+    }
+  }
+  
+  // 볼륨이 0인 섹터 제거
+  sectorVolumeMap.removeWhere((key, value) => value <= 0);
+  
+  // Volume 객체로 변환
+  final sectorVolumes = sectorVolumeMap.entries
+      .map((entry) => Volume(
+            market: 'SECTOR-${entry.key}', // 섹터 구분용 prefix
+            totalVolume: entry.value,
+            lastUpdatedMs: sampleVolume.lastUpdatedMs,
+            timeFrame: sampleVolume.timeFrame,
+            timeFrameStartMs: sampleVolume.timeFrameStartMs,
+          ))
+      .toList();
+  
+  // 볼륨 순 정렬 (높은 순)
+  sectorVolumes.sort((a, b) => b.totalVolume.compareTo(a.totalVolume));
+  return sectorVolumes;
+}
+
+/// 🎯 특정 코인이 속한 섹터들 찾기
+List<String> _findSectorsForCoin(String ticker, Map<String, List<String>> sectorMapping) {
+  final sectors = <String>[];
+  sectorMapping.forEach((sectorName, coins) {
+    if (coins.contains(ticker)) {
+      sectors.add(sectorName);
+    }
+  });
+  return sectors;
+}
+
+/// 🆕 섹터 컨트롤러
+final sectorTimeFrameController = Provider((ref) => SectorTimeFrameController(ref));
+
+class SectorTimeFrameController {
+  final Ref ref;
+  SectorTimeFrameController(this.ref);
+
+  /// 시간대 변경
+  void updateTimeFrame(String timeFrame, int index) {
+    final timeFrames = AppConfig.timeFrames.map((tf) => '${tf}m').toList();
+    if (index < 0 || index >= timeFrames.length) {
+      if (AppConfig.enableTradeLog) log.w('Invalid sector timeFrame index: $index');
+      return;
+    }
+    
+    ref.read(sectorTimeFrameProvider.notifier).state = timeFrame;
+    ref.read(sectorTimeFrameIndexProvider.notifier).state = index;
+    
+    if (AppConfig.enableTradeLog) {
+      log.i('Sector TimeFrame updated: $timeFrame (index: $index)');
+    }
+  }
+
+  /// 🆕 섹터 분류 토글 (SectorClassificationProvider 연동)
+  void toggleSectorClassification() {
+    ref.read(sectorClassificationProvider.notifier).toggleClassificationType();
+    
+    if (AppConfig.enableTradeLog) {
+      final currentName = ref.read(sectorClassificationProvider).currentClassificationName;
+      log.i('Sector classification toggled: $currentName');
+    }
+  }
+
+  /// 현재 시간대 정보
+  String get currentTimeFrame => ref.read(sectorTimeFrameProvider);
+  int get currentIndex => ref.read(sectorTimeFrameIndexProvider);
+  
+  /// 현재 섹터 분류 정보 (SectorClassificationProvider 연동)
+  bool get isDetailedClassification => ref.read(sectorClassificationProvider).isDetailedClassification;
+  String get currentSectorClassificationName => ref.read(sectorClassificationProvider).currentClassificationName;
+  int get totalSectors => ref.read(sectorClassificationProvider).currentSectors.length;
+  
+  /// 기본 정보
+  List<String> get availableTimeFrames => AppConfig.timeFrames.map((tf) => '${tf}m').toList();
+  
+  String getTimeFrameName(String timeFrame) {
+    final minutes = int.tryParse(timeFrame.replaceAll('m', ''));
+    return AppConfig.timeFrameNames[minutes] ?? timeFrame;
+  }
+
+  /// 🆕 섹터 관련 유틸리티 (SectorClassificationProvider 연동)
+  Map<String, int> getSectorSizes() {
+    return ref.read(sectorClassificationProvider).sectorSizes;
+  }
+
+  List<String> getCoinsInSector(String sectorName) {
+    return ref.read(sectorClassificationProvider).getCoinsInSector(sectorName);
+  }
+
+  List<String> getSectorsForCoin(String ticker) {
+    return ref.read(sectorClassificationProvider).getSectorsForCoin(ticker);
+  }
+
+  /// 수동 리셋 메서드들 (볼륨 UseCase 재사용)
+  void resetCurrentTimeFrame() {
+    final usecase = ref.read(volumeUsecaseProvider);
+    final timeFrame = ref.read(sectorTimeFrameProvider);
+    
+    final result = usecase.resetTimeFrame(timeFrame);
+    result.when(
+      ok: (_) {
+        if (AppConfig.enableTradeLog) {
+          log.i('Sector volume reset: $timeFrame');
+        }
+      },
+      err: (error) {
+        log.e('Sector volume reset failed: ${error.message}');
+      },
+    );
+  }
+
+  void resetAllTimeFrames() {
+    final usecase = ref.read(volumeUsecaseProvider);
+    
+    final result = usecase.resetAllTimeFrames();
+    result.when(
+      ok: (_) {
+        if (AppConfig.enableTradeLog) {
+          log.i('Sector volume reset: all timeframes');
+        }
+      },
+      err: (error) {
+        log.e('Sector volume reset all failed: ${error.message}');
+      },
+    );
+  }
+
+  /// 다음 리셋 시간 조회
+  DateTime? getNextResetTime() {
+    final usecase = ref.read(volumeUsecaseProvider);
+    final timeFrame = ref.read(sectorTimeFrameProvider);
+    
+    final result = usecase.getNextResetTime(timeFrame);
+    return result.when(
+      ok: (resetTime) => resetTime,
+      err: (error) {
+        log.e('Get sector reset time failed: ${error.message}');
+        return null;
+      },
+    );
+  }
+}\n\n// ====== lib/core/di/app_providers.dart ======\n
 // lib/core/di/app_providers.dart
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../bridge/signal_bus.dart';
 
-/// ▶ App lifecycle (sliderPositionProvider 제거됨)
+/// ▶ App lifecycle
 export '../utils/app_life_cycle_manager.dart'
     show appLifecycleManagerProvider;
 
-/// ▶ Settings DI + state (settingsProvider → appSettingsProvider)
+/// ▶ Settings DI + state
 export 'settings_provider.dart'
     show
         sharedPreferencesProvider,
         settingsLocalDSProvider,
         settingsRepositoryProvider,
         settingsUsecaseProvider,
-        appSettingsProvider; // 🔧 이름 변경!
+        appSettingsProvider;
 
-/// ▶ Domain entities (DisplayMode 등 enum export)
+/// ▶ Domain entities
 export '../../domain/entities/app_settings.dart'
     show
-        DisplayMode, // 🆕 DisplayMode enum export
-        SliderPosition; // 기존 SliderPosition도 명시적 export
+        DisplayMode,
+        SliderPosition;
 
-/// ▶ WebSocket DI & stats (🆕 새로 추가)
+/// ▶ WebSocket DI & stats
 export 'websocket_provider.dart'
     show
         wsStatusProvider,
@@ -425,20 +669,66 @@ export 'trade_provider.dart';
 export '../../presentation/controllers/trade_controller.dart'
     show tradeControllerProvider;
 
-/// ▶ 🆕 Volume DI & streams
+/// ▶ Volume DI & streams
 export 'volume_provider.dart'
     show
+        volumeRemoteDSProvider,
         volumeRepositoryProvider,
         volumeUsecaseProvider,
         volumeTimeFrameIndexProvider,
         volumeTimeFrameProvider,
         volumeDataProvider,
-        rawVolumeDataProvider,
         volumeTimeFrameController;
 
-/// ▶ 🆕 Volume 도메인 엔티티
-export '../../domain/entities/volume.dart'
-    show Volume;
+/// ▶ Volume 화면 로직
+export '../../presentation/controllers/volume_controller.dart'
+    show volumeControllerProvider;
+
+/// ▶ Sector DI & streams
+export 'sector_provider.dart'
+    show
+        sectorClassificationProvider,
+        sectorTimeFrameIndexProvider,
+        sectorTimeFrameProvider,
+        sectorVolumeDataProvider,
+        sectorTimeFrameController;
+
+/// ▶ Sector 화면 로직
+export '../../presentation/controllers/sector_controller.dart'
+    show sectorControllerProvider;
+
+/// ▶ Market Mood DI & streams
+export 'market_mood_provider.dart'
+    show
+        coinGeckoApiClientProvider,
+        marketMoodRemoteDSProvider,
+        marketMoodLocalDSProvider,
+        marketMoodRepositoryProvider,
+        marketMoodUsecaseProvider,
+        exchangeRateProvider,
+        marketMoodProvider,
+        marketMoodComputedDataProvider, // UI에서 로딩/에러 상태 처리를 위해 export
+        volumeComparisonProvider,
+        currentMarketMoodProvider,
+        marketMoodSummaryProvider,
+        marketMoodSystemProvider,
+        marketMoodControllerProvider,
+        MarketMoodComputedData;
+
+/// ▶ Market Mood Domain Entities
+export '../../domain/entities/market_mood.dart'
+    show
+        MarketMood,
+        VolumeData,
+        MarketMoodData,
+        ComparisonResult,
+        ComparisonData,
+        MarketMoodSystemState,
+        VolumeConstants;
+
+/// ▶ Sector 분류 관리 (shared layer)
+export '../../shared/widgets/sector_classification.dart'
+    show SectorClassificationProvider;
 
 /// ▶ 전역 SnackBar key
 final scaffoldMessengerKeyProvider =
@@ -450,7 +740,6 @@ final scaffoldMessengerKeyProvider =
 final selectedTabProvider = StateProvider<int>((ref) => 0);
 
 /// ▶ SignalBus 싱글턴
-/// Riverpod이 dispose 시점에 자동으로 SignalBus.dispose() 호출
 final signalBusProvider = Provider<SignalBus>((ref) {
   final bus = SignalBus();
   ref.onDispose(() => bus.dispose());
@@ -718,110 +1007,102 @@ class NotificationService {
 // lib/core/di/volume_provider.dart
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import '../../../core/utils/logger.dart';
 import '../config/app_config.dart';
-import '../utils/app_life_cycle_manager.dart';
+import '../utils/logger.dart';
+import 'app_providers.dart' show signalBusProvider;
+import 'websocket_provider.dart' show wsClientProvider;
+import 'trade_provider.dart' show marketsProvider; // 🎯 마켓 리스트 재사용
+import '../../data/datasources/trade_remote_ds.dart';
 import '../../data/repositories/volume_repository_impl.dart';
-import '../../domain/entities/volume.dart';
 import '../../domain/repositories/volume_repository.dart';
-import '../../domain/usecases/volume_usecase.dart';
-import 'trade_provider.dart'; // TradeRemoteDataSource 재사용
+import '../../domain/usecases/volume_usecase.dart'; // 🆕 UseCase import
+import '../../domain/entities/volume.dart'; // 🆕 Volume 엔티티 import 추가!
 
-/// 0) Volume Repository Implementation
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// 🆕 VOLUME 전용 Provider들 (브로드캐스트 스트림 기반)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/// 🎯 볼륨 전용 RemoteDataSource (TradeRemoteDataSource와 동일한 인스턴스)
+final volumeRemoteDSProvider = Provider<TradeRemoteDataSource>((ref) {
+  return TradeRemoteDataSource(
+    ref.read(wsClientProvider),
+    ref.read(signalBusProvider),
+    useTestData: AppConfig.useTestDataInDev,
+  );
+});
+
+/// 🆕 VolumeRepository
 final volumeRepositoryProvider = Provider<VolumeRepository>((ref) {
-  final remoteDS = ref.read(remoteDSProvider); // 🔥 TradeRemoteDataSource 공유!
-  final lifecycleManager = ref.read(appLifecycleManagerProvider);
-  
-  final repo = VolumeRepositoryImpl(remoteDS, lifecycleManager);
-  ref.onDispose(() => repo.dispose());
-  return repo;
+  return VolumeRepositoryImpl(
+    ref.read(volumeRemoteDSProvider),
+  );
 });
 
-/// 1) Volume UseCase
+/// 🆕 VolumeUsecase
 final volumeUsecaseProvider = Provider<VolumeUsecase>((ref) {
-  final repository = ref.read(volumeRepositoryProvider);
-  return VolumeUsecase(repository);
+  return VolumeUsecase(
+    ref.read(volumeRepositoryProvider),
+  );
 });
 
-/// 2) Volume 시간대 상태 관리
-final volumeTimeFrameIndexProvider = StateProvider<int>((ref) => 2); // 기본값: 15분 (index 2)
+/// 🆕 볼륨 시간대 상태 (기본값: 1분)
+final volumeTimeFrameIndexProvider = StateProvider<int>((_) => 0); // 1분이 기본 (0:1m, 1:5m, 2:15m)
+
 final volumeTimeFrameProvider = StateProvider<String>((ref) {
   final index = ref.watch(volumeTimeFrameIndexProvider);
-  const timeFrames = AppConfig.timeFrames;
+  final timeFrames = AppConfig.timeFrames.map((tf) => '${tf}m').toList();
   if (index >= 0 && index < timeFrames.length) {
-    return '${timeFrames[index]}m'; // "15m"
+    return timeFrames[index];
   }
-  return '15m'; // 기본값
+  return '1m'; // fallback (기본값 1분)
 });
 
-/// 3) 정렬된 볼륨 데이터 스트림 (메인)
+/// 🆕 볼륨 데이터 스트림 (실시간 즉시 업데이트)
 final volumeDataProvider = StreamProvider.autoDispose<List<Volume>>((ref) async* {
   // Prevent immediate dispose on loss of listeners
   ref.keepAlive();
 
-  // 현재 시간대와 마켓 정보
-  final timeFrame = ref.watch(volumeTimeFrameProvider);
-  final markets = await ref.watch(marketsProvider.future); // 트레이드와 같은 마켓 사용
-  final usecase = ref.read(volumeUsecaseProvider);
+  try {
+    // 현재 시간대와 markets를 읽어서 스트림 구독
+    final timeFrame = ref.watch(volumeTimeFrameProvider);
+    final markets = await ref.watch(marketsProvider.future);
+    final usecase = ref.read(volumeUsecaseProvider); // 🆕 UseCase 사용
 
-  // 시간대 변경 시 로그
-  ref.listen<String>(volumeTimeFrameProvider, (prev, next) {
-    if (prev != null && prev != next) {
-      if (AppConfig.enableTradeLog) {
-        log.i('Volume timeFrame changed: $prev → $next');
-      }
+    if (AppConfig.enableTradeLog) {
+      log.i('Volume stream started: $timeFrame, ${markets.length} markets');
     }
-  });
 
-  // 실제 볼륨 데이터 스트림 방출
-  yield* usecase.getVolumeRanking(timeFrame, markets).map((result) {
-    return result.when(
-      ok: (volumeList) => volumeList,
-      err: (error) {
-        if (AppConfig.enableTradeLog) {
-          log.e('Volume data error: ${error.message}');
-        }
-        return <Volume>[];
-      },
-    );
-  });
+    // 🚀 실시간 볼륨 데이터 스트림 방출 (UseCase를 통해)
+    yield* usecase.getVolumeRanking(timeFrame, markets).map((result) {
+      return result.when(
+        ok: (volumes) => volumes,
+        err: (error) {
+          log.e('Volume UseCase error: ${error.message}');
+          return <Volume>[]; // 에러 시 빈 리스트
+        },
+      );
+    });
+    
+  } catch (e, stackTrace) {
+    log.e('Volume stream error: $e', e, stackTrace);
+    
+    // 에러 시 빈 리스트 방출
+    yield <Volume>[];
+  }
 });
 
-/// 4) 원시 볼륨 Map 스트림 (디버깅용)
-final rawVolumeDataProvider = StreamProvider.autoDispose<Map<String, double>>((ref) async* {
-  ref.keepAlive();
-
-  final timeFrame = ref.watch(volumeTimeFrameProvider);
-  final markets = await ref.watch(marketsProvider.future);
-  final usecase = ref.read(volumeUsecaseProvider);
-
-  yield* usecase.getRawVolumeData(timeFrame, markets).map((result) {
-    return result.when(
-      ok: (volumeMap) => volumeMap,
-      err: (error) {
-        if (AppConfig.enableTradeLog) {
-          log.e('Raw volume data error: ${error.message}');
-        }
-        return <String, double>{};
-      },
-    );
-  });
-});
-
-/// 5) 시간대 변경 컨트롤러
+/// 🆕 볼륨 시간대 컨트롤러
 final volumeTimeFrameController = Provider((ref) => VolumeTimeFrameController(ref));
 
 class VolumeTimeFrameController {
   final Ref ref;
   VolumeTimeFrameController(this.ref);
 
-  /// 시간대 변경
   void updateTimeFrame(String timeFrame, int index) {
-    const timeFrames = AppConfig.timeFrames;
+    final timeFrames = AppConfig.timeFrames.map((tf) => '${tf}m').toList();
     if (index < 0 || index >= timeFrames.length) {
-      if (AppConfig.enableTradeLog) {
-        log.w('Invalid volume timeFrame index: $index');
-      }
+      if (AppConfig.enableTradeLog) log.w('Invalid timeFrame index: $index');
       return;
     }
     
@@ -829,39 +1110,381 @@ class VolumeTimeFrameController {
     ref.read(volumeTimeFrameIndexProvider.notifier).state = index;
     
     if (AppConfig.enableTradeLog) {
-      log.i('Volume timeFrame updated: $timeFrame (index: $index)');
+      log.i('Volume TimeFrame updated: $timeFrame (index: $index)');
     }
   }
 
-  /// 현재 시간대 정보
+  /// 수동 리셋 메서드들 (UseCase를 통해)
+  void resetCurrentTimeFrame() {
+    final usecase = ref.read(volumeUsecaseProvider);
+    final timeFrame = ref.read(volumeTimeFrameProvider);
+    
+    final result = usecase.resetTimeFrame(timeFrame);
+    result.when(
+      ok: (_) {
+        if (AppConfig.enableTradeLog) {
+          log.i('Volume reset: $timeFrame');
+        }
+      },
+      err: (error) {
+        log.e('Volume reset failed: ${error.message}');
+      },
+    );
+  }
+
+  void resetAllTimeFrames() {
+    final usecase = ref.read(volumeUsecaseProvider);
+    
+    final result = usecase.resetAllTimeFrames();
+    result.when(
+      ok: (_) {
+        if (AppConfig.enableTradeLog) {
+          log.i('Volume reset: all timeframes');
+        }
+      },
+      err: (error) {
+        log.e('Volume reset all failed: ${error.message}');
+      },
+    );
+  }
+
+  /// 다음 리셋 시간 조회 (UseCase를 통해)
+  DateTime? getNextResetTime() {
+    final usecase = ref.read(volumeUsecaseProvider);
+    final timeFrame = ref.read(volumeTimeFrameProvider);
+    
+    final result = usecase.getNextResetTime(timeFrame);
+    return result.when(
+      ok: (resetTime) => resetTime,
+      err: (error) {
+        log.e('Get reset time failed: ${error.message}');
+        return null;
+      },
+    );
+  }
+
+  /// Getters
   String get currentTimeFrame => ref.read(volumeTimeFrameProvider);
   int get currentIndex => ref.read(volumeTimeFrameIndexProvider);
+  List<String> get availableTimeFrames => AppConfig.timeFrames.map((tf) => '${tf}m').toList();
   
-  /// 사용 가능한 시간대 옵션들
-  List<String> get availableTimeFrames => 
-      AppConfig.timeFrames.map((tf) => '${tf}m').toList();
-  
-  /// 시간대 인덱스로부터 한글 이름 가져오기
-  String getTimeFrameName(int index) {
-    const timeFrames = AppConfig.timeFrames;
-    if (index >= 0 && index < timeFrames.length) {
-      final timeFrameMinutes = timeFrames[index];
-      return AppConfig.timeFrameNames[timeFrameMinutes] ?? '$timeFrameMinutes분';
-    }
-    return '알 수 없음';
-  }
-  
-  /// 시간대 문자열로부터 한글 이름 가져오기
-  String getTimeFrameNameFromString(String timeFrame) {
-    // "15m" → 15 → "15분"
+  /// 시간대 한국어 이름
+  String getTimeFrameName(String timeFrame) {
     final minutes = int.tryParse(timeFrame.replaceAll('m', ''));
-    if (minutes != null) {
-      return AppConfig.timeFrameNames[minutes] ?? '$minutes분';
-    }
-    return timeFrame;
+    return AppConfig.timeFrameNames[minutes] ?? timeFrame;
   }
-}\n\n// ====== lib/core/di/surge_provider.dart ======\n
-\n\n// ====== lib/core/di/settings_provider.dart ======\n
+}\n\n// ====== lib/core/di/market_mood_provider copy.dart ======\n
+\n\n// ====== lib/core/di/surge_provider.dart ======\n
+\n\n// ====== lib/core/di/market_mood_provider.dart ======\n
+// lib/core/di/market_mood_provider.dart
+// 🚀 Performance Optimized Provider - 메모이제이션, 배치처리, 선택적 무효화, 주기적 갱신 적용
+
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:rxdart/rxdart.dart'; // 🚀 debounceTime, distinctUntilChanged
+import 'dart:async';
+
+import '../network/api_client_coingecko.dart';
+import '../utils/logger.dart';
+import 'trade_provider.dart' show hiveServiceProvider;
+import '../../data/datasources/market_mood_remote_ds.dart';
+import '../../data/datasources/market_mood_local_ds.dart';
+import '../../data/repositories/market_mood_repository_impl.dart';
+import '../../domain/entities/market_mood.dart';
+import '../../domain/usecases/market_mood_usecase.dart';
+
+/// 🌐 CoinGecko API 클라이언트 Provider
+final coinGeckoApiClientProvider = Provider<CoinGeckoApiClient>((ref) {
+  return CoinGeckoApiClient();
+});
+
+/// 🔥 Remote DataSource Provider
+final marketMoodRemoteDSProvider = Provider<MarketMoodRemoteDataSource>((ref) {
+  final client = ref.read(coinGeckoApiClientProvider);
+  return MarketMoodRemoteDataSource(client);
+});
+
+/// 🔥 Local DataSource Provider
+final marketMoodLocalDSProvider = Provider<MarketMoodLocalDataSource>((ref) {
+  final hive = ref.watch(hiveServiceProvider);
+  return MarketMoodLocalDataSource(hive);
+});
+
+/// 🔥 Repository Provider
+final marketMoodRepositoryProvider = Provider<MarketMoodRepositoryImpl>((ref) {
+  final remoteDS = ref.read(marketMoodRemoteDSProvider);
+  final localDS = ref.read(marketMoodLocalDSProvider);
+  return MarketMoodRepositoryImpl(remoteDS, localDS);
+});
+
+/// 🔥 UseCase Provider
+final marketMoodUsecaseProvider = Provider<MarketMoodUsecase>((ref) {
+  final repository = ref.read(marketMoodRepositoryProvider);
+  return MarketMoodUsecase(repository);
+});
+
+/// 🚀 메모이제이션된 환율 Provider - 캐시 유지 (TTL 필요 시 autoDispose로 변경)
+final exchangeRateProvider = FutureProvider.autoDispose<double>((ref) async {
+  final usecase = ref.read(marketMoodUsecaseProvider);
+  try {
+    final rate = await usecase.getExchangeRate();
+    log.d('환율 조회 성공: $rate (캐시됨)');
+    return rate;
+  } catch (e, st) {
+    log.w('환율 조회 실패, 기본값 1400 사용: $e', e, st);
+    return 1400.0;
+  }
+});
+
+/// 🚀 최적화된 마켓 데이터 스트림 - distinct + debounceTime 적용
+final marketMoodProvider = StreamProvider<MarketMoodData>((ref) {
+  final repository = ref.read(marketMoodRepositoryProvider);
+
+  ref.onDispose(repository.dispose);
+
+  return repository
+      .getMarketDataStream()
+      .distinct((prev, next) => prev.totalVolumeUsd == next.totalVolumeUsd)
+      .debounceTime(const Duration(milliseconds: 100));
+});
+
+/// 🚀 통합 계산 Provider - 주기적 갱신 및 포그라운드 복귀 시 자동 invalidate 적용
+final marketMoodComputedDataProvider = FutureProvider.autoDispose<MarketMoodComputedData>((ref) async {
+  // 1) autoDispose 비활성화 링크 (keepAlive)
+  final link = ref.keepAlive();
+
+  // 2) 15분마다 재계산
+  final timer = Timer.periodic(const Duration(minutes: 15), (_) {
+    ref.invalidateSelf();
+  });
+
+  // 3) 앱 복귀 시 재계산
+  ref.onResume(() {
+    ref.invalidateSelf();
+  });
+
+  // 4) 종료 시 정리
+  ref.onDispose(() {
+    timer.cancel();
+    link.close();
+  });
+
+  // 기존 로직
+  final moodAsync = ref.watch(marketMoodProvider);
+  final exchangeAsync = ref.watch(exchangeRateProvider);
+  final usecase = ref.read(marketMoodUsecaseProvider);
+
+  return moodAsync.when(
+    data: (marketData) async {
+      final exchangeRate = exchangeAsync.asData?.value ?? 1400.0;
+      try {
+        final results = await Future.wait(
+          [
+            usecase.calculateCurrentMood(marketData.totalVolumeUsd),
+            usecase.calculateVolumeComparison(marketData.totalVolumeUsd),
+          ],
+          eagerError: false,
+        );
+        final currentMood = results[0] as MarketMood;
+        final volumeComparison = results[1] as ComparisonData;
+        final moodSummary = usecase.generateMoodSummary(currentMood);
+
+        return MarketMoodComputedData(
+          marketData: marketData,
+          currentMood: currentMood,
+          volumeComparison: volumeComparison,
+          moodSummary: moodSummary,
+          exchangeRate: exchangeRate,
+          computedAt: DateTime.now(),
+        );
+      } catch (e, st) {
+        // [수정됨] 이름 있는 파라미터(named parameter) 대신 위치 기반 파라미터(positional parameter) 사용
+        log.e('배치 계산 오류: $e', e, st);
+        return MarketMoodComputedData.error();
+      }
+    },
+    loading: () async => MarketMoodComputedData.loading(),
+    error: (error, stack) async {
+      // [수정됨] 이름 있는 파라미터(named parameter) 대신 위치 기반 파라미터(positional parameter) 사용
+      log.e('마켓무드 계산 오류: $error', error, stack);
+      return MarketMoodComputedData.error();
+    },
+  );
+});
+
+/// 🎯 개별 데이터 접근 Provider들 - 메모이제이션된 결과에서 추출
+final currentMarketMoodProvider = Provider<MarketMood>((ref) {
+  final computedAsync = ref.watch(marketMoodComputedDataProvider);
+  return computedAsync.when(
+    data: (computed) => computed.currentMood,
+    loading: () => MarketMood.sideways,
+    error: (_, __) => MarketMood.sideways,
+  );
+});
+
+final volumeComparisonProvider = Provider<ComparisonData>((ref) {
+  final computedAsync = ref.watch(marketMoodComputedDataProvider);
+  return computedAsync.when(
+    data: (computed) => computed.volumeComparison,
+    loading: () => ComparisonData.loading(),
+    error: (_, __) => ComparisonData.error(),
+  );
+});
+
+final marketMoodSummaryProvider = Provider<String>((ref) {
+  final computedAsync = ref.watch(marketMoodComputedDataProvider);
+  return computedAsync.when(
+    data: (computed) => computed.moodSummary,
+    loading: () => '로딩중...',
+    error: (_, __) => '오류 발생',
+  );
+});
+
+/// 🌐 최적화된 시스템 상태 Provider
+final marketMoodSystemProvider = Provider<MarketMoodSystemState>((ref) {
+  final computedAsync = ref.watch(marketMoodComputedDataProvider);
+  final usecase = ref.read(marketMoodUsecaseProvider);
+
+  return computedAsync.when(
+    data: (computed) => usecase.createSystemState(
+      marketData: computed.marketData,
+      comparisonData: computed.volumeComparison,
+      currentMood: computed.currentMood,
+      exchangeRate: computed.exchangeRate,
+      isLoading: false,
+      hasError: false,
+    ),
+    loading: () => usecase.createSystemState(
+      marketData: null,
+      comparisonData: ComparisonData.loading(),
+      currentMood: MarketMood.sideways,
+      exchangeRate: 1400.0,
+      isLoading: true,
+      hasError: false,
+    ),
+    error: (_, __) => usecase.createSystemState(
+      marketData: null,
+      comparisonData: ComparisonData.error(),
+      currentMood: MarketMood.sideways,
+      exchangeRate: 1400.0,
+      isLoading: false,
+      hasError: true,
+    ),
+  );
+});
+
+/// 🎮 최적화된 마켓 무드 컨트롤러
+final marketMoodControllerProvider = Provider((ref) => OptimizedMarketMoodController(ref));
+
+class OptimizedMarketMoodController {
+  final Ref ref;
+  DateTime? _lastRefresh;
+  static const _refreshCooldown = Duration(seconds: 30);
+
+  OptimizedMarketMoodController(this.ref);
+
+  /// 🚀 스마트 새로고침 - 쿨다운 적용
+  void refresh() {
+    final now = DateTime.now();
+    if (_lastRefresh != null && now.difference(_lastRefresh!) < _refreshCooldown) {
+      // [수정됨] + 연산자 대신 인접 문자열 연결 사용
+      log.d('새로고침 쿨다운 중... '
+          '${_refreshCooldown.inSeconds - now.difference(_lastRefresh!).inSeconds}초 후 가능');
+      return;
+    }
+
+    _lastRefresh = now;
+    ref.invalidate(marketMoodProvider);
+    ref.invalidate(exchangeRateProvider);
+    log.d('마켓무드 데이터 새로고침 완료');
+  }
+
+  /// 🚀 캐시된 현재 무드 조회
+  MarketMood getCurrentMood() => ref.read(currentMarketMoodProvider);
+
+  /// 🚀 캐시된 비교 데이터 조회
+  ComparisonData getComparisonData() => ref.read(volumeComparisonProvider);
+
+  /// 🚀 환율만 선택적 새로고침
+  Future<void> refreshExchangeRate() async {
+    final usecase = ref.read(marketMoodUsecaseProvider);
+    await usecase.refreshExchangeRate();
+    ref.invalidate(exchangeRateProvider);
+    log.d('환율 새로고침 완료');
+  }
+
+  /// 🚀 시스템 헬스 체크 (캐시 활용)
+  Future<Map<String, dynamic>> getSystemHealth() async {
+    final usecase = ref.read(marketMoodUsecaseProvider);
+    final state = ref.read(marketMoodSystemProvider);
+    return {
+      ...await usecase.getSystemHealth(),
+      'cached_state': {
+        'is_loading': state.isLoading,
+        'has_error': state.hasError,
+        'last_update': state.marketData?.updatedAt.toIso8601String(),
+      }
+    };
+  }
+
+  /// 🚀 성능 통계 로깅
+  Future<void> logSystemStatus() async {
+    final usecase = ref.read(marketMoodUsecaseProvider);
+    final computedAsync = ref.read(marketMoodComputedDataProvider);
+    await usecase.logSystemStatus();
+    computedAsync.whenData((computed) {
+      log.i('성능 통계 - 계산 시간: ${DateTime.now().difference(computed.computedAt).inMilliseconds}ms');
+    });
+  }
+
+  /// 🚀 메모리 정리 (필요 시 호출)
+  void clearCache() {
+    ref.invalidate(marketMoodComputedDataProvider);
+    ref.invalidate(exchangeRateProvider);
+    ref.invalidate(marketMoodProvider);
+    log.d('캐시 정리 완료');
+  }
+}
+
+/// 🚀 통합 계산 결과 데이터 클래스
+class MarketMoodComputedData {
+  final MarketMoodData? marketData;
+  final MarketMood currentMood;
+  final ComparisonData volumeComparison;
+  final String moodSummary;
+  final double exchangeRate;
+  final DateTime computedAt;
+
+  const MarketMoodComputedData({
+    this.marketData,
+    required this.currentMood,
+    required this.volumeComparison,
+    required this.moodSummary,
+    required this.exchangeRate,
+    required this.computedAt,
+  });
+
+  factory MarketMoodComputedData.loading() => MarketMoodComputedData(
+        currentMood: MarketMood.sideways,
+        volumeComparison: ComparisonData.loading(),
+        moodSummary: '로딩중...',
+        exchangeRate: 1400.0,
+        computedAt: DateTime.now(),
+      );
+
+  factory MarketMoodComputedData.error() => MarketMoodComputedData(
+        currentMood: MarketMood.sideways,
+        volumeComparison: ComparisonData.error(),
+        moodSummary: '오류 발생',
+        exchangeRate: 1400.0,
+        computedAt: DateTime.now(),
+      );
+
+  /// 🚀 데이터 신선도 체크 (15분 이상 오래되면 갱신 필요)
+  bool get isStale => DateTime.now().difference(computedAt) > const Duration(minutes: 15);
+
+  /// 🚀 성능 메트릭
+  Duration get age => DateTime.now().difference(computedAt);
+}\n\n// ====== lib/core/di/settings_provider.dart ======\n
 // 1️⃣ lib/core/di/settings_provider.dart (수정)
 // ==========================================
 import 'package:flutter/material.dart';
@@ -1790,7 +2413,93 @@ class OrderbookWsClient extends BaseWsClient<List<Map<String, dynamic>>> {
           },
         );
 }
-\n\n// ====== lib/core/network/auth_interceptor.dart ======\n
+\n\n// ====== lib/core/network/api_client_coingecko.dart ======\n
+// lib/core/network/api_client_coingecko.dart
+
+import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart';
+import '../../data/models/market_mood_dto.dart';
+import '../error/app_exception.dart';
+import '../utils/logger.dart';
+
+/// 🌐 CoinGecko API 클라이언트
+class CoinGeckoApiClient {
+  static const String _baseUrl = 'https://api.coingecko.com/api/v3';
+  static const String _pathGlobal = '/global';
+  static const String _exchangeRateUrl = 'https://api.exchangerate-api.com/v4/latest/USD';
+  static const String _keyRates = 'rates';
+  static const String _keyKrw = 'KRW';
+
+  static const Duration _timeout = Duration(seconds: 10);
+  
+  final Dio _dio;
+  
+  CoinGeckoApiClient({Dio? dio}) : _dio = dio ?? _createDio();
+  
+  static Dio _createDio() {
+    final dio = Dio(BaseOptions(
+      baseUrl: _baseUrl,
+      connectTimeout: _timeout,
+      receiveTimeout: _timeout,
+      sendTimeout: _timeout,
+      headers: { 'Accept': 'application/json', 'Content-Type': 'application/json' },
+    ));
+    
+    if (kDebugMode) {
+      dio.interceptors.add(LogInterceptor(
+        requestBody: false,
+        responseBody: false,
+        logPrint: (object) => log.d('[CoinGecko API] $object'),
+      ));
+    }
+    
+    return dio;
+  }
+  
+  /// 🎯 전체 시장 데이터 조회
+  Future<CoinGeckoGlobalResponseDto> getGlobalMarketData() async {
+    try {
+      final response = await _dio.get(_pathGlobal);
+      if (response.statusCode == 200 && response.data != null) {
+        return CoinGeckoGlobalResponseDto.fromJson(response.data);
+      } else {
+        throw NetworkException(
+          'Invalid response from CoinGecko API: ${response.statusCode}',
+          statusCode: response.statusCode,
+        );
+      }
+    } on DioException catch (e) {
+      log.e('[CoinGecko] DioException: ${e.message}', e);
+      throw NetworkException.fromDio(e);
+    } catch (e, stackTrace) {
+      log.e('[CoinGecko] Unexpected error: $e', e, stackTrace);
+      throw AppException('Failed to fetch market data: $e');
+    }
+  }
+
+  /// 💱 USD → KRW 환율 조회
+  Future<double> getUsdToKrwRate() async {
+    try {
+      final response = await _dio.get(_exchangeRateUrl);
+      if (response.statusCode == 200 && response.data != null) {
+        final data = response.data as Map<String, dynamic>;
+        final rates = data[_keyRates] as Map<String, dynamic>;
+        final krwRate = (rates[_keyKrw] ?? 1400.0).toDouble();
+        return krwRate;
+      } else {
+        throw NetworkException('Invalid response from Exchange Rate API: ${response.statusCode}',
+          statusCode: response.statusCode,
+        );
+      }
+    } on DioException {
+      log.w('[ExchangeRate] DioException, using fallback rate 1400.0');
+      return 1400.0;
+    } catch (e) {
+      log.w('[ExchangeRate] Unexpected error: $e, using fallback rate 1400.0');
+      return 1400.0;
+    }
+  }
+}\n\n// ====== lib/core/network/auth_interceptor.dart ======\n
 // lib/core/network/auth_interceptor.dart
 
 import 'dart:convert';
@@ -3395,6 +4104,7 @@ import 'package:flutter/foundation.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import '../utils/logger.dart';
 import '../../data/models/trade_dto.dart';
+import '../../data/models/market_mood_dto.dart'; // 🔥 MarketMood DTO 추가
 
 /// 🎯 Hive 전역 관리 서비스 (싱글톤)
 /// - 앱 시작 시 한 번만 초기화
@@ -3409,9 +4119,13 @@ class HiveService {
 
   // 🏷️ Box 이름 상수 (HiveService 자체 관리)
   static const String _tradeBoxName = 'trades';
+  static const String _marketMoodVolumeBoxName = 'market_mood_volume'; // 🔥 추가
+  static const String _marketMoodCacheBoxName = 'market_mood_cache';   // 🔥 추가
 
   // Box 인스턴스 캐싱
   late final Box<TradeDto> _tradeBox;
+  late final Box<TimestampedVolume> _marketMoodVolumeBox; // 🔥 추가
+  late final Box _marketMoodCacheBox; // 🔥 추가 (dynamic)
   
   // 초기화 상태 관리
   bool _initialized = false;
@@ -3425,6 +4139,26 @@ class HiveService {
       );
     }
     return _tradeBox;
+  }
+
+  /// 🔥 MarketMood Volume Box getter (이미 열려있다는 전제)
+  Box<TimestampedVolume> get marketMoodVolumeBox {
+    if (!_initialized) {
+      throw StateError(
+        'HiveService has not been initialized. Call HiveService.init() before using marketMoodVolumeBox.'
+      );
+    }
+    return _marketMoodVolumeBox;
+  }
+
+  /// 🔥 MarketMood Cache Box getter (이미 열려있다는 전제)
+  Box get marketMoodCacheBox {
+    if (!_initialized) {
+      throw StateError(
+        'HiveService has not been initialized. Call HiveService.init() before using marketMoodCacheBox.'
+      );
+    }
+    return _marketMoodCacheBox;
   }
 
   /// 🚀 Hive 초기화 (앱 시작 시 단 한 번만 호출)
@@ -3454,9 +4188,15 @@ class HiveService {
       // 2. TypeAdapter 등록 (중복 방지)
       _registerAdapters();
 
-      // 3. Trade Box 열기 및 캐싱
+      // 3. 모든 Box 열기 및 캐싱
       _tradeBox = await Hive.openBox<TradeDto>(_tradeBoxName);
       log.i('[HiveService] "$_tradeBoxName" box opened and cached');
+
+      _marketMoodVolumeBox = await Hive.openBox<TimestampedVolume>(_marketMoodVolumeBoxName); // 🔥 추가
+      log.i('[HiveService] "$_marketMoodVolumeBoxName" box opened and cached');
+
+      _marketMoodCacheBox = await Hive.openBox(_marketMoodCacheBoxName); // 🔥 추가
+      log.i('[HiveService] "$_marketMoodCacheBoxName" box opened and cached');
 
       _initialized = true;
       log.i('[HiveService] ✅ initialized successfully');
@@ -3473,19 +4213,25 @@ class HiveService {
 
   /// 📋 모든 TypeAdapter 등록 (중복 방지)
   void _registerAdapters() {
-    final adapter = TradeDtoAdapter();
-    if (!Hive.isAdapterRegistered(adapter.typeId)) {
-      Hive.registerAdapter(adapter);
-      log.i('[HiveService] TradeDtoAdapter registered (typeId: ${adapter.typeId})');
+    // Trade Adapter
+    final tradeAdapter = TradeDtoAdapter();
+    if (!Hive.isAdapterRegistered(tradeAdapter.typeId)) {
+      Hive.registerAdapter(tradeAdapter);
+      log.i('[HiveService] TradeDtoAdapter registered (typeId: ${tradeAdapter.typeId})');
     } else {
       log.d('[HiveService] TradeDtoAdapter already registered');
     }
     
+    // 🔥 TimestampedVolume Adapter 추가
+    final volumeAdapter = TimestampedVolumeAdapter();
+    if (!Hive.isAdapterRegistered(volumeAdapter.typeId)) {
+      Hive.registerAdapter(volumeAdapter);
+      log.i('[HiveService] TimestampedVolumeAdapter registered (typeId: ${volumeAdapter.typeId})');
+    } else {
+      log.d('[HiveService] TimestampedVolumeAdapter already registered');
+    }
+    
     // 📝 향후 다른 어댑터 추가 시 여기에 추가
-    // if (!Hive.isAdapterRegistered(AnotherDtoAdapter().typeId)) {
-    //   Hive.registerAdapter(AnotherDtoAdapter());
-    //   log.i('[HiveService] AnotherDtoAdapter registered');
-    // }
   }
 
   /// 🧹 리소스 정리 (디버그 모드에서만 실행)
@@ -3507,6 +4253,17 @@ class HiveService {
         log.i('[HiveService] "$_tradeBoxName" box closed');
       }
 
+      // 🔥 MarketMood Box들 정리 추가
+      if (_marketMoodVolumeBox.isOpen) {
+        await _marketMoodVolumeBox.close();
+        log.i('[HiveService] "$_marketMoodVolumeBoxName" box closed');
+      }
+
+      if (_marketMoodCacheBox.isOpen) {
+        await _marketMoodCacheBox.close();
+        log.i('[HiveService] "$_marketMoodCacheBoxName" box closed');
+      }
+
       await Hive.close();
       log.i('[HiveService] 🧹 all Hive resources disposed');
       
@@ -3520,9 +4277,21 @@ class HiveService {
   /// 🔍 디버깅용: 현재 상태 정보
   Map<String, Object> get debugInfo => {
     'initialized': _initialized,
-    'boxName': _tradeBoxName,
-    'boxOpen': _initialized ? _tradeBox.isOpen : false,
-    'boxLength': _initialized ? _tradeBox.length : 0,
+    'tradeBox': {
+      'name': _tradeBoxName,
+      'open': _initialized ? _tradeBox.isOpen : false,
+      'length': _initialized ? _tradeBox.length : 0,
+    },
+    'marketMoodVolumeBox': { // 🔥 추가
+      'name': _marketMoodVolumeBoxName,
+      'open': _initialized ? _marketMoodVolumeBox.isOpen : false,
+      'length': _initialized ? _marketMoodVolumeBox.length : 0,
+    },
+    'marketMoodCacheBox': { // 🔥 추가
+      'name': _marketMoodCacheBoxName,
+      'open': _initialized ? _marketMoodCacheBox.isOpen : false,
+      'length': _initialized ? _marketMoodCacheBox.length : 0,
+    },
     'initInProgress': _initFuture != null,
   };
 
@@ -3539,9 +4308,23 @@ class HiveService {
     }
     
     log.d('[HiveService] Box Details:');
-    log.d('  - Name: $_tradeBoxName');
-    log.d('  - Length: ${_tradeBox.length}');
-    log.d('  - Keys sample: ${_tradeBox.keys.take(5).toList()}');
-    log.d('  - Is open: ${_tradeBox.isOpen}');
+    log.d('  Trade Box:');
+    log.d('    - Name: $_tradeBoxName');
+    log.d('    - Length: ${_tradeBox.length}');
+    log.d('    - Keys sample: ${_tradeBox.keys.take(5).toList()}');
+    log.d('    - Is open: ${_tradeBox.isOpen}');
+    
+    // 🔥 MarketMood Box 정보 추가
+    log.d('  MarketMood Volume Box:');
+    log.d('    - Name: $_marketMoodVolumeBoxName');
+    log.d('    - Length: ${_marketMoodVolumeBox.length}');
+    log.d('    - Keys sample: ${_marketMoodVolumeBox.keys.take(5).toList()}');
+    log.d('    - Is open: ${_marketMoodVolumeBox.isOpen}');
+    
+    log.d('  MarketMood Cache Box:');
+    log.d('    - Name: $_marketMoodCacheBoxName');
+    log.d('    - Length: ${_marketMoodCacheBox.length}');
+    log.d('    - Keys sample: ${_marketMoodCacheBox.keys.take(5).toList()}');
+    log.d('    - Is open: ${_marketMoodCacheBox.isOpen}');
   }
 }

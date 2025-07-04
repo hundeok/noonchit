@@ -1,11 +1,20 @@
-// lib/shared/widgets/settings_modal.dart
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart'; // 🎯 HapticFeedback 추가
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/di/app_providers.dart';
 import '../../domain/entities/app_settings.dart';
-import 'theme_mode_segment.dart';
-import 'slider_position_segment.dart';
+
+// 🎨 기존 세그먼트 위젯들 Import (기존 구조 유지)
+import 'settings/theme_mode_segment.dart';
+import 'settings/slider_position_segment.dart';
+import 'settings/font_segment.dart';
+
+// 🆕 새로 만든 공통 위젯들 Import
+import 'settings/common_segment.dart';
+import 'settings/settings_constants.dart';
+
+// 📱 앱 정보 모달 Import
+import '../information/app_information_modal.dart';
 
 class SettingsModal {
   /// 설정 모달 표시
@@ -38,7 +47,7 @@ class _SettingsModalContent extends ConsumerWidget {
         ),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withValues(alpha: 0.1),
+            color: Colors.black.withAlpha(26),
             blurRadius: 10,
             spreadRadius: 2,
           ),
@@ -47,16 +56,9 @@ class _SettingsModalContent extends ConsumerWidget {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          // 🎨 설정 모달 헤더
-          _buildHeader(context),
-          
-          // 구분선
+          _buildHeader(context, ref),
           Divider(color: Colors.grey.shade300, height: 1),
-          
-          // 🎯 설정 내용
-          _buildContent(context, settings, controller),
-          
-          // 하단 여백
+          _buildContent(context, settings, controller, ref),
           SizedBox(height: MediaQuery.of(context).padding.bottom + 20),
         ],
       ),
@@ -64,12 +66,11 @@ class _SettingsModalContent extends ConsumerWidget {
   }
 
   /// 헤더 (제목 + 닫기 버튼)
-  Widget _buildHeader(BuildContext context) {
+  Widget _buildHeader(BuildContext context, WidgetRef ref) {
     return Container(
       padding: const EdgeInsets.symmetric(vertical: 12),
       child: Column(
         children: [
-          // 당김 핸들
           Container(
             width: 40,
             height: 4,
@@ -79,23 +80,17 @@ class _SettingsModalContent extends ConsumerWidget {
             ),
           ),
           const SizedBox(height: 12),
-          // 제목과 닫기 버튼
-          Row(
+          const Row(
             children: [
-              const SizedBox(width: 16),
-              const Icon(Icons.settings, color: Colors.orange),
-              const SizedBox(width: 8),
-              const Text(
+              SizedBox(width: 16),
+              Icon(Icons.settings, color: Colors.orange),
+              SizedBox(width: 8),
+              Text(
                 '설정',
                 style: TextStyle(
                   fontSize: 19,
                   fontWeight: FontWeight.bold,
                 ),
-              ),
-              const Spacer(),
-              IconButton(
-                icon: const Icon(Icons.close),
-                onPressed: () => Navigator.of(context).pop(),
               ),
             ],
           ),
@@ -104,338 +99,470 @@ class _SettingsModalContent extends ConsumerWidget {
     );
   }
 
-  /// 설정 컨텐츠
-  Widget _buildContent(BuildContext context, AppSettings settings, dynamic controller) {
+  /// 설정 컨텐츠 (스크롤 가능)
+  Widget _buildContent(BuildContext context, AppSettings settings, dynamic controller, WidgetRef ref) {
+    final scrollController = ScrollController();
+    final screenHeight = MediaQuery.of(context).size.height;
+    final isLandscape = MediaQuery.of(context).orientation == Orientation.landscape;
+    final bottomPadding = MediaQuery.of(context).padding.bottom;
+    
+    final maxHeight = isLandscape 
+        ? (screenHeight * 0.65 - bottomPadding).clamp(250.0, 300.0)
+        : 420.0;
+    
     return Container(
-      constraints: const BoxConstraints(maxHeight: 550),
-      child: SingleChildScrollView(
-        padding: const EdgeInsets.all(16),
-        child: Column(
-          children: [
-            // 🎨 테마 설정
-            Card(
-              elevation: 2,
-              child: ListTile(
-                leading: const Icon(Icons.palette, color: Colors.orange),
-                title: const Text(
-                  '테마',
-                  style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
-                ),
-                trailing: ThemeModeSegment(
-                  value: settings.themeMode,
-                  onChanged: (ThemeMode mode) {
-                    HapticFeedback.lightImpact(); // 🎯 햅틱 추가
-                    controller.setThemeMode(mode);
-                  },
-                ),
-              ),
-            ),
-            
-            const SizedBox(height: 12),
-            
-            // 💰 코인명 표시 방식
-            Card(
-              elevation: 2,
-              child: ListTile(
-                leading: const Icon(Icons.monetization_on, color: Colors.orange),
-                title: const Text(
-                  '코인명 표시',
-                  style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
-                ),
-                subtitle: Text(
-                  _getDisplayModeDescription(settings.displayMode),
-                  style: const TextStyle(fontSize: 11),
-                ),
-                trailing: _DisplayModeSegment(
-                  value: settings.displayMode,
-                  onChanged: (DisplayMode mode) {
-                    HapticFeedback.lightImpact(); // 🎯 햅틱 추가
-                    controller.setDisplayMode(mode);
-                  },
+      constraints: BoxConstraints(maxHeight: maxHeight),
+      child: RawScrollbar(
+        controller: scrollController,
+        thumbVisibility: false,
+        trackVisibility: false,
+        thickness: 6.4,
+        radius: const Radius.circular(3.2),
+        thumbColor: Colors.orange.withAlpha(128),
+        trackColor: Colors.transparent,
+        interactive: true,
+        minThumbLength: 40,
+        child: SingleChildScrollView(
+          controller: scrollController,
+          physics: const BouncingScrollPhysics(
+            parent: AlwaysScrollableScrollPhysics(),
+          ),
+          padding: const EdgeInsets.only(left: 16, right: 20, top: 16, bottom: 16),
+          child: Column(
+            children: [
+              // 🎨 테마 설정 (기존 위젯 유지)
+              SizedBox(
+                height: 80,
+                child: Card(
+                  elevation: 2,
+                  child: ListTile(
+                    leading: const Icon(Icons.palette, color: Colors.orange),
+                    title: const Text('테마', style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold)),
+                    subtitle: Text(
+                      SettingsHelpers.getThemeDescription(settings.themeMode),
+                      style: const TextStyle(fontSize: 11),
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    trailing: ThemeModeSegment(
+                      themeMode: settings.themeMode,
+                      onChanged: (ThemeMode mode) {
+                        if (ref.read(appSettingsProvider).isHapticEnabled) {
+                          HapticFeedback.lightImpact();
+                        }
+                        controller.setThemeMode(mode);
+                      },
+                    ),
+                  ),
                 ),
               ),
-            ),
-            
-            const SizedBox(height: 12),
-            
-            // 💵 금액 표시 방식
-            Card(
-              elevation: 2,
-              child: ListTile(
-                leading: const Icon(Icons.account_balance_wallet, color: Colors.orange),
-                title: const Text(
-                  '금액 표시',
-                  style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
-                ),
-                subtitle: Text(
-                  _getAmountDisplayModeDescription(settings.amountDisplayMode),
-                  style: const TextStyle(fontSize: 11),
-                ),
-                trailing: _AmountDisplayModeSegment(
-                  value: settings.amountDisplayMode,
-                  onChanged: (AmountDisplayMode mode) {
-                    HapticFeedback.lightImpact(); // 🎯 햅틱 추가
-                    controller.setAmountDisplayMode(mode);
-                  },
-                ),
-              ),
-            ),
-            
-            const SizedBox(height: 12),
-            
-            // 📱 화면 항상 켜기
-            Card(
-              elevation: 2,
-              child: SwitchListTile(
-                secondary: const Icon(Icons.screen_lock_rotation, color: Colors.orange),
-                title: const Text(
-                  '화면 항상 켜기',
-                  style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
-                ),
-                subtitle: Text(
-                  settings.keepScreenOn
-                    ? '화면이 자동으로 꺼지지 않습니다'
-                    : '시스템 설정에 따라 화면이 꺼집니다',
-                  style: const TextStyle(fontSize: 11),
-                ),
-                value: settings.keepScreenOn,
-                onChanged: (bool value) {
-                  HapticFeedback.lightImpact(); // 🎯 햅틱 추가
-                  controller.setKeepScreenOn(value);
-                },
-                activeColor: Colors.orange,
-              ),
-            ),
-            
-            const SizedBox(height: 12),
-            
-            // 🎚️ 슬라이더 위치
-            Card(
-              elevation: 2,
-              child: ListTile(
-                leading: const Icon(Icons.tune, color: Colors.orange),
-                title: const Text(
-                  '슬라이더 위치',
-                  style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
-                ),
-                subtitle: Text(
-                  '슬라이더를 ${_getSliderPositionText(settings.sliderPosition)}에 표시',
-                  style: const TextStyle(fontSize: 11),
-                ),
-                trailing: SliderPositionSegment(
-                  value: settings.sliderPosition,
-                  onChanged: (SliderPosition position) {
-                    HapticFeedback.lightImpact(); // 🎯 햅틱 추가
-                    controller.setSliderPosition(position);
-                  },
+              const SizedBox(height: 12),
+              
+              // 💰 코인명 표시 방식 (새 공통 위젯 사용)
+              SizedBox(
+                height: 80,
+                child: Card(
+                  elevation: 2,
+                  child: ListTile(
+                    leading: const Icon(Icons.monetization_on, color: Colors.orange),
+                    title: const Text('코인명 표시', style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold)),
+                    subtitle: Text(
+                      SettingsHelpers.getDisplayModeDescription(settings.displayMode),
+                      style: const TextStyle(fontSize: 11),
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    trailing: CommonMultiSegment<DisplayMode>(
+                      value: settings.displayMode,
+                      options: const [DisplayMode.ticker, DisplayMode.korean, DisplayMode.english],
+                      labels: const ['티커', '한글', '영문'],
+                      icons: const [Icons.code, Icons.language, Icons.translate],
+                      onChanged: (DisplayMode mode) {
+                        if (ref.read(appSettingsProvider).isHapticEnabled) {
+                          HapticFeedback.lightImpact();
+                        }
+                        controller.setDisplayMode(mode);
+                      },
+                    ),
+                  ),
                 ),
               ),
-            ),
-          ],
+              const SizedBox(height: 12),
+              
+              // 💵 금액 표시 방식 (새 공통 위젯 사용)
+              SizedBox(
+                height: 80,
+                child: Card(
+                  elevation: 2,
+                  child: ListTile(
+                    leading: const Icon(Icons.account_balance_wallet, color: Colors.orange),
+                    title: const Text('금액 표시', style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold)),
+                    subtitle: Text(
+                      SettingsHelpers.getAmountDisplayModeDescription(settings.amountDisplayMode),
+                      style: const TextStyle(fontSize: 11),
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    trailing: CommonMultiSegment<AmountDisplayMode>(
+                      value: settings.amountDisplayMode,
+                      options: const [AmountDisplayMode.number, AmountDisplayMode.icon],
+                      labels: const ['숫자', '아이콘'],
+                      icons: const [Icons.format_list_numbered, Icons.account_balance_wallet],
+                      onChanged: (AmountDisplayMode mode) {
+                        if (ref.read(appSettingsProvider).isHapticEnabled) {
+                          HapticFeedback.lightImpact();
+                        }
+                        controller.setAmountDisplayMode(mode);
+                      },
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+              
+              // 🔤 폰트 설정 (기존 위젯 유지)
+              SizedBox(
+                height: 80,
+                child: Card(
+                  elevation: 2,
+                  child: ListTile(
+                    leading: const Icon(Icons.font_download, color: Colors.orange),
+                    title: const Text('폰트', style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold)),
+                    subtitle: Text(
+                      SettingsHelpers.getFontDescription(settings.fontFamily),
+                      style: const TextStyle(fontSize: 11),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    trailing: FontSegment(
+                      value: settings.fontFamily,
+                      onChanged: (FontFamily font) {
+                        if (ref.read(appSettingsProvider).isHapticEnabled) {
+                          HapticFeedback.lightImpact();
+                        }
+                        controller.setFontFamily(font);
+                      },
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+              
+              // 🎚️ 슬라이더 위치 (기존 위젯 유지)
+              SizedBox(
+                height: 80,
+                child: Card(
+                  elevation: 2,
+                  child: ListTile(
+                    leading: const Icon(Icons.tune, color: Colors.orange),
+                    title: const Text('슬라이더 위치', style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold)),
+                    subtitle: Text(
+                      SettingsHelpers.getSliderPositionDescription(settings.sliderPosition),
+                      style: const TextStyle(fontSize: 11),
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    trailing: SliderPositionSegment(
+                      value: settings.sliderPosition,
+                      onChanged: (SliderPosition position) {
+                        if (ref.read(appSettingsProvider).isHapticEnabled) {
+                          HapticFeedback.lightImpact();
+                        }
+                        controller.setSliderPosition(position);
+                      },
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+              
+              // ✨ 블링크 효과
+              SizedBox(
+                height: 80,
+                child: Card(
+                  elevation: 2,
+                  child: SwitchListTile(
+                    secondary: const Icon(Icons.auto_awesome, color: Colors.orange),
+                    title: const Text('블링크 효과', style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold)),
+                    subtitle: Text(
+                      SettingsHelpers.getBlinkDescription(settings.blinkEnabled),
+                      style: const TextStyle(fontSize: 11),
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    value: settings.blinkEnabled,
+                    onChanged: (bool value) {
+                      if (ref.read(appSettingsProvider).isHapticEnabled) {
+                        HapticFeedback.lightImpact();
+                      }
+                      controller.setBlinkEnabled(value);
+                    },
+                    activeColor: Colors.orange,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+
+              // 🔥 HOT 아이콘
+              SizedBox(
+                height: 80,
+                child: Card(
+                  elevation: 2,
+                  child: SwitchListTile(
+                    secondary: const Icon(Icons.local_fire_department, color: Colors.orange),
+                    title: const Text('HOT 아이콘', style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold)),
+                    subtitle: Text(
+                      SettingsHelpers.getHotIconDescription(settings.hotEnabled),
+                      style: const TextStyle(fontSize: 11),
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    value: settings.hotEnabled,
+                    onChanged: (bool value) {
+                      if (ref.read(appSettingsProvider).isHapticEnabled) {
+                        HapticFeedback.lightImpact();
+                      }
+                      controller.setHotEnabled(value);
+                    },
+                    activeColor: Colors.orange,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+              
+              // 📱 화면 항상 켜기
+              SizedBox(
+                height: 80,
+                child: Card(
+                  elevation: 2,
+                  child: SwitchListTile(
+                    secondary: const Icon(Icons.screen_lock_rotation, color: Colors.orange),
+                    title: const Text('화면 항상 켜기', style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold)),
+                    subtitle: Text(
+                      SettingsHelpers.getKeepScreenDescription(settings.keepScreenOn),
+                      style: const TextStyle(fontSize: 11),
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    value: settings.keepScreenOn,
+                    onChanged: (bool value) {
+                      if (ref.read(appSettingsProvider).isHapticEnabled) {
+                        HapticFeedback.lightImpact();
+                      }
+                      controller.setKeepScreenOn(value);
+                    },
+                    activeColor: Colors.orange,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+              
+              // 📳 햅틱 피드백
+              SizedBox(
+                height: 80,
+                child: Card(
+                  elevation: 2,
+                  child: SwitchListTile(
+                    secondary: const Icon(Icons.vibration, color: Colors.orange),
+                    title: const Text('햅틱 피드백', style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold)),
+                    subtitle: Text(
+                      SettingsHelpers.getHapticDescription(settings.isHapticEnabled),
+                      style: const TextStyle(fontSize: 11),
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    value: settings.isHapticEnabled,
+                    onChanged: (bool value) {
+                      if (settings.isHapticEnabled) {
+                        HapticFeedback.lightImpact();
+                      }
+                      controller.setHapticEnabled(value);
+                    },
+                    activeColor: Colors.orange,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+              
+              // 🔒 화면 회전 잠금
+              SizedBox(
+                height: 80,
+                child: Card(
+                  elevation: 2,
+                  child: SwitchListTile(
+                    secondary: const Icon(Icons.screen_rotation_outlined, color: Colors.orange),
+                    title: const Text('세로 모드 고정', style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold)),
+                    subtitle: Text(
+                      SettingsHelpers.getPortraitLockDescription(settings.isPortraitLocked),
+                      style: const TextStyle(fontSize: 11),
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    value: settings.isPortraitLocked,
+                    onChanged: (bool value) {
+                      if (ref.read(appSettingsProvider).isHapticEnabled) {
+                        HapticFeedback.lightImpact();
+                      }
+                      controller.setPortraitLocked(value);
+                    },
+                    activeColor: Colors.orange,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+              
+              // 🔧 캐시 비우기 (새 공통 위젯 사용)
+              SizedBox(
+                height: 80,
+                child: Card(
+                  elevation: 2,
+                  child: ListTile(
+                    leading: const Icon(Icons.cleaning_services, color: Colors.orange),
+                    title: const Text('캐시 비우기', style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold)),
+                    subtitle: const Text(
+                      '임시 데이터를 삭제합니다',
+                      style: TextStyle(fontSize: 11),
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    trailing: CommonActionSegment(
+                      icon: Icons.cleaning_services,
+                      label: '비우기',
+                      onPressed: () {
+                        if (ref.read(appSettingsProvider).isHapticEnabled) {
+                          HapticFeedback.lightImpact();
+                        }
+                        _showClearCacheDialog(context, controller, ref);
+                      },
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+              
+              // 🔄 설정 초기화 (새 공통 위젯 사용)
+              SizedBox(
+                height: 80,
+                child: Card(
+                  elevation: 2,
+                  child: ListTile(
+                    leading: const Icon(Icons.restore, color: Colors.orange),
+                    title: const Text('설정 초기화', style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold)),
+                    subtitle: const Text(
+                      '모든 설정을 기본값으로 되돌립니다',
+                      style: TextStyle(fontSize: 11),
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    trailing: CommonActionSegment(
+                      icon: Icons.restore,
+                      label: '초기화',
+                      onPressed: () {
+                        if (ref.read(appSettingsProvider).isHapticEnabled) {
+                          HapticFeedback.lightImpact();
+                        }
+                        _showResetDialog(context, controller, ref);
+                      },
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 12),
+              
+              // 📱 앱 정보 (새 공통 위젯 사용)
+              SizedBox(
+                height: 80,
+                child: Card(
+                  elevation: 2,
+                  child: ListTile(
+                    leading: const Icon(Icons.info_outline, color: Colors.orange),
+                    title: const Text('앱 정보', style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold)),
+                    subtitle: const Text(
+                      '버전 정보 및 개발자 정보를 확인합니다',
+                      style: TextStyle(fontSize: 11),
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    trailing: CommonActionSegment(
+                      icon: Icons.info_outline,
+                      label: '정보',
+                      onPressed: () {
+                        if (ref.read(appSettingsProvider).isHapticEnabled) {
+                          HapticFeedback.lightImpact();
+                        }
+                        AppInformationModal.show(context);
+                      },
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
   }
 
-  /// 🆕 표시 모드 설명 텍스트
-  String _getDisplayModeDescription(DisplayMode mode) {
-    switch (mode) {
-      case DisplayMode.ticker:
-        return 'BTC, ETH, XRP\n형태로 표시';
-      case DisplayMode.korean:
-        return '비트코인, 이더리움, 리플\n형태로 표시';
-      case DisplayMode.english:
-        return 'Bitcoin, Ethereum, Ripple\n형태로 표시';
-    }
-  }
-
-  /// 💰 금액 표시 방식 설명 텍스트
-  String _getAmountDisplayModeDescription(AmountDisplayMode mode) {
-    switch (mode) {
-      case AmountDisplayMode.number:
-        return '1,234만\n숫자로 표시';
-      case AmountDisplayMode.icon:
-        return '💵 지폐 아이콘\n으로 표시';
-    }
-  }
-
-  /// 슬라이더 위치 텍스트
-  String _getSliderPositionText(SliderPosition position) {
-    return position.name == 'top' ? '상단' : '하단';
-  }
-}
-
-/// 🆕 표시 모드 세그먼트 위젯
-class _DisplayModeSegment extends StatelessWidget {
-  final DisplayMode value;
-  final ValueChanged<DisplayMode> onChanged;
-
-  const _DisplayModeSegment({
-    required this.value,
-    required this.onChanged,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: Colors.grey.shade300),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          _buildSegmentButton(
-            context: context,
-            mode: DisplayMode.ticker,
-            label: '티커',
-            icon: Icons.code,
+  // 🗂️ 다이얼로그 메서드들 (기존 유지)
+  void _showClearCacheDialog(BuildContext context, dynamic controller, WidgetRef ref) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('캐시 비우기'),
+        content: const Text('임시 데이터를 삭제하시겠습니까?\n앱 성능이 향상될 수 있습니다.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('취소'),
           ),
-          _buildDivider(),
-          _buildSegmentButton(
-            context: context,
-            mode: DisplayMode.korean,
-            label: '한글',
-            icon: Icons.language,
-          ),
-          _buildDivider(),
-          _buildSegmentButton(
-            context: context,
-            mode: DisplayMode.english,
-            label: '영문',
-            icon: Icons.translate,
+          TextButton(
+            onPressed: () async {
+              if (ref.read(appSettingsProvider).isHapticEnabled) {
+                HapticFeedback.lightImpact();
+              }
+              Navigator.of(context).pop();
+              await controller.clearCache();
+              if (context.mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('캐시가 삭제되었습니다')),
+                );
+              }
+            },
+            child: const Text('삭제', style: TextStyle(color: Colors.red)),
           ),
         ],
       ),
     );
   }
 
-  Widget _buildSegmentButton({
-    required BuildContext context,
-    required DisplayMode mode,
-    required String label,
-    required IconData icon,
-  }) {
-    final isSelected = value == mode;
-    final color = isSelected ? Colors.orange : Colors.grey.shade600;
-    final backgroundColor = isSelected ? Colors.orange.withValues(alpha: 0.1) : Colors.transparent;
-
-    return GestureDetector(
-      onTap: () => onChanged(mode),
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-        decoration: BoxDecoration(
-          color: backgroundColor,
-          borderRadius: BorderRadius.circular(6),
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(icon, size: 16, color: color),
-            const SizedBox(height: 2),
-            Text(
-              label,
-              style: TextStyle(
-                fontSize: 10,
-                color: color,
-                fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildDivider() {
-    return Container(
-      width: 1,
-      height: 30,
-      color: Colors.grey.shade300,
-    );
-  }
-}
-
-/// 💰 금액 표시 방식 세그먼트 위젯
-class _AmountDisplayModeSegment extends StatelessWidget {
-  final AmountDisplayMode value;
-  final ValueChanged<AmountDisplayMode> onChanged;
-
-  const _AmountDisplayModeSegment({
-    required this.value,
-    required this.onChanged,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: Colors.grey.shade300),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          _buildSegmentButton(
-            context: context,
-            mode: AmountDisplayMode.number,
-            label: '숫자',
-            icon: Icons.format_list_numbered,
+  void _showResetDialog(BuildContext context, dynamic controller, WidgetRef ref) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('설정 초기화'),
+        content: const Text('모든 설정을 기본값으로 되돌리시겠습니까?\n이 작업은 되돌릴 수 없습니다.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('취소'),
           ),
-          _buildDivider(),
-          _buildSegmentButton(
-            context: context,
-            mode: AmountDisplayMode.icon,
-            label: '아이콘',
-            icon: Icons.account_balance_wallet,
+          TextButton(
+            onPressed: () async {
+              if (ref.read(appSettingsProvider).isHapticEnabled) {
+                HapticFeedback.lightImpact();
+              }
+              Navigator.of(context).pop();
+              await controller.resetAllSettings();
+              if (context.mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('설정이 초기화되었습니다')),
+                );
+              }
+            },
+            child: const Text('초기화', style: TextStyle(color: Colors.red)),
           ),
         ],
       ),
-    );
-  }
-
-  Widget _buildSegmentButton({
-    required BuildContext context,
-    required AmountDisplayMode mode,
-    required String label,
-    required IconData icon,
-  }) {
-    final isSelected = value == mode;
-    final color = isSelected ? Colors.orange : Colors.grey.shade600;
-    final backgroundColor = isSelected ? Colors.orange.withValues(alpha: 0.1) : Colors.transparent;
-
-    return GestureDetector(
-      onTap: () => onChanged(mode),
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-        decoration: BoxDecoration(
-          color: backgroundColor,
-          borderRadius: BorderRadius.circular(6),
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(icon, size: 18, color: color),
-            const SizedBox(height: 2),
-            Text(
-              label,
-              style: TextStyle(
-                fontSize: 11,
-                color: color,
-                fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildDivider() {
-    return Container(
-      width: 1,
-      height: 36,
-      color: Colors.grey.shade300,
     );
   }
 }

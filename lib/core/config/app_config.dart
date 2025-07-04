@@ -231,4 +231,97 @@ class AppConfig {
   // ──────────────── Surge Detection ────────────────
   static const double surgeThresholdPercent = 1.1;
   static const Duration surgeWindowDuration = Duration(minutes: 1);
+
+  // ──────────────── Signal Detection Configuration ────────────────
+  
+  /// Signal 패턴 목록 (슬라이더 순서와 동일)
+  static const List<String> signalPatterns = [
+    'surge', 'flashFire', 'stackUp', 'stealthIn', 'blackHole', 'reboundShot'
+  ];
+
+  /// Signal 패턴 표시명
+  static const Map<String, String> signalPatternNames = {
+    'surge': '급등',
+    'flashFire': '불티🔥',
+    'stackUp': '스택업💰',
+    'stealthIn': '침투자👣',
+    'blackHole': '블랙홀🕳️',
+    'reboundShot': '쇼트터치⚡',
+  };
+
+  /// Signal 패턴 설명
+  static const Map<String, String> signalPatternDescriptions = {
+    'surge': '1분 전 대비 1.1% 이상 상승',
+    'flashFire': '3분 거래대금 급증 감지',
+    'stackUp': '연속 매집 패턴 감지',
+    'stealthIn': '은밀한 유입 감지',
+    'blackHole': '이상 체결 패턴 감지',
+    'reboundShot': '반등 타이밍 감지',
+  };
+
+  /// 패턴별 기본 임계값
+  static const Map<String, double> signalThresholds = {
+    'surge': 1.1,           // 1.1% 상승 (기존 surgeThresholdPercent와 동일)
+    'flashFire': 2.0,       // 2배 급증
+    'stackUp': 3.0,         // 3연속
+    'stealthIn': 5000000.0, // 500만원
+    'blackHole': 0.1,       // 0.1% 변동
+    'reboundShot': 1.5,     // 1.5% 급락 후 반등
+  };
+
+  /// 패턴별 시간 윈도우 (분)
+  static const Map<String, int> signalTimeWindows = {
+    'surge': 1,       // 1분
+    'flashFire': 3,   // 3분
+    'stackUp': 3,     // 3분 (1분씩 3번)
+    'stealthIn': 5,   // 5분
+    'blackHole': 3,   // 3분
+    'reboundShot': 2, // 2분 (급락 1분 + 반등 1분)
+  };
+
+  /// Signal 성능 최적화 상수
+  static const int maxSignalsPerPattern = 100;
+  static const int signalHistorySize = 200;
+  static const int signalCacheSize = 1000;
+  static const Duration signalHistoryRetention = Duration(minutes: 10);
+  static const Duration signalBatchInterval = Duration(milliseconds: 100); // Trade와 동일
+
+  /// Signal 분석용 최소값들
+  static const int minTradeCountForAnalysis = 10;
+  static const int avgIntervalThreshold = 30; // 초
+  static const double blackHoleMinAmount = 50000000.0; // 5천만원
+
+  /// Signal 패턴 인덱스로 패턴명 조회
+  static String getSignalPatternByIndex(int index) {
+    if (index < 0 || index >= signalPatterns.length) {
+      return signalPatterns.first; // 기본값
+    }
+    return signalPatterns[index];
+  }
+
+  /// Signal 패턴명으로 인덱스 조회
+  static int getSignalPatternIndex(String pattern) {
+    final index = signalPatterns.indexOf(pattern);
+    return index >= 0 ? index : 0; // 없으면 첫 번째 패턴
+  }
+
+  /// Signal 패턴별 임계값 조회
+  static double getSignalThreshold(String pattern) {
+    return signalThresholds[pattern] ?? signalThresholds['surge']!;
+  }
+
+  /// Signal 패턴별 시간 윈도우 조회
+  static int getSignalTimeWindow(String pattern) {
+    return signalTimeWindows[pattern] ?? signalTimeWindows['surge']!;
+  }
+
+  /// Signal 패턴 표시명 조회
+  static String getSignalPatternName(String pattern) {
+    return signalPatternNames[pattern] ?? pattern;
+  }
+
+  /// Signal 패턴 설명 조회
+  static String getSignalPatternDescription(String pattern) {
+    return signalPatternDescriptions[pattern] ?? '';
+  }
 }

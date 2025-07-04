@@ -204,8 +204,8 @@ class VolumeRepositoryImpl implements VolumeRepository {
     // 🆕 볼륨 관련 초기화
     _initializeVolumeTracking();
     
-    // 🆕 볼륨 리셋 체크 타이머 (30초마다)
-    Timer.periodic(const Duration(seconds: 30), (_) => _checkVolumeResets());
+    // 🆕 볼륨 리셋 체크 타이머 (15초마다)
+    Timer.periodic(const Duration(seconds:15), (_) => _checkVolumeResets());
   }
 
   // ═══════════════════════════════════════════════════════════════════════════════
@@ -358,7 +358,7 @@ class VolumeRepositoryImpl implements VolumeRepository {
     }
   }
 
-  /// 시간대별 리셋 체크 (30초마다 호출)
+  /// 시간대별 리셋 체크 (15초마다 호출)
   void _checkVolumeResets() {
     final now = DateTime.now();
     
@@ -722,20 +722,33 @@ class Volume extends Equatable {
       timeFrameStartMs: timeFrameStartMs ?? this.timeFrameStartMs,
     );
   }
-}\n\n// ====== lib/presentation/providers/volume_provider.dart ======\n
-\n\n// ====== lib/presentation/controllers/volume_controller.dart ======\n
+}\n\n// ====== lib/presentation/controllers/volume_controller.dart ======\n
 // lib/presentation/controllers/volume_controller.dart
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/config/app_config.dart';
 import '../../core/di/volume_provider.dart'; // 🆕 volume_provider 사용
 import '../../domain/entities/volume.dart';
 
 /// 🎯 심플한 볼륨 컨트롤러 - VolumeTimeFrameController 활용
-class VolumeController {
+class VolumeController extends StateNotifier<VolumeControllerState> {
   final Ref ref;
-  VolumeController(this.ref);
+  
+  VolumeController(this.ref) : super(const VolumeControllerState());
 
-  /// 시간대 설정
+  /// 🆕 Top 50/100 토글
+  void toggleTopLimit() {
+    state = state.copyWith(isTop100: !state.isTop100);
+  }
+
+  /// 🆕 현재 표시 개수 (50 또는 100)
+  int get currentLimit => state.isTop100 ? 100 : 50;
+
+  /// 🆕 현재 표시 모드 이름
+  String get currentLimitName => state.isTop100 ? 'Top 100' : 'Top 50';
+
+  /// 🆕 Top 100 모드 여부
+  bool get isTop100 => state.isTop100;
   void setTimeFrame(String timeFrame, int index) {
     // volume_provider.dart의 VolumeTimeFrameController 사용
     final controller = ref.read(volumeTimeFrameController);
@@ -756,11 +769,13 @@ class VolumeController {
     return ref.read(volumeTimeFrameController).getTimeFrameName(timeFrame);
   }
 
-  /// 볼륨 데이터를 거래량 순으로 정렬
+  /// 볼륨 데이터를 거래량 순으로 정렬 + 🎯 동적 순위 제한 (Top 50/100)
   List<Volume> sortVolumeData(List<Volume> volumeData) {
     final filteredData = volumeData.where((v) => v.totalVolume > 0).toList();
     filteredData.sort((a, b) => b.totalVolume.compareTo(a.totalVolume)); // 내림차순
-    return filteredData;
+    
+    // 🚀 현재 설정에 따라 50개 또는 100개로 제한
+    return filteredData.take(currentLimit).toList();
   }
 
   /// 코인명 필터링
@@ -768,6 +783,7 @@ class VolumeController {
     if (marketFilter == null || marketFilter.isEmpty) {
       return sortedData;
     }
+    
     final upper = marketFilter.toUpperCase();
     return sortedData.where((volume) => volume.market.contains(upper)).toList();
   }
@@ -787,8 +803,25 @@ class VolumeController {
   }
 }
 
-/// Provider 선언 - 심플하게!
-final volumeControllerProvider = Provider((ref) => VolumeController(ref));\n\n// ====== lib/presentation/pages/volume_page.dart ======\n
+/// 🆕 VolumeController 상태 관리
+class VolumeControllerState {
+  final bool isTop100;
+
+  const VolumeControllerState({
+    this.isTop100 = false, // 기본값: Top 50
+  });
+
+  VolumeControllerState copyWith({
+    bool? isTop100,
+  }) {
+    return VolumeControllerState(
+      isTop100: isTop100 ?? this.isTop100,
+    );
+  }
+}
+
+/// Provider 선언 - StateNotifierProvider로 변경!
+final volumeControllerProvider = StateNotifierProvider<VolumeController, VolumeControllerState>((ref) => VolumeController(ref));\n\n// ====== lib/presentation/pages/volume_page.dart ======\n
 // lib/presentation/pages/volume_page.dart
 
 import 'package:flutter/material.dart';
@@ -821,16 +854,16 @@ class VolumePage extends ConsumerWidget {
     // 2) 볼륨 스트림
     final volumesAsync = ref.watch(volumeDataProvider);
     
-    // 3) UI 상태 컨트롤러 (필터/정렬)
-    final uiController = ref.watch(volumeControllerProvider);
+    // 3) UI 상태 컨트롤러 (필터/정렬) - StateNotifier로 변경됨
+    final uiController = ref.watch(volumeControllerProvider.notifier);
     
     // 4) 🆕 슬라이더 위치 설정 읽기
     final sliderPosition = ref.watch(appSettingsProvider).sliderPosition;
     
     // ✅ MainPage에서 전달받은 ScrollController 사용 (로컬 생성 제거)
 
-    // 🆕 슬라이더 위젯 생성
-    final sliderWidget = _buildSliderWidget(timeFrames, index, timeFrameCtrl);
+    // 🆕 슬라이더 위젯 생성 - 토글 추가
+    final sliderWidget = _buildSliderWidget(timeFrames, index, timeFrameCtrl, ref);
     
     // 🆕 볼륨 리스트 위젯 생성
     final volumeListWidget = _buildVolumeList(volumesAsync, uiController, scrollController, timeFrames, index, context);
@@ -853,22 +886,42 @@ class VolumePage extends ConsumerWidget {
     );
   }
 
-  /// 🆕 슬라이더 위젯 생성 (시간대 선택 + 카운트다운)
-  Widget _buildSliderWidget(List<String> timeFrames, int index, VolumeTimeFrameController timeFrameCtrl) {
+  /// 🆕 슬라이더 위젯 생성 (시간대 선택 + Top 50/100 토글 + 카운트다운)
+  Widget _buildSliderWidget(List<String> timeFrames, int index, VolumeTimeFrameController timeFrameCtrl, WidgetRef ref) {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // 🎯 시간대와 카운트다운을 Row로 배치
+          // 🎯 시간대, 토글, 카운트다운을 Row로 배치 (3등분)
           Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Text(
-                '시간대: ${AppConfig.timeFrameNames[AppConfig.timeFrames[index]] ?? timeFrames[index]}',
-                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+              // 좌측: 시간대 (1/3 영역)
+              Expanded(
+                flex: 1,
+                child: Text(
+                  '시간대: ${AppConfig.timeFrameNames[AppConfig.timeFrames[index]] ?? timeFrames[index]}',
+                  style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                  overflow: TextOverflow.ellipsis,
+                ),
               ),
-              _buildCountdownWidget(timeFrameCtrl),
+              
+              // 🆕 중앙: Top 50/100 토글 버튼 (1/3 영역, 정중앙 정렬)
+              Expanded(
+                flex: 1,
+                child: Center(
+                  child: _buildTopLimitToggle(ref),
+                ),
+              ),
+              
+              // 우측: 카운트다운 (1/3 영역, 우측 정렬)
+              Expanded(
+                flex: 1,
+                child: Align(
+                  alignment: Alignment.centerRight,
+                  child: _buildCountdownWidget(timeFrameCtrl),
+                ),
+              ),
             ],
           ),
           Slider(
@@ -888,22 +941,64 @@ class VolumePage extends ConsumerWidget {
     );
   }
 
-  /// 🎯 카운트다운 위젯 생성
+  /// 🆕 Top 50/100 토글 버튼
+  Widget _buildTopLimitToggle(WidgetRef ref) {
+    final uiController = ref.watch(volumeControllerProvider.notifier);
+    final isTop100 = ref.watch(volumeControllerProvider).isTop100;
+    final currentName = uiController.currentLimitName;
+    
+    return GestureDetector(
+      onTap: () {
+        HapticFeedback.lightImpact(); // 🎯 light haptic 추가
+        uiController.toggleTopLimit();
+      },
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+        decoration: BoxDecoration(
+          color: isTop100 ? Colors.orange : Colors.transparent, // 🎯 Top 100일 때 주황
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(
+            color: Colors.orange, // 🎯 둘 다 주황 테두리
+            width: 1,
+          ),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              currentName,
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+                color: isTop100 ? Colors.white : Colors.orange, // 🎯 Top 50일 때 주황 텍스트
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 🎯 카운트다운 위젯 생성 (흔들림 방지 적용)
   Widget _buildCountdownWidget(VolumeTimeFrameController timeFrameCtrl) {
     final nextResetTime = timeFrameCtrl.getNextResetTime();
     
     if (nextResetTime == null) {
       return Row(
         mainAxisSize: MainAxisSize.min,
-        children: const [
-          Icon(Icons.access_time, size: 16, color: Colors.grey),
-          SizedBox(width: 4),
-          Text(
-            '--:--',
-            style: TextStyle(
-              fontSize: 14,
-              color: Colors.grey,
-              fontWeight: FontWeight.w500,
+        children: [
+          const Icon(Icons.access_time, size: 16, color: Colors.grey),
+          const SizedBox(width: 4),
+          Container(
+            width: 48, // 🎯 42 → 48로 더 넓히기
+            alignment: Alignment.center,
+            child: const Text(
+              '--:--',
+              style: TextStyle(
+                fontSize: 12, // 🎯 13 → 12로 더 줄이기
+                color: Colors.grey,
+                fontWeight: FontWeight.w500,
+              ),
             ),
           ),
         ],
@@ -916,15 +1011,19 @@ class VolumePage extends ConsumerWidget {
     if (remaining.isNegative) {
       return Row(
         mainAxisSize: MainAxisSize.min,
-        children: const [
-          Icon(Icons.access_time, size: 16, color: Colors.orange),
-          SizedBox(width: 4),
-          Text(
-            '00:00',
-            style: TextStyle(
-              fontSize: 14,
-              color: Colors.orange,
-              fontWeight: FontWeight.w500,
+        children: [
+          const Icon(Icons.access_time, size: 16, color: Colors.orange),
+          const SizedBox(width: 4),
+          Container(
+            width: 42, // 🎯 40 → 42로 조금 넓히기
+            alignment: Alignment.center,
+            child: const Text(
+              '00:00',
+              style: TextStyle(
+                fontSize: 13, // 🎯 14 → 13으로 조금 줄이기
+                color: Colors.orange,
+                fontWeight: FontWeight.w500,
+              ),
             ),
           ),
         ],
@@ -933,18 +1032,24 @@ class VolumePage extends ConsumerWidget {
 
     final minutes = remaining.inMinutes;
     final seconds = remaining.inSeconds % 60;
+    final minutesStr = minutes.toString().padLeft(2, '0');
+    final secondsStr = seconds.toString().padLeft(2, '0');
     
     return Row(
       mainAxisSize: MainAxisSize.min,
       children: [
         const Icon(Icons.access_time, size: 16, color: Colors.orange),
         const SizedBox(width: 4),
-        Text(
-          '${minutes.toString().padLeft(2, '0')}:${seconds.toString().padLeft(2, '0')}',
-          style: const TextStyle(
-            fontSize: 14,
-            color: Colors.orange,
-            fontWeight: FontWeight.w500,
+        Container(
+          width: 52, // 🎯 48 → 52로 4px 더 넓히기 (6자리 대응)
+          alignment: Alignment.center,
+          child: Text(
+            '$minutesStr:$secondsStr',
+            style: const TextStyle(
+              fontSize: 12, // 🎯 13 → 12로 더 줄이기
+              color: Colors.orange,
+              fontWeight: FontWeight.w500,
+            ),
           ),
         ),
       ],
@@ -962,7 +1067,7 @@ class VolumePage extends ConsumerWidget {
   ) {
     return volumesAsync.when(
       data: (volumes) {
-        // List<Volume>을 정렬된 리스트로 변환
+        // List<Volume>을 정렬된 리스트로 변환 (동적 순위 제한 적용)
         final sortedVolumes = uiController.sortVolumeData(volumes);
         
         if (sortedVolumes.isEmpty) {
@@ -1007,7 +1112,7 @@ class VolumePage extends ConsumerWidget {
     );
   }
 }\n\n// ====== lib/presentation/widgets/volume_tile.dart ======\n
-// lib/presentation/widgets/volume_tile.dart
+// lib/presentation/widgets/volume_tile.dart (한 줄로 수정됨)
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -1019,9 +1124,6 @@ import '../../shared/widgets/coin_logo_provider.dart'; // 🆕 코인 로고 프
 final Map<String, int> _previousRanks = {};
 
 class VolumeTile extends ConsumerStatefulWidget {
-  // 포맷터를 static으로 캐싱해 매번 새로 생성하지 않도록 최적화
-  static final _integerFormat = NumberFormat('#,###'); // 정수용
-  
   final String market; // 🔄 Volume 엔티티 대신 단순 데이터
   final double totalVolume;
   final int rank; // 🎯 순위 (1위부터)
@@ -1120,20 +1222,36 @@ class _VolumeTileState extends ConsumerState<VolumeTile>
     );
   }
 
-  // 🎯 거래량 포맷팅 (억 단위 간소화)
+  // 🎯 거래량 포맷팅 (새로운 통합 규칙)
   String _formatVolume(double totalVolume) {
-    if (totalVolume >= 100000000) { // 1억 이상
+    if (totalVolume < 0) return '0원';
+    
+    final decimalFormat = NumberFormat('#,##0.##'); // 소수점 2자리
+    final integerFormat = NumberFormat('#,###'); // 정수용 콤마
+    
+    // 1만원 미만: 1원 ~ 9,999원 (콤마 포함)
+    if (totalVolume < 10000) {
+      return '${integerFormat.format(totalVolume.toInt())}원';
+    }
+    // 1만원 ~ 9999만원: x,xxx만원 (콤마 포함)
+    else if (totalVolume < 100000000) {
+      final man = (totalVolume / 10000).toInt();
+      return '${integerFormat.format(man)}만원';
+    }
+    // 1억 ~ 9999억: x.xx억원 (소수점 2자리)
+    else if (totalVolume < 1000000000000) {
       final eok = totalVolume / 100000000;
-      if (eok >= 10) {
-        return '${eok.toInt()}억원'; // "12억원"
-      } else {
-        return '${eok.toStringAsFixed(1)}억원'; // "1.2억원"
-      }
-    } else if (totalVolume >= 10000000) { // 1천만 이상
-      final man = totalVolume / 10000;
-      return '${man.toInt()}만원'; // "5,000만원"
-    } else {
-      return '${VolumeTile._integerFormat.format(totalVolume)}원'; // "500만원"
+      return '${decimalFormat.format(eok)}억원';
+    }
+    // 1조 ~ 9999조: x.xx조원 (소수점 2자리)
+    else if (totalVolume < 10000000000000000) {
+      final jo = totalVolume / 1000000000000;
+      return '${decimalFormat.format(jo)}조원';
+    }
+    // 1경 이상: x,xxx경원 (콤마 포함)
+    else {
+      final gyeong = (totalVolume / 10000000000000000).toInt();
+      return '${integerFormat.format(gyeong)}경원';
     }
   }
 
@@ -1203,7 +1321,6 @@ class _VolumeTileState extends ConsumerState<VolumeTile>
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final onSurface = theme.colorScheme.onSurface;
-    final onSurface70 = onSurface.withValues(alpha: 0.7);
     
     // 🎯 깜빡임 애니메이션 (설정에 따라)
     Widget cardWidget = Card(
@@ -1258,7 +1375,7 @@ class _VolumeTileState extends ConsumerState<VolumeTile>
                       Text(
                         widget.market.replaceFirst('KRW-', ''), // 항상 티커는 표시
                         style: TextStyle(
-                          color: onSurface70,
+                          color: onSurface.withValues(alpha: 0.7),
                           fontSize: 12,
                         ),
                       ),

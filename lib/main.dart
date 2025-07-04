@@ -1,10 +1,9 @@
 // lib/main.dart
-
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart'; // 🆕 SystemChrome 추가
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:firebase_core/firebase_core.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-
 import 'core/config/app_config.dart';
 import 'core/services/hive_service.dart';
 import 'core/bridge/signal_bus.dart';
@@ -26,17 +25,20 @@ Future<void> main() async {
   final prefs = await SharedPreferences.getInstance();
   final signalBus = SignalBus();
 
-  // 4) ProviderContainer 생성 및 오버라이드
+  // 🆕 4) 초기 화면 회전 설정 적용
+  await _applyInitialOrientationSettings(prefs);
+
+  // 5) ProviderContainer 생성 및 오버라이드
   final container = ProviderContainer(
     observers: [AppProviderObserver()],
     overrides: [
-      hiveServiceProvider.overrideWithValue(hive),           // 🎯 NEW
+      hiveServiceProvider.overrideWithValue(hive), // 🎯 NEW
       sharedPreferencesProvider.overrideWithValue(prefs),
       signalBusProvider.overrideWithValue(signalBus),
     ],
   );
 
-  // 5) 앱 실행
+  // 6) 앱 실행
   runApp(
     UncontrolledProviderScope(
       container: container,
@@ -45,4 +47,25 @@ Future<void> main() async {
       ),
     ),
   );
+}
+
+/// 🆕 초기 화면 회전 설정 적용
+Future<void> _applyInitialOrientationSettings(SharedPreferences prefs) async {
+  final isPortraitLocked = prefs.getBool('portraitLocked') ?? false;
+  
+  if (isPortraitLocked) {
+    // 세로 모드만 허용
+    await SystemChrome.setPreferredOrientations([
+      DeviceOrientation.portraitUp,
+      DeviceOrientation.portraitDown,
+    ]);
+  } else {
+    // 모든 방향 허용
+    await SystemChrome.setPreferredOrientations([
+      DeviceOrientation.landscapeRight,
+      DeviceOrientation.landscapeLeft,
+      DeviceOrientation.portraitUp,
+      DeviceOrientation.portraitDown,
+    ]);
+  }
 }

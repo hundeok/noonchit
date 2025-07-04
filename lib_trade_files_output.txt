@@ -1275,7 +1275,6 @@ class Trade extends Equatable {
   /// DateTime 변환
   DateTime get timestamp => DateTime.fromMillisecondsSinceEpoch(timestampMs);
 }
-\n\n// ====== lib/presentation/providers/trade_provider.dart ======\n
 \n\n// ====== lib/presentation/controllers/trade_controller.dart ======\n
 import 'dart:async';
 import 'package:flutter_riverpod/flutter_riverpod.dart';

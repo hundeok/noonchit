@@ -1,11 +1,8 @@
-import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
-import 'package:firebase_messaging/firebase_messaging.dart';
 
 import '../config/app_config.dart';
-import '../di/app_providers.dart';
 import '../../shared/widgets/notification_service.dart';
 import '../../presentation/pages/main_page.dart'; // 🆕 MainPage 사용
 

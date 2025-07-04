@@ -1,0 +1,5797 @@
+\n\n// ====== lib/presentation/controllers/surge_controller.dart ======\n
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../core/di/surge_provider.dart';
+import '../../domain/entities/surge.dart';
+import '../../shared/utils/rank_tracker.dart';
+import '../../shared/utils/rank_hot_mixin.dart';
+
+/// 🎯 깔끔하게 리팩토링된 SurgeController
+class SurgeController extends StateNotifier<SurgeControllerState> with RankHotMixin {
+  final Ref _ref;
+  
+  // ✅ 순위 추적기 (블링크용)
+  final RankTracker _rankTracker = RankTracker();
+  
+  // ✅ 미리 계산된 상태 저장
+  final Map<String, bool> _blinkStates = {};
+  final Map<String, bool> _hotStates = {};
+  
+  // ✅ Provider 구독 관리
+  final List<ProviderSubscription> _subscriptions = [];
+
+  SurgeController(this._ref) : super(const SurgeControllerState()) {
+    // ✅ 모든 상태 초기화
+    _initializeAllStates();
+    _initializeDataSubscription();
+  }
+
+  /// ✅ 모든 상태 초기화
+  void _initializeAllStates() {
+    clearAllHot();
+    _rankTracker.clearAll();
+    _blinkStates.clear();
+    _hotStates.clear();
+  }
+
+  /// ✅ 데이터 구독 초기화
+  void _initializeDataSubscription() {
+    final subscription = _ref.listen(
+      surgeDataProvider,
+      (previous, next) {
+        next.when(
+          data: (surges) => _processSurgeData(surges),
+          loading: () => state = state.copyWith(isLoading: true),
+          error: (error, _) => state = state.copyWith(
+            errorMessage: error.toString(),
+            isLoading: false,
+          ),
+        );
+      },
+    );
+    _subscriptions.add(subscription);
+  }
+
+  /// ✅ 급등/급락 데이터 처리 - 모든 상태 미리 계산
+  void _processSurgeData(List<Surge> surges) {
+    // 1. 데이터 정렬/필터링
+    final processedSurges = _applyProcessing(surges);
+    
+    // 2. 모든 상태 미리 계산 (build 밖에서!)
+    _calculateAllStates(processedSurges);
+    
+    // 3. 상태 업데이트
+    state = state.copyWith(
+      surges: processedSurges,
+      isLoading: false,
+      errorMessage: null,
+    );
+  }
+
+  /// ✅ 모든 아이템의 상태 미리 계산 - 시간대별 독립
+  void _calculateAllStates(List<Surge> processedSurges) {
+    final currentTimeFrame = this.currentTimeFrame;
+    
+    // ✅ 시간대 초기화
+    initializeTimeFrame(currentTimeFrame);
+    _rankTracker.initializeTimeFrame(currentTimeFrame);
+    
+    // 기존 상태 초기화
+    _blinkStates.clear();
+    _hotStates.clear();
+    
+    for (int i = 0; i < processedSurges.length; i++) {
+      final surge = processedSurges[i];
+      final market = surge.market;
+      final currentRank = i + 1;
+      
+      // ✅ HOT 상태 계산 (RankHotMixin 사용)
+      _hotStates[market] = checkIfHot(
+        key: market,
+        currentRank: currentRank,
+        timeFrame: currentTimeFrame,
+      );
+      
+      // ✅ 블링크 상태 계산 (RankTracker 사용)
+      _blinkStates[market] = _rankTracker.checkRankChange(
+        key: market,
+        currentRank: currentRank,
+        timeFrame: currentTimeFrame,
+      );
+    }
+  }
+
+  /// ✅ 데이터 처리 (정렬/필터링)
+  List<Surge> _applyProcessing(List<Surge> surgeData) {
+    // 1) 필터 타입에 따른 필터링
+    List<Surge> filteredData = _applyFilter(surgeData, state.filterType);
+    
+    // 2) 필터 타입에 따른 정렬
+    if (state.filterType == SurgeFilterType.fallingOnly) {
+      // 하락만: 하락 큰 순서 (오름차순)
+      filteredData.sort((a, b) => a.changePercent.compareTo(b.changePercent));
+    } else {
+      // 전체/상승: 변동률 내림차순 (큰 플러스부터)
+      filteredData.sort((a, b) => b.changePercent.compareTo(a.changePercent));
+    }
+    
+    // 3) 현재 설정에 따라 50개 또는 100개로 제한
+    final int limit = state.isTop100 ? 100 : 50;
+    return filteredData.take(limit).toList();
+  }
+
+  /// ✅ 필터 타입 적용
+  List<Surge> _applyFilter(List<Surge> surgeData, SurgeFilterType filterType) {
+    switch (filterType) {
+      case SurgeFilterType.all:
+        return surgeData.where((s) => s.hasChange).toList();
+      case SurgeFilterType.risingOnly:
+        return surgeData.where((s) => s.isRising).toList();
+      case SurgeFilterType.fallingOnly:
+        return surgeData.where((s) => s.isFalling).toList();
+    }
+  }
+
+  /// ✅ Top 50/100 토글
+  void toggleTopLimit() {
+    state = state.copyWith(isTop100: !state.isTop100);
+    _reprocessData();
+  }
+
+  /// ✅ 필터 타입 변경
+  void setFilterType(SurgeFilterType filterType) {
+    state = state.copyWith(filterType: filterType);
+    _reprocessData();
+  }
+
+  /// ✅ 기존 데이터 재처리
+  void _reprocessData() {
+    if (state.surges.isNotEmpty) {
+      final surgesAsync = _ref.read(surgeDataProvider);
+      surgesAsync.whenData((surges) => _processSurgeData(surges));
+    }
+  }
+
+  /// ✅ 시간대 변경 - 상태 초기화로 독립성 보장
+  void setTimeFrame(String timeFrame, int index) {
+    final oldTimeFrame = currentTimeFrame;
+    
+    // ✅ 이전 시간대 상태 초기화 (독립성 보장)
+    if (oldTimeFrame != timeFrame) {
+      clearTimeFrameHot(oldTimeFrame);
+      _rankTracker.clearTimeFrame(oldTimeFrame);
+    }
+    
+    final controller = _ref.read(surgeTimeFrameController);
+    controller.updateTimeFrame(timeFrame, index);
+  }
+
+  /// ✅ 현재 표시 개수
+  int get currentLimit => state.isTop100 ? 100 : 50;
+  
+  /// ✅ 현재 표시 모드 이름
+  String get currentLimitName => state.isTop100 ? 'Top 100' : 'Top 50';
+
+  /// ✅ 현재 필터 타입 이름
+  String get currentFilterName {
+    switch (state.filterType) {
+      case SurgeFilterType.all:
+        return '전체';
+      case SurgeFilterType.risingOnly:
+        return '상승';
+      case SurgeFilterType.fallingOnly:
+        return '하락';
+    }
+  }
+
+  /// ✅ HOT 상태 조회 (build에서 안전하게 호출 가능)
+  bool isHot(String market) {
+    return _hotStates[market] ?? false;
+  }
+
+  /// ✅ 블링크 상태 조회 (build에서 안전하게 호출 가능)
+  bool shouldBlink(String market) {
+    return _blinkStates[market] ?? false;
+  }
+
+  /// ✅ 블링크 상태 초기화 (애니메이션 완료 후 호출)
+  void clearBlinkState(String market) {
+    _blinkStates[market] = false;
+    state = state.copyWith();
+  }
+
+  /// ✅ 급등/급락 카운트 계산
+  Map<String, int> getSurgeCount() {
+    final risingCount = state.surges.where((s) => s.isRising).length;
+    final fallingCount = state.surges.where((s) => s.isFalling).length;
+    
+    return {
+      'rising': risingCount,
+      'falling': fallingCount,
+    };
+  }
+
+  /// ✅ TimeFrame 관련 메서드들
+  String get currentTimeFrame => _ref.read(surgeTimeFrameController).currentTimeFrame;
+  int get currentIndex => _ref.read(surgeTimeFrameController).currentIndex;
+  List<String> get availableTimeFrames => _ref.read(surgeTimeFrameController).availableTimeFrames;
+
+  String getTimeFrameName(String timeFrame) {
+    return _ref.read(surgeTimeFrameController).getTimeFrameName(timeFrame);
+  }
+
+  void resetCurrentTimeFrame() {
+    _ref.read(surgeTimeFrameController).resetCurrentTimeFrame();
+  }
+
+  void resetAllTimeFrames() {
+    _ref.read(surgeTimeFrameController).resetAllTimeFrames();
+  }
+
+  DateTime? getNextResetTime() {
+    return _ref.read(surgeTimeFrameController).getNextResetTime();
+  }
+
+  /// ✅ 디버깅용 메서드들
+  Map<String, int> getBlinkDebugInfo() {
+    return _rankTracker.getDebugInfo();
+  }
+
+  /// ✅ 메모리 정리 (주기적으로 호출 권장)
+  void cleanupExpiredStates() {
+    cleanupExpiredHotStates();
+  }
+
+  /// ✅ 리소스 정리
+  @override
+  void dispose() {
+    // Provider 구독 해제
+    for (final subscription in _subscriptions) {
+      subscription.close();
+    }
+    _subscriptions.clear();
+    
+    // ✅ 모든 리소스 정리
+    disposeHot();
+    _rankTracker.dispose();
+    _blinkStates.clear();
+    _hotStates.clear();
+    
+    super.dispose();
+  }
+}
+
+/// ✅ 상태 클래스 (변경 없음)
+class SurgeControllerState {
+  final List<Surge> surges;           // 정렬/필터링된 급등/급락 데이터
+  final bool isTop100;               // Top 50/100 모드
+  final SurgeFilterType filterType;  // 필터 타입
+  final bool isLoading;              // 로딩 상태
+  final String? errorMessage;        // 에러 메시지
+
+  const SurgeControllerState({
+    this.surges = const [],
+    this.isTop100 = false,
+    this.filterType = SurgeFilterType.all,
+    this.isLoading = false,
+    this.errorMessage,
+  });
+
+  SurgeControllerState copyWith({
+    List<Surge>? surges,
+    bool? isTop100,
+    SurgeFilterType? filterType,
+    bool? isLoading,
+    String? errorMessage,
+  }) {
+    return SurgeControllerState(
+      surges: surges ?? this.surges,
+      isTop100: isTop100 ?? this.isTop100,
+      filterType: filterType ?? this.filterType,
+      isLoading: isLoading ?? this.isLoading,
+      errorMessage: errorMessage ?? this.errorMessage,
+    );
+  }
+}
+
+/// Surge 필터 타입 enum
+enum SurgeFilterType {
+  all,        // 전체
+  risingOnly, // 상승만
+  fallingOnly // 하락만
+}
+
+/// Provider 선언
+final surgeControllerProvider = StateNotifierProvider<SurgeController, SurgeControllerState>(
+  (ref) => SurgeController(ref),
+);\n\n// ====== lib/presentation/controllers/main_controller.dart ======\n
+\n\n// ====== lib/presentation/controllers/settings_controller.dart ======\n
+\n\n// ====== lib/presentation/controllers/sector_controller.dart ======\n
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../core/di/sector_provider.dart';
+import '../../domain/entities/volume.dart';
+import '../../shared/utils/rank_tracker.dart';
+import '../../shared/utils/rank_hot_mixin.dart';
+
+/// 🎯 깔끔하게 리팩토링된 SectorController
+class SectorController extends StateNotifier<SectorControllerState> with RankHotMixin {
+  final Ref _ref;
+  
+  // ✅ 순위 추적기 (블링크용)
+  final RankTracker _rankTracker = RankTracker();
+  
+  // ✅ 미리 계산된 상태 저장
+  final Map<String, bool> _blinkStates = {};
+  final Map<String, bool> _hotStates = {};
+  
+  // ✅ Provider 구독 관리
+  final List<ProviderSubscription> _subscriptions = [];
+
+  SectorController(this._ref) : super(const SectorControllerState()) {
+    // ✅ 모든 상태 초기화
+    _initializeAllStates();
+    _initializeDataSubscription();
+  }
+
+  /// ✅ 모든 상태 초기화
+  void _initializeAllStates() {
+    clearAllHot();
+    _rankTracker.clearAll();
+    _blinkStates.clear();
+    _hotStates.clear();
+  }
+
+  /// ✅ 데이터 구독 초기화
+  void _initializeDataSubscription() {
+    // 기존 구독 정리
+    for (final subscription in _subscriptions) {
+      subscription.close();
+    }
+    _subscriptions.clear();
+    
+    // 분류 상태 동기화
+    final controller = _ref.read(sectorTimeFrameController);
+    state = state.copyWith(
+      isDetailedClassification: controller.isDetailedClassification,
+      timeFrame: controller.currentTimeFrame,
+      selectedTimeFrameIndex: controller.currentIndex,
+    );
+
+    final subscription = _ref.listen(
+      sectorVolumeDataProvider,
+      (previous, next) {
+        next.when(
+          data: (volumes) => _processSectorData(volumes),
+          loading: () => state = state.copyWith(isLoading: true),
+          error: (error, _) => state = state.copyWith(
+            errorMessage: error.toString(),
+            isLoading: false,
+          ),
+        );
+      },
+    );
+    _subscriptions.add(subscription);
+  }
+
+  /// ✅ 섹터 데이터 처리 - 모든 상태 미리 계산
+  void _processSectorData(List<Volume> volumes) {
+    // 1. 데이터 정렬
+    final sortedVolumes = _applySorting(volumes);
+    
+    // 2. 모든 상태 미리 계산 (build 밖에서!)
+    _calculateAllStates(sortedVolumes);
+    
+    // 3. 상태 업데이트
+    state = state.copyWith(
+      sectorVolumes: sortedVolumes,
+      isLoading: false,
+      errorMessage: null,
+    );
+  }
+
+  /// ✅ 모든 아이템의 상태 미리 계산 - 시간대별 독립
+  void _calculateAllStates(List<Volume> sortedVolumes) {
+    final currentTimeFrame = state.timeFrame;
+    
+    // ✅ 시간대 초기화
+    initializeTimeFrame(currentTimeFrame);
+    _rankTracker.initializeTimeFrame(currentTimeFrame);
+    
+    // 기존 상태 초기화
+    _blinkStates.clear();
+    _hotStates.clear();
+    
+    for (int i = 0; i < sortedVolumes.length; i++) {
+      final volume = sortedVolumes[i];
+      final sectorName = volume.market.replaceFirst('SECTOR-', '');
+      final currentRank = i + 1;
+      
+      // ✅ HOT 상태 계산 (RankHotMixin 사용)
+      _hotStates[sectorName] = checkIfHot(
+        key: sectorName,
+        currentRank: currentRank,
+        timeFrame: currentTimeFrame,
+      );
+      
+      // ✅ 블링크 상태 계산 (RankTracker 사용)
+      _blinkStates[sectorName] = _rankTracker.checkRankChange(
+        key: sectorName,
+        currentRank: currentRank,
+        timeFrame: currentTimeFrame,
+      );
+    }
+  }
+
+  /// ✅ 데이터 정렬 (순수 함수)
+  List<Volume> _applySorting(List<Volume> volumes) {
+    final sorted = [...volumes];
+    sorted.sort((a, b) => b.totalVolume.compareTo(a.totalVolume));
+    return sorted;
+  }
+
+  /// ✅ 시간대 변경 - 상태 초기화로 독립성 보장
+  void setTimeFrame(String timeFrame, int index) {
+    final oldTimeFrame = state.timeFrame;
+    
+    // ✅ 이전 시간대 상태 초기화 (독립성 보장)
+    if (oldTimeFrame != timeFrame) {
+      clearTimeFrameHot(oldTimeFrame);
+      _rankTracker.clearTimeFrame(oldTimeFrame);
+    }
+    
+    final controller = _ref.read(sectorTimeFrameController);
+    controller.updateTimeFrame(timeFrame, index);
+    
+    state = state.copyWith(
+      timeFrame: timeFrame,
+      selectedTimeFrameIndex: index,
+      errorMessage: null,
+    );
+    
+    // 스트림 재구독
+    _initializeDataSubscription();
+  }
+
+  /// ✅ 섹터 분류 토글 (상세 ↔ 기본) - 상태 초기화 추가!
+  void toggleSectorClassification() {
+    final currentTimeFrame = state.timeFrame;
+    
+    // ✅ 분류 변경시에도 상태 초기화 (완전히 다른 데이터셋)
+    clearTimeFrameHot(currentTimeFrame);
+    _rankTracker.clearTimeFrame(currentTimeFrame);
+    
+    final controller = _ref.read(sectorTimeFrameController);
+    controller.toggleSectorClassification();
+    
+    final newClassification = !state.isDetailedClassification;
+    state = state.copyWith(
+      isDetailedClassification: newClassification,
+      isLoading: true,
+      errorMessage: null,
+    );
+    
+    // 스트림 재구독
+    _initializeDataSubscription();
+  }
+
+  /// ✅ HOT 상태 조회 (build에서 안전하게 호출 가능)
+  bool isHot(String sectorName) {
+    return _hotStates[sectorName] ?? false;
+  }
+
+  /// ✅ 블링크 상태 조회 (build에서 안전하게 호출 가능)
+  bool shouldBlink(String sectorName) {
+    return _blinkStates[sectorName] ?? false;
+  }
+
+  /// ✅ 블링크 상태 초기화 (애니메이션 완료 후 호출)
+  void clearBlinkState(String sectorName) {
+    _blinkStates[sectorName] = false;
+    state = state.copyWith();
+  }
+
+  /// ✅ 새로고침
+  void refresh() {
+    _initializeDataSubscription();
+  }
+
+  /// ✅ 수동 리셋 메서드들
+  void resetCurrentTimeFrame() {
+    final controller = _ref.read(sectorTimeFrameController);
+    controller.resetCurrentTimeFrame();
+    refresh();
+  }
+
+  void resetAllTimeFrames() {
+    final controller = _ref.read(sectorTimeFrameController);
+    controller.resetAllTimeFrames();
+    refresh();
+  }
+
+  /// ✅ 다음 리셋 시간 조회
+  DateTime? getNextResetTime() {
+    final controller = _ref.read(sectorTimeFrameController);
+    return controller.getNextResetTime();
+  }
+
+  /// ✅ Sector 고유 기능들
+  List<String> get availableTimeFrames {
+    final controller = _ref.read(sectorTimeFrameController);
+    return controller.availableTimeFrames;
+  }
+
+  String getTimeFrameName(String timeFrame) {
+    final controller = _ref.read(sectorTimeFrameController);
+    return controller.getTimeFrameName(timeFrame);
+  }
+
+  String get currentSectorClassificationName {
+    final controller = _ref.read(sectorTimeFrameController);
+    return controller.currentSectorClassificationName;
+  }
+
+  int get totalSectors {
+    final controller = _ref.read(sectorTimeFrameController);
+    return controller.totalSectors;
+  }
+
+  /// ✅ 특정 섹터의 코인들 조회
+  List<String> getCoinsInSector(String sectorName) {
+    final controller = _ref.read(sectorTimeFrameController);
+    return controller.getCoinsInSector(sectorName);
+  }
+
+  /// ✅ 특정 코인이 속한 섹터들 조회
+  List<String> getSectorsForCoin(String ticker) {
+    final controller = _ref.read(sectorTimeFrameController);
+    return controller.getSectorsForCoin(ticker);
+  }
+
+  /// ✅ 디버깅용 메서드들
+  Map<String, int> getBlinkDebugInfo() {
+    return _rankTracker.getDebugInfo();
+  }
+
+  Map<String, Map<String, dynamic>> getHotDebugInfo() {
+    return getHotDebugInfo();
+  }
+
+  /// ✅ 메모리 정리 (주기적으로 호출 권장)
+  void cleanupExpiredStates() {
+    cleanupExpiredHotStates();
+  }
+
+  /// ✅ 리소스 정리
+  @override
+  void dispose() {
+    // Provider 구독 해제
+    for (final subscription in _subscriptions) {
+      subscription.close();
+    }
+    _subscriptions.clear();
+    
+    // ✅ 모든 리소스 정리
+    disposeHot();
+    _rankTracker.dispose();
+    _blinkStates.clear();
+    _hotStates.clear();
+    
+    super.dispose();
+  }
+}
+
+/// ✅ 상태 클래스 (변경 없음)
+class SectorControllerState {
+  final List<Volume> sectorVolumes;        // 정렬된 섹터 볼륨 데이터
+  final bool isLoading;                   // 로딩 상태
+  final bool isDetailedClassification;    // 분류 방식
+  final String timeFrame;                 // 시간대
+  final int selectedTimeFrameIndex;       // 시간대 인덱스
+  final String? errorMessage;             // 에러 메시지
+
+  const SectorControllerState({
+    this.sectorVolumes = const [],
+    this.isLoading = false,
+    this.isDetailedClassification = true,
+    this.timeFrame = '1m',
+    this.selectedTimeFrameIndex = 0,
+    this.errorMessage,
+  });
+
+  SectorControllerState copyWith({
+    List<Volume>? sectorVolumes,
+    bool? isLoading,
+    bool? isDetailedClassification,
+    String? timeFrame,
+    int? selectedTimeFrameIndex,
+    String? errorMessage,
+  }) {
+    return SectorControllerState(
+      sectorVolumes: sectorVolumes ?? this.sectorVolumes,
+      isLoading: isLoading ?? this.isLoading,
+      isDetailedClassification: isDetailedClassification ?? this.isDetailedClassification,
+      timeFrame: timeFrame ?? this.timeFrame,
+      selectedTimeFrameIndex: selectedTimeFrameIndex ?? this.selectedTimeFrameIndex,
+      errorMessage: errorMessage ?? this.errorMessage,
+    );
+  }
+}
+
+/// Provider 선언
+final sectorControllerProvider = StateNotifierProvider<SectorController, SectorControllerState>(
+  (ref) => SectorController(ref),
+);\n\n// ====== lib/presentation/controllers/signal_controller.dart ======\n
+// lib/presentation/controllers/signal_controller.dart
+
+import 'dart:async';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../core/config/app_config.dart';
+import '../../core/di/signal_provider.dart';
+import '../../core/error/app_exception.dart';
+import '../../core/extensions/result.dart';
+import '../../core/utils/logger.dart';
+import '../../domain/entities/signal.dart';
+import '../../domain/usecases/signal_usecase.dart';
+
+/// 🚀 Signal 화면 상태를 캡슐화하는 immutable 모델 V4.1
+class SignalState {
+  final List<Signal> signals;
+  final bool isLoading;
+  final bool isConnected;
+  final PatternType currentPattern;
+  final int selectedIndex;
+  final double threshold;
+  final bool isPatternEnabled;
+  final String? errorMessage;
+  final Map<String, dynamic>? systemHealth; // 🆕 V4.1
+  final Map<String, dynamic>? onlineMetricsHealth; // 🆕 V4.1
+  final String sortField; // 🆕 V4.1
+  final bool sortAscending; // 🆕 V4.1
+
+  const SignalState({
+    this.signals = const [],
+    this.isLoading = false,
+    this.isConnected = false,
+    this.currentPattern = PatternType.surge,
+    this.selectedIndex = 0,
+    this.threshold = 0.4,
+    this.isPatternEnabled = true,
+    this.errorMessage,
+    this.systemHealth,
+    this.onlineMetricsHealth,
+    this.sortField = 'time',
+    this.sortAscending = false,
+  });
+
+  /// 🆕 V4.1 온라인 지표 연결 상태
+  bool get hasOnlineMetrics => onlineMetricsHealth != null;
+  
+  /// 🆕 V4.1 시스템 건강성
+  bool get isSystemHealthy => 
+      systemHealth?['status'] == 'healthy' && 
+      (onlineMetricsHealth?['staleMarkets'] ?? 0) == 0;
+
+  /// 🆕 V4.1 신호 통계
+  Map<String, dynamic> get signalStats {
+    final total = signals.length;
+    final withOnlineMetrics = signals.where((s) => s.hasOnlineMetrics).length;
+    final avgConfidence = signals.isNotEmpty 
+        ? signals.map((s) => s.confidence ?? 0.0).reduce((a, b) => a + b) / total
+        : 0.0;
+    
+    return {
+      'total': total,
+      'withOnlineMetrics': withOnlineMetrics,
+      'onlineMetricsRatio': total > 0 ? withOnlineMetrics / total : 0.0,
+      'avgConfidence': avgConfidence,
+      'pattern': currentPattern.displayName,
+    };
+  }
+
+  SignalState copyWith({
+    List<Signal>? signals,
+    bool? isLoading,
+    bool? isConnected,
+    PatternType? currentPattern,
+    int? selectedIndex,
+    double? threshold,
+    bool? isPatternEnabled,
+    String? errorMessage,
+    Map<String, dynamic>? systemHealth,
+    Map<String, dynamic>? onlineMetricsHealth,
+    String? sortField,
+    bool? sortAscending,
+  }) {
+    return SignalState(
+      signals: signals ?? this.signals,
+      isLoading: isLoading ?? this.isLoading,
+      isConnected: isConnected ?? this.isConnected,
+      currentPattern: currentPattern ?? this.currentPattern,
+      selectedIndex: selectedIndex ?? this.selectedIndex,
+      threshold: threshold ?? this.threshold,
+      isPatternEnabled: isPatternEnabled ?? this.isPatternEnabled,
+      errorMessage: errorMessage,
+      systemHealth: systemHealth ?? this.systemHealth,
+      onlineMetricsHealth: onlineMetricsHealth ?? this.onlineMetricsHealth,
+      sortField: sortField ?? this.sortField,
+      sortAscending: sortAscending ?? this.sortAscending,
+    );
+  }
+}
+
+/// 🚀 Signal 화면 전용 ViewModel V4.1 - 온라인 지표 연동
+class SignalController extends StateNotifier<SignalState> {
+  final SignalUseCase _usecase;
+  final Ref _ref;
+  StreamSubscription<Result<List<Signal>, AppException>>? _subscription;
+  StreamSubscription<Map<String, dynamic>>? _healthSubscription; // 🆕 V4.1
+  Timer? _healthUpdateTimer; // 🆕 V4.1
+
+  SignalController(this._usecase, this._ref) : super(const SignalState()) {
+    _startSystemHealthMonitoring(); // 🆕 V4.1
+  }
+
+  // ==========================================================================
+  // 🆕 V4.1 시스템 건강성 모니터링
+  // ==========================================================================
+
+  /// 🆕 시스템 헬스 모니터링 시작
+  void _startSystemHealthMonitoring() {
+    _healthUpdateTimer = Timer.periodic(const Duration(seconds: 10), (_) {
+      _updateSystemHealth();
+      _updateOnlineMetricsHealth();
+    });
+  }
+
+  /// 🆕 시스템 헬스 업데이트
+  void _updateSystemHealth() async {
+    try {
+      final controller = _ref.read(signalPatternController);
+      final health = await controller.getSystemHealth();
+      
+      state = state.copyWith(systemHealth: health);
+      
+      if (AppConfig.enableTradeLog) {
+        final staleMarkets = health['onlineMetricsSystem']?['staleMarkets'] ?? 0;
+        if (staleMarkets > 0) {
+          log.w('⚠️ Signal Controller: $staleMarkets개 마켓 온라인 지표 만료');
+        }
+      }
+    } catch (e) {
+      if (AppConfig.enableTradeLog) {
+        log.w('Signal Controller: System health update failed - $e');
+      }
+    }
+  }
+
+  /// 🆕 온라인 지표 헬스 업데이트
+  void _updateOnlineMetricsHealth() {
+    try {
+      final controller = _ref.read(signalPatternController);
+      final health = controller.getOnlineMetricsHealth();
+      
+      state = state.copyWith(onlineMetricsHealth: health);
+    } catch (e) {
+      if (AppConfig.enableTradeLog) {
+        log.w('Signal Controller: Online metrics health update failed - $e');
+      }
+    }
+  }
+
+  // ==========================================================================
+  // 기본 패턴 관리 (기존 + V4.1 개선)
+  // ==========================================================================
+
+  /// 패턴 인덱스 변경 (슬라이더 이동) - V4.1 개선
+  void setPatternIndex(int index, List<String> markets) {
+    if (index < 0 || index >= PatternType.values.length) {
+      if (AppConfig.enableTradeLog) {
+        log.w('Invalid pattern index: $index');
+      }
+      return;
+    }
+
+    final patternType = PatternType.values[index];
+    final defaultThreshold = patternType.defaultThreshold; // V4.1 기본값
+
+    // Provider 상태 업데이트
+    final controller = _ref.read(signalPatternController);
+    controller.updatePatternIndex(index);
+
+    state = state.copyWith(
+      currentPattern: patternType,
+      selectedIndex: index,
+      threshold: defaultThreshold,
+      isLoading: true,
+      errorMessage: null,
+    );
+
+    // 스트림 재구독
+    _subscribeToPattern(patternType, markets);
+    
+    if (AppConfig.enableTradeLog) {
+      log.i('🎯 Pattern changed to: ${patternType.displayName} (V4.1)');
+    }
+  }
+
+  /// 현재 패턴의 임계값 변경 - V4.1 개선
+  void updateThreshold(double threshold) {
+    try {
+      // UseCase를 통한 검증된 업데이트
+      _usecase.updatePatternThreshold(state.currentPattern, threshold);
+      
+      final controller = _ref.read(signalPatternController);
+      controller.updateThreshold(threshold);
+
+      state = state.copyWith(threshold: threshold);
+      
+      if (AppConfig.enableTradeLog) {
+        log.i('📊 Threshold updated: ${state.currentPattern.displayName} → $threshold');
+      }
+    } catch (e) {
+      if (AppConfig.enableTradeLog) {
+        log.e('❌ Threshold update failed: $e');
+      }
+      
+      // 에러를 사용자에게 표시
+      state = state.copyWith(
+        errorMessage: 'Invalid threshold value: ${e.toString()}'
+      );
+    }
+  }
+
+  /// 패턴 활성화/비활성화 토글 - V4.1 개선
+  void togglePatternEnabled() {
+    final newEnabled = !state.isPatternEnabled;
+    
+    _usecase.setPatternEnabled(state.currentPattern, newEnabled);
+    
+    final controller = _ref.read(signalPatternController);
+    controller.setPatternEnabled(state.currentPattern, newEnabled);
+
+    state = state.copyWith(isPatternEnabled: newEnabled);
+    
+    if (AppConfig.enableTradeLog) {
+      log.i('🔄 Pattern ${newEnabled ? "enabled" : "disabled"}: ${state.currentPattern.displayName}');
+    }
+  }
+
+  /// 시그널 목록 초기화 - V4.1 개선
+  void clearSignals([PatternType? pattern]) {
+    final controller = _ref.read(signalPatternController);
+    controller.clearSignals(pattern);
+
+    if (pattern == null || pattern == state.currentPattern) {
+      state = state.copyWith(signals: []);
+    }
+    
+    if (AppConfig.enableTradeLog) {
+      final patternName = pattern?.displayName ?? 'All patterns';
+      log.i('🧹 Signals cleared: $patternName');
+    }
+  }
+
+  // ==========================================================================
+  // 🆕 V4.1 고급 패턴 설정
+  // ==========================================================================
+
+  /// 🆕 고급 패턴 설정 업데이트
+  void updateAdvancedPatternConfig(String key, double value) {
+    try {
+      _usecase.updateAdvancedPatternConfig(state.currentPattern, key, value);
+      
+      if (AppConfig.enableTradeLog) {
+        log.i('⚙️ Advanced config updated: ${state.currentPattern.name}.$key = $value');
+      }
+    } catch (e) {
+      if (AppConfig.enableTradeLog) {
+        log.e('❌ Advanced config update failed: $e');
+      }
+      
+      state = state.copyWith(
+        errorMessage: 'Configuration update failed: ${e.toString()}'
+      );
+    }
+  }
+
+  /// 🆕 패턴 프리셋 적용
+  void applyPreset(String presetName) {
+    try {
+      _usecase.applyPatternPreset(presetName);
+      
+      // 현재 패턴의 임계값도 업데이트
+      final newThreshold = _usecase.getPatternThreshold(state.currentPattern);
+      state = state.copyWith(threshold: newThreshold);
+      
+      if (AppConfig.enableTradeLog) {
+        log.i('🎯 Preset applied: $presetName');
+      }
+    } catch (e) {
+      if (AppConfig.enableTradeLog) {
+        log.e('❌ Preset application failed: $e');
+      }
+      
+      state = state.copyWith(
+        errorMessage: 'Preset application failed: ${e.toString()}'
+      );
+    }
+  }
+
+  /// 🆕 온라인 지표 리셋
+  void resetOnlineMetrics([String? market]) {
+    final controller = _ref.read(signalPatternController);
+    controller.resetOnlineMetrics(market);
+    
+    // 헬스 상태 즉시 업데이트
+    _updateOnlineMetricsHealth();
+    
+    if (AppConfig.enableTradeLog) {
+      final target = market ?? 'all markets';
+      log.i('🔄 Online metrics reset: $target');
+    }
+  }
+
+  // ==========================================================================
+  // 스트림 관리 (V4.1 개선)
+  // ==========================================================================
+
+  /// 패턴별 시그널 스트림 구독 - V4.1 개선
+  void _subscribeToPattern(PatternType patternType, List<String> markets) {
+    _subscription?.cancel();
+    
+    _subscription = _usecase
+        .watchSignalsByPattern(patternType, markets)
+        .map((signals) => Ok<List<Signal>, AppException>(signals))
+        .handleError((error) => Err<List<Signal>, AppException>(
+            AppException(
+              'Signal pattern detection failed: ${error.toString()}',
+              code: 'SIGNAL_PATTERN_ERROR',
+              originalException: error is Exception ? error : null,
+            )))
+        .listen(_handleResult);
+  }
+
+  void _handleResult(Result<List<Signal>, AppException> result) {
+    result.when(
+      ok: (signals) {
+        // V4.1 정렬 적용
+        final sortedSignals = _applySorting(signals);
+        
+        state = state.copyWith(
+          signals: sortedSignals,
+          isLoading: false,
+          isConnected: true,
+          errorMessage: null,
+        );
+        
+        // 온라인 지표 통계 로깅
+        if (AppConfig.enableTradeLog && signals.isNotEmpty) {
+          final withOnlineMetrics = signals.where((s) => s.hasOnlineMetrics).length;
+          final ratio = (withOnlineMetrics / signals.length * 100).toStringAsFixed(1);
+          log.i('📊 Signals received: ${signals.length}, Online metrics: $withOnlineMetrics ($ratio%)');
+        }
+      },
+      err: (e) {
+        state = state.copyWith(
+          isLoading: false,
+          isConnected: false,
+          errorMessage: e.message,
+        );
+        
+        if (AppConfig.enableTradeLog) {
+          log.e('❌ Signal stream error: ${e.message}');
+        }
+      },
+    );
+  }
+
+  /// 재연결/새로고침 - V4.1 개선
+  void refresh(List<String> markets) {
+    if (AppConfig.enableTradeLog) {
+      log.i('🔄 Signal refresh requested for ${markets.length} markets');
+    }
+    
+    // 온라인 지표 상태도 리셋
+    resetOnlineMetrics();
+    
+    // 패턴 재구독
+    setPatternIndex(state.selectedIndex, markets);
+  }
+
+  // ==========================================================================
+  // 🆕 V4.1 정렬 및 필터링
+  // ==========================================================================
+
+  /// 🆕 정렬 필드 변경
+  void setSortField(String field, {bool? ascending}) {
+    final newAscending = ascending ?? (state.sortField == field ? !state.sortAscending : false);
+    
+    state = state.copyWith(
+      sortField: field,
+      sortAscending: newAscending,
+      signals: _applySorting(state.signals),
+    );
+    
+    if (AppConfig.enableTradeLog) {
+      log.i('📊 Sort changed: $field (${newAscending ? "ASC" : "DESC"})');
+    }
+  }
+
+  /// 🆕 정렬 적용
+  List<Signal> _applySorting(List<Signal> signals) {
+    final list = List<Signal>.from(signals);
+    
+    list.sort((a, b) {
+      dynamic aValue;
+      dynamic bValue;
+      
+      switch (state.sortField) {
+        case 'market':
+          aValue = a.market;
+          bValue = b.market;
+          break;
+        case 'price':
+          aValue = a.currentPrice;
+          bValue = b.currentPrice;
+          break;
+        case 'change':
+          aValue = a.changePercent.abs();
+          bValue = b.changePercent.abs();
+          break;
+        case 'amount':
+          aValue = a.tradeAmount;
+          bValue = b.tradeAmount;
+          break;
+        case 'confidence':
+          aValue = a.confidence ?? 0.0;
+          bValue = b.confidence ?? 0.0;
+          break;
+        case 'time':
+        default:
+          aValue = a.detectedAt.millisecondsSinceEpoch;
+          bValue = b.detectedAt.millisecondsSinceEpoch;
+      }
+      
+      final cmp = aValue is Comparable && bValue is Comparable
+          ? aValue.compareTo(bValue)
+          : 0;
+      
+      return state.sortAscending ? cmp : -cmp;
+    });
+    
+    return list;
+  }
+
+  /// 🆕 고급 필터링 (V4.1)
+  List<Signal> filterSignals({
+    String? marketFilter,
+    double? minConfidence,
+    bool? requireOnlineMetrics,
+    Set<PatternType>? patternTypes,
+    Duration? timeWindow,
+  }) {
+    return _usecase.filterSignals(
+      state.signals,
+      markets: marketFilter != null ? {marketFilter.toUpperCase()} : null,
+      minConfidence: minConfidence,
+      requireOnlineMetrics: requireOnlineMetrics,
+      patternTypes: patternTypes,
+      timeWindow: timeWindow,
+    );
+  }
+
+  // ==========================================================================
+  // 표시 텍스트 생성 (V4.1 개선)
+  // ==========================================================================
+
+  /// 현재 패턴 표시 텍스트 생성 - V4.1 개선
+  String getPatternDisplayText() {
+    final pattern = state.currentPattern;
+    return '${pattern.displayName}: ${pattern.description}';
+  }
+
+  /// 현재 패턴 아이콘/이모지
+  String getPatternIcon() {
+    return state.currentPattern.displayName;
+  }
+
+  /// 임계값 표시 텍스트 - V4.1 개선
+  String getThresholdDisplayText() {
+    final threshold = state.threshold;
+    final pattern = state.currentPattern;
+
+    switch (pattern) {
+      case PatternType.surge:
+        return '${threshold.toStringAsFixed(1)}% 상승';
+      case PatternType.flashFire:
+        return '${threshold.toStringAsFixed(1)}배 급증';
+      case PatternType.stackUp:
+        return '${threshold.toInt()}연속 증가';
+      case PatternType.stealthIn:
+        final amountText = threshold >= 1000000 
+            ? '${(threshold / 1000000).toStringAsFixed(0)}백만원'
+            : '${threshold.toStringAsFixed(0)}원';
+        return '$amountText 이상';
+      case PatternType.blackHole:
+        return '${threshold.toStringAsFixed(1)}% 이하 변동';
+      case PatternType.reboundShot:
+        return '${threshold.toStringAsFixed(1)}% 급락 후 반등';
+    }
+  }
+
+  /// 🆕 시스템 상태 표시 텍스트
+  String getSystemStatusText() {
+    if (!state.hasOnlineMetrics) return 'Online metrics: Connecting...';
+    
+    final health = state.onlineMetricsHealth!;
+    final totalMarkets = health['totalMarkets'] ?? 0;
+    final healthyMarkets = health['healthyMarkets'] ?? 0;
+    final staleMarkets = health['staleMarkets'] ?? 0;
+    
+    if (staleMarkets > 0) {
+      return 'Online metrics: $healthyMarkets/$totalMarkets healthy ($staleMarkets stale)';
+    }
+    
+    return 'Online metrics: $healthyMarkets/$totalMarkets healthy ✅';
+  }
+
+  /// 🆕 신뢰도 상태 표시
+  String getConfidenceStatusText() {
+    final stats = state.signalStats;
+    final avgConf = stats['avgConfidence'] as double;
+    final onlineRatio = stats['onlineMetricsRatio'] as double;
+    
+    return 'Avg confidence: ${(avgConf * 100).toStringAsFixed(1)}%, '
+           'Online: ${(onlineRatio * 100).toStringAsFixed(1)}%';
+  }
+
+  // ==========================================================================
+  // 🆕 V4.1 통계 및 분석
+  // ==========================================================================
+
+  /// 🆕 패턴별 성능 통계
+  Future<Map<String, dynamic>> getPatternPerformance() async {
+    try {
+      final performance = await _usecase.getPatternPerformance(state.currentPattern);
+      return {
+        'pattern': performance.patternType.displayName,
+        'totalSignals': performance.totalSignals,
+        'recentSignals': performance.recentSignals,
+        'lastSignalTime': performance.lastSignalTime?.toIso8601String(),
+        'isEnabled': performance.isEnabled,
+        'onlineMetricsHealth': performance.onlineMetricsHealth,
+      };
+    } catch (e) {
+      if (AppConfig.enableTradeLog) {
+        log.e('❌ Pattern performance query failed: $e');
+      }
+      return {'error': e.toString()};
+    }
+  }
+
+  /// 🆕 시스템 헬스 리포트
+  Future<Map<String, dynamic>> getSystemHealthReport() async {
+    try {
+      final report = await _usecase.getSystemHealthReport();
+      return {
+        'version': report.version,
+        'status': report.status,
+        'uptime': report.uptime,
+        'totalProcessedTrades': report.totalProcessedTrades,
+        'activePatterns': report.activePatterns,
+        'trackedMarkets': report.trackedMarkets,
+        'isHealthy': report.isHealthy,
+        'onlineMetricsHealth': report.onlineMetricsHealth,
+      };
+    } catch (e) {
+      if (AppConfig.enableTradeLog) {
+        log.e('❌ System health report query failed: $e');
+      }
+      return {'error': e.toString()};
+    }
+  }
+
+  /// 🆕 신호 통계 계산
+  Map<String, dynamic> calculateSignalStats() {
+    return _usecase.calculateSignalStats(state.signals).toJson();
+  }
+
+  // ==========================================================================
+  // 기존 호환성 메서드들 (V4.1 개선)
+  // ==========================================================================
+
+  /// 시그널 통계 정보 (기존 호환성)
+  Map<String, dynamic> getSignalStats() {
+    return state.signalStats;
+  }
+
+  /// 시그널 목록 적용 (정렬 등) - V4.1 개선
+  List<Signal> apply(List<Signal> signals) {
+    return _applySorting(signals);
+  }
+
+  /// 사용 가능한 패턴 목록 - V4.1 개선
+  List<String> get availablePatterns => 
+      PatternType.values.map((p) => p.name).toList();
+
+  /// 패턴 표시명 목록 - V4.1 개선
+  List<String> get patternDisplayNames => 
+      PatternType.values.map((p) => p.displayName).toList();
+
+  /// 현재 패턴의 시간 윈도우 - V4.1 개선
+  int get currentTimeWindow => state.currentPattern.timeWindowMinutes;
+
+  /// 🆕 V4.1 현재 패턴의 기본 신뢰도
+  double get currentPatternDefaultConfidence => state.currentPattern.defaultConfidence;
+
+  /// 🆕 V4.1 현재 패턴의 쿨다운 시간
+  int get currentPatternCooldownSeconds => state.currentPattern.defaultCooldownSeconds;
+
+  // ==========================================================================
+  // 🆕 V4.1 설정 관리
+  // ==========================================================================
+
+  /// 🆕 현재 설정 내보내기
+  Map<String, dynamic> exportConfiguration() {
+    final controller = _ref.read(signalPatternController);
+    return controller.exportConfiguration();
+  }
+
+  /// 🆕 설정 가져오기
+  void importConfiguration(Map<String, dynamic> config) {
+    try {
+      final controller = _ref.read(signalPatternController);
+      controller.importConfiguration(config);
+      
+      // 현재 상태 새로고침
+      final newThreshold = _usecase.getPatternThreshold(state.currentPattern);
+      final newEnabled = _usecase.isPatternEnabled(state.currentPattern);
+      
+      state = state.copyWith(
+        threshold: newThreshold,
+        isPatternEnabled: newEnabled,
+      );
+      
+      if (AppConfig.enableTradeLog) {
+        log.i('📥 Configuration imported successfully');
+      }
+    } catch (e) {
+      if (AppConfig.enableTradeLog) {
+        log.e('❌ Configuration import failed: $e');
+      }
+      
+      state = state.copyWith(
+        errorMessage: 'Configuration import failed: ${e.toString()}'
+      );
+    }
+  }
+
+  /// 🆕 에러 메시지 클리어
+  void clearError() {
+    state = state.copyWith(errorMessage: null);
+  }
+
+  // ==========================================================================
+  // 리소스 정리 (V4.1 확장)
+  // ==========================================================================
+
+  @override
+  void dispose() {
+    _subscription?.cancel();
+    _healthSubscription?.cancel();
+    _healthUpdateTimer?.cancel();
+    
+    if (AppConfig.enableTradeLog) {
+      log.i('🔥 Signal Controller V4.1 disposed');
+    }
+    
+    super.dispose();
+  }
+}
+
+/// Provider 선언 - V4.1
+final signalControllerProvider =
+    StateNotifierProvider<SignalController, SignalState>((ref) {
+  final usecase = ref.read(signalUsecaseProvider);
+  return SignalController(usecase, ref);
+});
+
+/// 🆕 V4.1 확장 - 시스템 모니터링 Provider
+final signalSystemMonitorProvider = StreamProvider.autoDispose<Map<String, dynamic>>((ref) async* {
+  final controller = ref.watch(signalControllerProvider.notifier);
+  
+  yield* Stream.periodic(const Duration(seconds: 15), (_) async {
+    final performance = await controller.getPatternPerformance();
+    final systemHealth = await controller.getSystemHealthReport();
+    final signalStats = controller.calculateSignalStats();
+    
+    return {
+      'timestamp': DateTime.now().toIso8601String(),
+      'performance': performance,
+      'systemHealth': systemHealth,
+      'signalStats': signalStats,
+      'version': 'V4.1-Online',
+    };
+  }).asyncMap((event) => event);
+});\n\n// ====== lib/presentation/controllers/market_mood_controller.dart ======\n
+// lib/presentation/controllers/market_mood_controller.dart
+// 🎮 Presentation Layer: Market Mood 컨트롤러 (리팩토링된 Provider에 맞춰 수정)
+
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../core/di/app_providers.dart';
+import '../../core/utils/date_time.dart';
+import '../pages/market_mood_page.dart';
+
+/// 🎮 마켓무드 페이지 컨트롤러
+class MarketMoodPageController extends StateNotifier<MarketMoodPageState> {
+  final Ref _ref;
+
+  MarketMoodPageController(this._ref) : super(MarketMoodPageState.initial()) {
+    // [수정] 초기화 로직을 생성자에서 분리하여 명확하게 관리
+    _initialize();
+  }
+
+  /// [수정] 초기화 및 실시간 리스닝 시작
+  void _initialize() {
+    // 1. 초기 상태 설정
+    final initialState = _ref.read(marketMoodSystemProvider);
+    state = state.copyWith(
+      isLoading: initialState.isLoading,
+      error: initialState.hasError ? '데이터 로딩 중 오류 발생' : null,
+      systemState: initialState,
+    );
+
+    // 2. 실시간 상태 변화 감지 및 동기화
+    //    이제 최종 상태인 marketMoodSystemProvider만 listen하면 됩니다.
+    _ref.listen<MarketMoodSystemState>(
+      marketMoodSystemProvider,
+      (previous, next) {
+        state = state.copyWith(
+          isLoading: next.isLoading,
+          error: next.hasError ? '데이터 로딩 중 오류 발생' : null,
+          systemState: next,
+        );
+      },
+    );
+  }
+
+  /// [수정] 데이터 로드 메서드 제거 -> _initialize()로 통합
+  // Future<void> loadData() async { ... }
+
+  /// 수동 새로고침
+  void refresh() {
+    // [수정] controller를 인스턴스 변수로 두지 않고 필요 시 read
+    final controller = _ref.read(marketMoodControllerProvider);
+    controller.refresh();
+  }
+
+  /// [수정] 현재 마켓무드 조회 (동기식으로 변경)
+  MarketMood getCurrentMood() {
+    // .when()을 사용할 필요 없이 직접 값을 반환합니다.
+    return _ref.read(currentMarketMoodProvider);
+  }
+
+  /// 환율 조회 (Future 대응 - 이 부분은 변경 없음)
+  Future<double> getExchangeRate() async {
+    final exchangeAsync = _ref.read(exchangeRateProvider);
+    return exchangeAsync.when(
+      data: (rate) => rate,
+      loading: () => 1400.0,
+      error: (_, __) => 1400.0,
+    );
+  }
+
+  /// [수정] 볼륨 비교 데이터 조회 (동기식으로 변경)
+  ComparisonData getVolumeComparisons() {
+    // .when()을 사용할 필요 없이 직접 값을 반환합니다.
+    return _ref.read(volumeComparisonProvider);
+  }
+
+  /// 시스템 헬스체크
+  Future<void> checkSystemHealth() async {
+    try {
+      final controller = _ref.read(marketMoodControllerProvider);
+      final health = await controller.getSystemHealth();
+
+      state = state.copyWith(
+        systemHealth: health,
+        lastHealthCheck: DateTime.now(),
+      );
+    } catch (e) {
+      state = state.copyWith(error: e.toString());
+    }
+  }
+
+  /// 환율 새로고침
+  Future<void> refreshExchangeRate() async {
+    try {
+      final controller = _ref.read(marketMoodControllerProvider);
+      await controller.refreshExchangeRate();
+      // loadData() 대신 systemProvider가 자동으로 갱신하므로 별도 호출 불필요
+    } catch (e) {
+      state = state.copyWith(error: e.toString());
+    }
+  }
+
+  /// 시스템 상태 로깅
+  Future<void> logSystemStatus() async {
+    try {
+      final controller = _ref.read(marketMoodControllerProvider);
+      await controller.logSystemStatus();
+    } catch (e) {
+      state = state.copyWith(error: e.toString());
+    }
+  }
+
+  /// 분위기 이모지 조회
+  String getMoodEmoji(MarketMood mood) {
+    return switch (mood) {
+      MarketMood.bull => '🚀',
+      MarketMood.weakBull => '🔥',
+      MarketMood.sideways => '⚖️',
+      MarketMood.bear => '💧',
+      MarketMood.deepBear => '🧊',
+    };
+  }
+
+  /// 분위기 이름 조회
+  String getMoodName(MarketMood mood) {
+    return switch (mood) {
+      MarketMood.bull => '불장',
+      MarketMood.weakBull => '약불장',
+      MarketMood.sideways => '중간장',
+      MarketMood.bear => '물장',
+      MarketMood.deepBear => '얼음장',
+    };
+  }
+
+  /// [수정] 분위기 요약 텍스트 조회 (동기식으로 변경)
+  String getMoodSummary() {
+    // .when()을 사용할 필요 없이 직접 값을 반환합니다.
+    return _ref.read(marketMoodSummaryProvider);
+  }
+
+  /// 볼륨 포맷팅 (한국 원화)
+  Future<String> formatVolume(double volumeUsd) async {
+    final rate = await getExchangeRate();
+    final volumeKrw = volumeUsd * rate;
+
+    if (volumeKrw >= 1e12) {
+      final trillions = (volumeKrw / 1e12).toStringAsFixed(0);
+      return '${_addCommas(trillions)}조원';
+    }
+    if (volumeKrw >= 1e8) {
+      final hundreds = (volumeKrw / 1e8).toStringAsFixed(0);
+      return '${_addCommas(hundreds)}억원';
+    }
+    return '${(volumeKrw / 1e8).toStringAsFixed(1)}억원';
+  }
+
+  /// 시가총액 포맷팅 (한국 원화)
+  Future<String> formatMarketCap(double marketCapUsd) async {
+    final rate = await getExchangeRate();
+    // [수정] marketCapKrw 변수 선언
+    final marketCapKrw = marketCapUsd * rate; 
+
+    // [수정] volumeKrw -> marketCapKrw로 변경
+    if (marketCapKrw >= 1e12) { 
+      final trillions = (marketCapKrw / 1e12).toStringAsFixed(0);
+      return '${_addCommas(trillions)}조원';
+    }
+    // [수정] volumeKrw -> marketCapKrw로 변경
+    if (marketCapKrw >= 1e8) {
+      final hundreds = (marketCapKrw / 1e8).toStringAsFixed(0);
+      return '${_addCommas(hundreds)}억원';
+    }
+    // [수정] volumeKrw -> marketCapKrw로 변경
+    return '${(marketCapKrw / 1e8).toStringAsFixed(1)}억원';
+  }
+
+  /// 업데이트 시간 포맷팅
+  String formatUpdateTime(DateTime updatedAt) {
+    return updatedAt.hhmmss(); // DateTime extension 사용
+  }
+
+  /// 비교 결과 값 포맷팅
+  String formatComparisonValue(ComparisonResult result) {
+    if (result.isReady && result.changePercent != null) {
+      final value = result.changePercent!;
+      final arrow = value > 5 ? '↗️' : value < -5 ? '↘️' : '➡️';
+      return '${value >= 0 ? '+' : ''}${value.toStringAsFixed(1)}% $arrow';
+    }
+    return '${(result.progressPercent * 100).round()}% (${result.status})';
+  }
+
+  /// 진행률 계산
+  int getProgressPercent(ComparisonResult result) {
+    return (result.progressPercent * 100).round();
+  }
+
+  /// 하이라이트 색상 판단
+  bool isHighlight(ComparisonResult result) {
+    return result.isReady && (result.changePercent ?? 0) > 5;
+  }
+
+  /// 경고 색상 판단
+  bool isWarning(ComparisonResult result) {
+    return result.isReady && (result.changePercent ?? 0) < -5;
+  }
+
+  /// [수정] 데이터 스트림 리스닝 메서드 제거 -> _initialize()로 통합
+  // void startListening() { ... }
+
+  /// 숫자에 콤마 추가
+  String _addCommas(String numberStr) {
+    final parts = numberStr.split('.');
+    final integerPart = parts[0];
+    final reversedInteger = integerPart.split('').reversed.join('');
+    final withCommas = reversedInteger
+        .replaceAllMapped(RegExp(r'.{3}'), (match) => '${match.group(0)},')
+        .split('')
+        .reversed
+        .join('');
+    final result =
+        withCommas.startsWith(',') ? withCommas.substring(1) : withCommas;
+    return parts.length > 1 ? '$result.${parts[1]}' : result;
+  }
+}
+
+/// 🎮 마켓무드 페이지 상태
+class MarketMoodPageState {
+  final bool isLoading;
+  final String? error;
+  final MarketMoodSystemState? systemState;
+  final Map<String, dynamic>? systemHealth;
+  final DateTime? lastHealthCheck;
+
+  const MarketMoodPageState({
+    required this.isLoading,
+    this.error,
+    this.systemState,
+    this.systemHealth,
+    this.lastHealthCheck,
+  });
+
+  factory MarketMoodPageState.initial() {
+    return const MarketMoodPageState(isLoading: true); // [수정] 초기 상태는 로딩중
+  }
+
+  MarketMoodPageState copyWith({
+    bool? isLoading,
+    String? error,
+    MarketMoodSystemState? systemState,
+    Map<String, dynamic>? systemHealth,
+    DateTime? lastHealthCheck,
+  }) {
+    return MarketMoodPageState(
+      isLoading: isLoading ?? this.isLoading,
+      error: error, // [수정] null로 덮어쓰기 가능하도록 ?? this.error 제거
+      systemState: systemState ?? this.systemState,
+      systemHealth: systemHealth ?? this.systemHealth,
+      lastHealthCheck: lastHealthCheck ?? this.lastHealthCheck,
+    );
+  }
+}
+
+/// 🎮 마켓무드 페이지 컨트롤러 Provider
+final marketMoodPageControllerProvider = StateNotifierProvider.autoDispose<
+    MarketMoodPageController, MarketMoodPageState>((ref) {
+  // [수정] 컨트롤러 생성 시 바로 _initialize()가 호출되므로 별도 로직 불필요
+  return MarketMoodPageController(ref);
+});
+
+/// 🎮 모달 오버레이 관리자 (실제 MarketMoodPage 사용)
+class MarketMoodModalManager {
+  static OverlayEntry? _overlayEntry;
+
+  /// 모달 표시
+  static void show({
+    required BuildContext context,
+    required WidgetRef ref,
+    required Offset position,
+    required double statusIconSize,
+    required MarketMoodData data,
+  }) {
+    hide(); // 기존 모달 제거
+
+    _overlayEntry = OverlayEntry(
+      builder: (context) => MarketMoodModalOverlay(
+        position: position,
+        statusIconSize: statusIconSize,
+        ref: ref,
+        data: data,
+      ),
+    );
+
+    Overlay.of(context).insert(_overlayEntry!);
+  }
+
+  /// 모달 숨기기
+  static void hide() {
+    _overlayEntry?.remove();
+    _overlayEntry = null;
+  }
+}
+
+/// 🎮 모달 오버레이 (실제 MarketMoodPage 사용)
+class MarketMoodModalOverlay extends StatelessWidget {
+  final Offset position;
+  final double statusIconSize;
+  final WidgetRef ref;
+  final MarketMoodData data;
+
+  const MarketMoodModalOverlay({
+    super.key,
+    required this.position,
+    required this.statusIconSize,
+    required this.ref,
+    required this.data,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: () => MarketMoodModalManager.hide(),
+      behavior: HitTestBehavior.translucent,
+      child: Material(
+        color: Colors.transparent,
+        child: Stack(
+          children: [
+            // 투명 배경
+            Positioned.fill(
+              child: Container(color: Colors.transparent),
+            ),
+            // 실제 MarketMoodPage 위젯
+            Positioned(
+              left: position.dx,
+              top: position.dy,
+              child: Consumer(
+                builder: (context, ref, child) {
+                  return MarketMoodPage(
+                    statusIconSize: statusIconSize,
+                    data: data,
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}\n\n// ====== lib/presentation/controllers/volume_controller.dart ======\n
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../core/di/volume_provider.dart';
+import '../../domain/entities/volume.dart';
+import '../../shared/utils/rank_tracker.dart';
+import '../../shared/utils/rank_hot_mixin.dart';
+
+/// 🎯 깔끔하게 리팩토링된 VolumeController
+class VolumeController extends StateNotifier<VolumeControllerState> with RankHotMixin {
+  final Ref _ref;
+  
+  // ✅ 순위 추적기 (블링크용)
+  final RankTracker _rankTracker = RankTracker();
+  
+  // ✅ 미리 계산된 상태 저장
+  final Map<String, bool> _blinkStates = {};
+  final Map<String, bool> _hotStates = {};
+  
+  // ✅ Provider 구독 관리
+  final List<ProviderSubscription> _subscriptions = [];
+
+  VolumeController(this._ref) : super(const VolumeControllerState()) {
+    // ✅ 모든 상태 초기화
+    _initializeAllStates();
+    _initializeDataSubscription();
+  }
+
+  /// ✅ 모든 상태 초기화
+  void _initializeAllStates() {
+    clearAllHot();
+    _rankTracker.clearAll();
+    _blinkStates.clear();
+    _hotStates.clear();
+  }
+
+  /// ✅ 데이터 구독 초기화
+  void _initializeDataSubscription() {
+    final subscription = _ref.listen(
+      volumeDataProvider,
+      (previous, next) {
+        next.when(
+          data: (volumes) => _processVolumeData(volumes),
+          loading: () => state = state.copyWith(isLoading: true),
+          error: (error, _) => state = state.copyWith(
+            errorMessage: error.toString(),
+            isLoading: false,
+          ),
+        );
+      },
+    );
+    _subscriptions.add(subscription);
+  }
+
+  /// ✅ 볼륨 데이터 처리 - 모든 상태 미리 계산
+  void _processVolumeData(List<Volume> volumes) {
+    // 1. 데이터 정렬
+    final sortedVolumes = _applySorting(volumes);
+    
+    // 2. 모든 상태 미리 계산 (build 밖에서!)
+    _calculateAllStates(sortedVolumes);
+    
+    // 3. 상태 업데이트
+    state = state.copyWith(
+      volumes: sortedVolumes,
+      isLoading: false,
+      errorMessage: null,
+    );
+  }
+
+  /// ✅ 모든 아이템의 상태 미리 계산 - 시간대별 독립
+  void _calculateAllStates(List<Volume> sortedVolumes) {
+    final currentTimeFrame = this.currentTimeFrame;
+    
+    // ✅ 시간대 초기화
+    initializeTimeFrame(currentTimeFrame);
+    _rankTracker.initializeTimeFrame(currentTimeFrame);
+    
+    // 기존 상태 초기화
+    _blinkStates.clear();
+    _hotStates.clear();
+    
+    for (int i = 0; i < sortedVolumes.length; i++) {
+      final volume = sortedVolumes[i];
+      final market = volume.market;
+      final currentRank = i + 1;
+      
+      // ✅ HOT 상태 계산 (RankHotMixin 사용)
+      _hotStates[market] = checkIfHot(
+        key: market,
+        currentRank: currentRank,
+        timeFrame: currentTimeFrame,
+      );
+      
+      // ✅ 블링크 상태 계산 (RankTracker 사용)
+      _blinkStates[market] = _rankTracker.checkRankChange(
+        key: market,
+        currentRank: currentRank,
+        timeFrame: currentTimeFrame,
+      );
+    }
+  }
+
+  /// ✅ 데이터 정렬 (순수 함수)
+  List<Volume> _applySorting(List<Volume> volumeData) {
+    final filteredData = volumeData.where((v) => v.totalVolume > 0).toList();
+    filteredData.sort((a, b) => b.totalVolume.compareTo(a.totalVolume)); // 내림차순
+    
+    // 현재 설정에 따라 50개 또는 100개로 제한
+    final int limit = state.isTop100 ? 100 : 50;
+    return filteredData.take(limit).toList();
+  }
+
+  /// ✅ Top 50/100 토글
+  void toggleTopLimit() {
+    state = state.copyWith(isTop100: !state.isTop100);
+    
+    // 기존 데이터로 재처리
+    if (state.volumes.isNotEmpty) {
+      final volumesAsync = _ref.read(volumeDataProvider);
+      volumesAsync.whenData((volumes) => _processVolumeData(volumes));
+    }
+  }
+
+  /// ✅ 시간대 변경 - 상태 초기화로 독립성 보장
+  void setTimeFrame(String timeFrame, int index) {
+    final oldTimeFrame = currentTimeFrame;
+    
+    // ✅ 이전 시간대 상태 초기화 (독립성 보장)
+    if (oldTimeFrame != timeFrame) {
+      clearTimeFrameHot(oldTimeFrame);
+      _rankTracker.clearTimeFrame(oldTimeFrame);
+    }
+    
+    final controller = _ref.read(volumeTimeFrameController);
+    controller.updateTimeFrame(timeFrame, index);
+  }
+
+  /// ✅ 현재 표시 개수
+  int get currentLimit => state.isTop100 ? 100 : 50;
+  
+  /// ✅ 현재 표시 모드 이름
+  String get currentLimitName => state.isTop100 ? 'Top 100' : 'Top 50';
+
+  /// ✅ HOT 상태 조회 (build에서 안전하게 호출 가능)
+  bool isHot(String market) {
+    return _hotStates[market] ?? false;
+  }
+
+  /// ✅ 블링크 상태 조회 (build에서 안전하게 호출 가능)
+  bool shouldBlink(String market) {
+    return _blinkStates[market] ?? false;
+  }
+
+  /// ✅ 블링크 상태 초기화 (애니메이션 완료 후 호출)
+  void clearBlinkState(String market) {
+    _blinkStates[market] = false;
+    // 상태 업데이트를 위한 notify
+    state = state.copyWith();
+  }
+
+  /// ✅ TimeFrame 관련 메서드들
+  String get currentTimeFrame => _ref.read(volumeTimeFrameController).currentTimeFrame;
+  int get currentIndex => _ref.read(volumeTimeFrameController).currentIndex;
+  List<String> get availableTimeFrames => _ref.read(volumeTimeFrameController).availableTimeFrames;
+
+  String getTimeFrameName(String timeFrame) {
+    return _ref.read(volumeTimeFrameController).getTimeFrameName(timeFrame);
+  }
+
+  void resetCurrentTimeFrame() {
+    _ref.read(volumeTimeFrameController).resetCurrentTimeFrame();
+  }
+
+  void resetAllTimeFrames() {
+    _ref.read(volumeTimeFrameController).resetAllTimeFrames();
+  }
+
+  DateTime? getNextResetTime() {
+    return _ref.read(volumeTimeFrameController).getNextResetTime();
+  }
+
+  /// ✅ 디버깅용 메서드들
+  Map<String, int> getBlinkDebugInfo() {
+    return _rankTracker.getDebugInfo();
+  }
+
+  /// ✅ 메모리 정리 (주기적으로 호출 권장)
+  void cleanupExpiredStates() {
+    cleanupExpiredHotStates();
+  }
+
+  /// ✅ 리소스 정리
+  @override
+  void dispose() {
+    // Provider 구독 해제
+    for (final subscription in _subscriptions) {
+      subscription.close();
+    }
+    _subscriptions.clear();
+    
+    // ✅ 모든 리소스 정리
+    disposeHot();
+    _rankTracker.dispose();
+    _blinkStates.clear();
+    _hotStates.clear();
+    
+    super.dispose();
+  }
+}
+
+/// ✅ 상태 클래스 (변경 없음)
+class VolumeControllerState {
+  final List<Volume> volumes;      // 정렬된 볼륨 데이터
+  final bool isTop100;            // Top 50/100 모드
+  final bool isLoading;           // 로딩 상태
+  final String? errorMessage;     // 에러 메시지
+
+  const VolumeControllerState({
+    this.volumes = const [],
+    this.isTop100 = false,
+    this.isLoading = false,
+    this.errorMessage,
+  });
+
+  VolumeControllerState copyWith({
+    List<Volume>? volumes,
+    bool? isTop100,
+    bool? isLoading,
+    String? errorMessage,
+  }) {
+    return VolumeControllerState(
+      volumes: volumes ?? this.volumes,
+      isTop100: isTop100 ?? this.isTop100,
+      isLoading: isLoading ?? this.isLoading,
+      errorMessage: errorMessage ?? this.errorMessage,
+    );
+  }
+}
+
+/// Provider 선언
+final volumeControllerProvider = StateNotifierProvider<VolumeController, VolumeControllerState>(
+  (ref) => VolumeController(ref),
+);\n\n// ====== lib/presentation/controllers/trade_controller.dart ======\n
+// lib/presentation/controllers/trade_controller.dart
+
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../core/config/app_config.dart';
+import '../../core/di/trade_provider.dart';
+import '../../domain/entities/trade.dart';
+import '../../domain/usecases/trade_usecase.dart';
+
+/// 🎯 깔끔하게 리팩토링된 TradeController (Volume/Surge 패턴 + 기존 Provider 호환)
+class TradeController extends StateNotifier<TradeControllerState> {
+  final Ref _ref;
+  final TradeUsecase _usecase;
+  
+  // ✅ Provider 구독 관리
+  final List<ProviderSubscription> _subscriptions = [];
+
+  TradeController(this._usecase, this._ref) : super(const TradeControllerState()) {
+    // ✅ 데이터 구독 초기화
+    _initializeDataSubscription();
+  }
+
+  /// ✅ 데이터 구독 초기화 (기존 Provider 이름 사용)
+  void _initializeDataSubscription() {
+    final subscription = _ref.listen(
+      tradeListProvider,  // ✅ 기존 Provider 이름 사용
+      (previous, next) {
+        next?.when(  // ✅ null safety 처리
+          data: (trades) => _processTradeData(trades),
+          loading: () => state = state.copyWith(isLoading: true),
+          error: (error, _) => state = state.copyWith(
+            errorMessage: error.toString(),
+            isLoading: false,
+          ),
+        );
+      },
+    );
+    _subscriptions.add(subscription);
+  }
+
+  /// ✅ 거래 데이터 처리 - Volume/Surge와 동일한 패턴
+  void _processTradeData(List<Trade> trades) {
+    // 1. 데이터 정렬
+    final sortedTrades = _applySorting(trades);
+    
+    // 2. 상태 업데이트 (Trade는 HOT/Blink 없으므로 단순)
+    state = state.copyWith(
+      trades: sortedTrades,
+      isLoading: false,
+      errorMessage: null,
+    );
+  }
+
+  /// ✅ 데이터 정렬 (순수 함수)
+  List<Trade> _applySorting(List<Trade> tradeData) {
+    final sorted = [...tradeData];
+    // 최신 순으로 정렬
+    sorted.sort((a, b) => b.timestampMs.compareTo(a.timestampMs));
+    return sorted;
+  }
+
+  /// ✅ 임계값 설정 - Usecase로 위임 (Volume/Surge 패턴)
+  void setThreshold(double threshold, int index) {
+    // ✅ Usecase로 위임 (Repository 직접 접근 제거)
+    _usecase.updateThreshold(threshold);
+    
+    // ✅ UI 상태 업데이트
+    state = state.copyWith(
+      threshold: threshold,
+      selectedIndex: index,
+    );
+  }
+
+  /// ✅ 구간/누적 모드 토글 - Usecase로 위임 (Volume/Surge 패턴)
+  void toggleRangeMode() {
+    final newMode = !state.isRangeMode;
+    
+    // ✅ Usecase로 위임 (Repository 직접 접근 제거)
+    _usecase.updateRangeMode(newMode);
+    
+    // ✅ UI 상태 업데이트
+    state = state.copyWith(isRangeMode: newMode);
+  }
+
+  /// ✅ 현재 설정에 따른 표시 텍스트 생성
+  String getThresholdDisplayText() {
+    final threshold = state.threshold;
+    final thresholds = availableThresholds;
+    final currentIndex = thresholds.indexOf(threshold);
+    
+    if (state.isRangeMode) {
+      // 구간 모드
+      if (currentIndex >= 0 && currentIndex < thresholds.length - 1) {
+        final nextThreshold = thresholds[currentIndex + 1];
+        final currentLabel = AppConfig.filterNames[threshold] ?? threshold.toStringAsFixed(0);
+        final nextLabel = AppConfig.filterNames[nextThreshold] ?? nextThreshold.toStringAsFixed(0);
+        return '금액 레인지: $currentLabel ~ $nextLabel원';
+      } else {
+        final currentLabel = AppConfig.filterNames[threshold] ?? threshold.toStringAsFixed(0);
+        return '금액 레인지: $currentLabel원 이상';
+      }
+    } else {
+      // 누적 모드
+      final currentLabel = AppConfig.filterNames[threshold] ?? threshold.toStringAsFixed(0);
+      return '최소 거래금액: $currentLabel원';
+    }
+  }
+
+  /// ✅ 토글 버튼 텍스트
+  String get toggleButtonText => state.isRangeMode ? '구간' : '누적';
+
+  /// ✅ 사용 가능한 임계값 옵션들
+  List<double> get availableThresholds =>
+    AppConfig.tradeFilters.where((f) => f >= 20000000).toList();
+
+  /// ✅ 거래 목록 추가 필터 (시장명)
+  List<Trade> filterByMarket(String? marketFilter) {
+    if (marketFilter == null || marketFilter.isEmpty) {
+      return state.trades;
+    }
+    final upper = marketFilter.toUpperCase();
+    return state.trades.where((t) => t.market.contains(upper)).toList();
+  }
+
+  /// ✅ 거래 목록 정렬
+  void sortTrades(String field, bool ascending) {
+    final list = [...state.trades];
+    list.sort((a, b) {
+      dynamic aValue;
+      dynamic bValue;
+      switch (field) {
+        case 'market':
+          aValue = a.market;
+          bValue = b.market;
+          break;
+        case 'price':
+          aValue = a.price;
+          bValue = b.price;
+          break;
+        case 'volume':
+          aValue = a.volume;
+          bValue = b.volume;
+          break;
+        case 'total':
+          aValue = a.total;
+          bValue = b.total;
+          break;
+        case 'timestamp':
+          aValue = a.timestampMs;
+          bValue = b.timestampMs;
+          break;
+        default:
+          aValue = a.timestampMs;
+          bValue = b.timestampMs;
+      }
+      final cmp = aValue is Comparable && bValue is Comparable
+          ? aValue.compareTo(bValue)
+          : 0;
+      return ascending ? cmp : -cmp;
+    });
+    state = state.copyWith(trades: list);
+  }
+
+  /// ✅ 리소스 정리
+  @override
+  void dispose() {
+    // Provider 구독 해제
+    for (final subscription in _subscriptions) {
+      subscription.close();
+    }
+    _subscriptions.clear();
+    
+    super.dispose();
+  }
+}
+
+/// ✅ 상태 클래스 (Volume/Surge 스타일로 단순화)
+class TradeControllerState {
+  final List<Trade> trades;           // 표시용 거래 데이터
+  final bool isLoading;              // 로딩 상태
+  final double threshold;            // 현재 임계값
+  final int selectedIndex;           // 슬라이더 인덱스
+  final bool isRangeMode;           // 구간/누적 모드
+  final String? errorMessage;        // 에러 메시지
+
+  const TradeControllerState({
+    this.trades = const [],
+    this.isLoading = false,
+    this.threshold = 20000000.0,
+    this.selectedIndex = 0,
+    this.isRangeMode = false,          // 기본값: 누적 모드
+    this.errorMessage,
+  });
+
+  TradeControllerState copyWith({
+    List<Trade>? trades,
+    bool? isLoading,
+    double? threshold,
+    int? selectedIndex,
+    bool? isRangeMode,
+    String? errorMessage,
+  }) {
+    return TradeControllerState(
+      trades: trades ?? this.trades,
+      isLoading: isLoading ?? this.isLoading,
+      threshold: threshold ?? this.threshold,
+      selectedIndex: selectedIndex ?? this.selectedIndex,
+      isRangeMode: isRangeMode ?? this.isRangeMode,
+      errorMessage: errorMessage ?? this.errorMessage,
+    );
+  }
+}
+
+/// ✅ Provider 선언 (UI에서 TradeController 사용하기 위해 필수)
+final tradeControllerProvider = StateNotifierProvider<TradeController, TradeControllerState>(
+  (ref) {
+    final usecase = ref.read(usecaseProvider);  // ✅ 기존 Provider 이름 사용
+    return TradeController(usecase, ref);
+  },
+);\n\n// ====== lib/presentation/pages/main_page.dart ======\n
+// lib/presentation/pages/main_page.dart
+
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter/services.dart';
+import '../../core/di/app_providers.dart';
+import '../../shared/widgets/common_app_bar.dart';
+import 'trade_page.dart';
+import 'volume_page.dart';
+import 'sector_page.dart';
+import 'surge_page.dart';
+// 🔥 Controller Provider들 import 추가
+import '../controllers/volume_controller.dart';
+import '../controllers/surge_controller.dart';
+import '../controllers/trade_controller.dart';
+import '../controllers/sector_controller.dart';
+
+/// 🎯 메인 페이지 - PageView로 4개 화면 관리
+class MainPage extends ConsumerStatefulWidget {
+  const MainPage({Key? key}) : super(key: key);
+
+  @override
+  ConsumerState<MainPage> createState() => _MainPageState();
+}
+
+class _MainPageState extends ConsumerState<MainPage> with TickerProviderStateMixin {
+  late PageController _pageController;
+  late AnimationController _animationController;
+  
+  // ✅ TradePage의 ScrollController를 위한 각 페이지별 관리
+  final Map<int, ScrollController> _pageScrollControllers = {};
+  
+  // 4개 페이지 정보
+  final List<PageInfo> _pages = [
+    PageInfo(
+      index: 0,
+      title: '급등락',
+      icon: Icons.trending_up,
+      builder: (scrollController) => SurgePage(scrollController: scrollController),
+    ),
+    PageInfo(
+      index: 1,
+      title: '체결',
+      icon: Icons.monetization_on,
+      builder: (scrollController) => TradePage(scrollController: scrollController),
+    ),
+    PageInfo(
+      index: 2,
+      title: '볼륨',
+      icon: Icons.bar_chart,
+      builder: (scrollController) => VolumePage(scrollController: scrollController),
+    ),
+    PageInfo(
+      index: 3,
+      title: '섹터',
+      icon: Icons.pie_chart,
+      builder: (scrollController) => SectorPage(scrollController: scrollController),
+    ),
+  ];
+
+  @override
+  void initState() {
+    super.initState();
+    
+    // PageController 초기화 (체결 페이지를 기본으로)
+    _pageController = PageController(initialPage: 1);
+    
+    // 애니메이션 컨트롤러 초기화 
+    _animationController = AnimationController(
+      duration: const Duration(milliseconds: 300),
+      vsync: this,
+    );
+    
+    // ✅ 각 페이지별 ScrollController 초기화
+    for (int i = 0; i < _pages.length; i++) {
+      _pageScrollControllers[i] = ScrollController();
+    }
+    
+    // 초기 페이지 인덱스 설정
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      ref.read(selectedTabProvider.notifier).state = 1; // 체결 페이지
+      
+      // 🔥 모든 Controller를 미리 초기화해서 데이터 스트림 시작
+      _initializeAllControllers();
+    });
+  }
+
+  /// 🔥 모든 Controller 미리 초기화 - 앱 시작과 동시에 모든 메뉴 실행
+  void _initializeAllControllers() {
+    try {
+      // 1. VolumeController 초기화 (볼륨 메뉴)
+      ref.read(volumeControllerProvider);
+      debugPrint('🔥 VolumeController 초기화 완료');
+      
+      // 2. SurgeController 초기화 (급등락 메뉴)  
+      ref.read(surgeControllerProvider);
+      debugPrint('🔥 SurgeController 초기화 완료');
+      
+      // 3. TradeController 초기화 (체결 메뉴 - 이미 실행중이지만 명시적으로)
+      ref.read(tradeControllerProvider);
+      debugPrint('🔥 TradeController 초기화 완료');
+      
+      // 4. SectorController 초기화 (섹터 메뉴)
+      ref.read(sectorControllerProvider);
+      debugPrint('🔥 SectorController 초기화 완료');
+      
+      debugPrint('✅ 모든 Controller 초기화 완료 - 4개 메뉴 모두 실행 시작!');
+      
+    } catch (e) {
+      debugPrint('❌ Controller 초기화 오류: $e');
+    }
+  }
+
+  @override
+  void dispose() {
+    _pageController.dispose();
+    _animationController.dispose();
+    // ✅ 모든 ScrollController 해제
+    for (final controller in _pageScrollControllers.values) {
+      controller.dispose();
+    }
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: CommonAppBar(
+        title: '', // 빈 제목 (슬라이드 인디케이터가 들어갈 자리)
+        pages: _pages,
+        pageController: _pageController,
+        animationController: _animationController,
+      ),
+      body: SafeArea(
+        child: PageView.builder(
+          controller: _pageController,
+          onPageChanged: _onPageChanged,
+          itemCount: _pages.length,
+          // ✅ iOS 스타일 physics + 스크롤 충돌 방지
+          physics: const BouncingScrollPhysics(
+            parent: AlwaysScrollableScrollPhysics(),
+          ),
+          // ✅ 스크롤 방향 명시 (수평 스와이프)
+          scrollDirection: Axis.horizontal,
+          itemBuilder: (context, index) {
+            // ✅ 각 페이지에 해당하는 ScrollController 전달
+            final scrollController = _pageScrollControllers[index]!;
+            return _pages[index].builder(scrollController);
+          },
+        ),
+      ),
+    );
+  }
+
+  /// 🔥 페이지 변경 처리 - 햅틱 설정 체크 추가
+  void _onPageChanged(int index) {
+    // 🔥 설정 체크 후 햅틱 (다른 위젯들과 동일한 패턴)
+    if (ref.read(appSettingsProvider).isHapticEnabled) {
+      HapticFeedback.lightImpact();
+    }
+
+    // Provider 상태 업데이트
+    ref.read(selectedTabProvider.notifier).state = index;
+    
+    // 애니메이션 트리거
+    _animationController.forward().then((_) {
+      _animationController.reset();
+    });
+    
+    debugPrint('📱 페이지 변경: ${_pages[index].title} (index: $index)');
+  }
+
+  /// 🎯 외부에서 페이지 이동 (슬라이드 인디케이터 클릭 시)
+  void goToPage(int index) {
+    if (index >= 0 && index < _pages.length) {
+      _pageController.animateToPage(
+        index,
+        duration: const Duration(milliseconds: 300),
+        curve: Curves.easeInOut,
+      );
+    }
+  }
+}
+
+/// 📄 페이지 정보 클래스
+class PageInfo {
+  final int index;
+  final String title;
+  final IconData icon;
+  final Widget Function(ScrollController scrollController) builder;
+
+  const PageInfo({
+    required this.index,
+    required this.title,
+    required this.icon,
+    required this.builder,
+  });
+}\n\n// ====== lib/presentation/pages/trade_page.dart ======\n
+// lib/presentation/pages/trade_page.dart
+
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../core/config/app_config.dart';
+import '../../core/di/app_providers.dart';
+import '../../domain/entities/app_settings.dart';
+import '../../shared/widgets/slider_widget.dart';
+import '../controllers/trade_controller.dart';
+import '../widgets/trade_tile.dart';
+
+class TradePage extends ConsumerWidget {
+  final ScrollController scrollController;
+
+  const TradePage({
+    Key? key,
+    required this.scrollController,
+  }) : super(key: key);
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    // ✅ Controller state watch (데이터 + UI 상태) - Volume/Surge 패턴
+    final state = ref.watch(tradeControllerProvider);
+    final controller = ref.read(tradeControllerProvider.notifier);
+    
+    // ✅ 임계값 관련
+    final thresholds = controller.availableThresholds;
+    
+    // ✅ UI 설정
+    final sliderPosition = ref.watch(appSettingsProvider).sliderPosition;
+    final displayMode = ref.watch(appSettingsProvider).displayMode;
+    
+    // ✅ 공통 슬라이더 위젯 - Volume/Surge와 동일한 패턴
+    final sliderWidget = CommonSliderWidget(
+      leftText: controller.getThresholdDisplayText(),
+      sliderValue: state.selectedIndex.toDouble(),
+      sliderMin: 0.0,
+      sliderMax: (thresholds.length - 1).toDouble(),
+      sliderDivisions: thresholds.length - 1,
+      sliderLabel: AppConfig.filterNames[thresholds[state.selectedIndex]] ?? 
+                   thresholds[state.selectedIndex].toStringAsFixed(0),
+      onSliderChanged: (value) {
+        final index = value.round();
+        final threshold = thresholds[index];
+        controller.setThreshold(threshold, index);  // ✅ Controller 메서드 호출 (Volume/Surge 패턴)
+      },
+      rightWidget: CommonToggleButton(  // ✅ rightWidget으로 복구 (우측 위치)
+        text: controller.toggleButtonText,
+        isActive: !state.isRangeMode, // 누적일 때 active
+        onTap: () => controller.toggleRangeMode(),  // ✅ Controller 메서드 호출
+        // ✅ Sector와 동일한 기본 크기 (fontSize, padding 제거)
+      ),
+    );
+
+    return PrimaryScrollController(
+      controller: scrollController,
+      child: Column(
+        children: [
+          if (sliderPosition == SliderPosition.top) sliderWidget,
+          Expanded(child: _buildTradeList(state, controller, thresholds, context, displayMode)),
+          if (sliderPosition == SliderPosition.bottom) sliderWidget,
+        ],
+      ),
+    );
+  }
+
+  /// ✅ 거래 리스트 (Controller state 기반) - Volume/Surge와 동일한 패턴
+  Widget _buildTradeList(
+    TradeControllerState state,
+    TradeController controller,
+    List<double> thresholds,
+    BuildContext context,
+    DisplayMode displayMode,
+  ) {
+    // ✅ 로딩 상태
+    if (state.isLoading) {
+      return const Center(child: CircularProgressIndicator());
+    }
+
+    // ✅ 에러 상태
+    if (state.errorMessage != null) {
+      return Center(child: Text('체결 로드 중 오류: ${state.errorMessage}'));
+    }
+
+    // ✅ 빈 데이터
+    if (state.trades.isEmpty) {
+      return Center(
+        child: Text(
+          '포착된 체결이 없습니다.\n(임계값: ${AppConfig.filterNames[thresholds[state.selectedIndex]] ?? thresholds[state.selectedIndex].toStringAsFixed(0)})',
+          textAlign: TextAlign.center,
+          style: TextStyle(color: Theme.of(context).hintColor, fontSize: 16),
+        ),
+      );
+    }
+
+    // ✅ 거래 리스트 (이미 정렬된 데이터 사용) - Volume/Surge와 동일한 패턴
+    return CommonScrollableList(
+      scrollController: scrollController,
+      itemCount: state.trades.length,
+      addAutomaticKeepAlives: true,   // 🔥 메모리 최적화
+      addRepaintBoundaries: true,     // 🔥 리페인트 최적화
+      itemBuilder: (_, i) {
+        final trade = state.trades[i];
+        
+        return TradeTile(
+          trade: trade,
+          displayMode: displayMode,
+        );
+      },
+    );
+  }
+}\n\n// ====== lib/presentation/pages/splash_page.dart ======\n
+// lib/presentation/pages/splash_page.dart
+
+import 'package:flutter/material.dart';
+import 'package:video_player/video_player.dart';
+import 'main_page.dart';
+
+class SplashPage extends StatefulWidget {
+  const SplashPage({Key? key}) : super(key: key);
+
+  @override
+  State<SplashPage> createState() => _SplashPageState();
+}
+
+class _SplashPageState extends State<SplashPage> {
+  VideoPlayerController? _controller;
+  bool _isVideoInitialized = false;
+  bool _hasNavigated = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _initializeVideo();
+    
+    // 안전망: 5초 후 강제 이동 (비디오 문제 시)
+    Future.delayed(const Duration(seconds: 5), () {
+      if (!_hasNavigated && mounted) {
+        _navigateToMain();
+      }
+    });
+  }
+
+  Future<void> _initializeVideo() async {
+    try {
+      _controller = VideoPlayerController.asset('assets/noonchit_intro_84frames.mp4');
+      
+      await _controller!.initialize();
+      
+      if (mounted) {
+        setState(() {
+          _isVideoInitialized = true;
+        });
+        
+        // 비디오 설정
+        _controller!.setVolume(0.0); // 음소거
+        _controller!.setLooping(false);
+        
+        // 재생 완료 리스너
+        _controller!.addListener(_videoListener);
+        
+        // 재생 시작
+        _controller!.play();
+      }
+    } catch (e) {
+      // 비디오 로드 실패 시 즉시 메인으로 이동
+      debugPrint('Video initialization failed: $e');
+      if (mounted) {
+        _navigateToMain();
+      }
+    }
+  }
+
+  void _videoListener() {
+    if (_controller != null && _controller!.value.position >= _controller!.value.duration) {
+      // 비디오 재생 완료
+      _navigateToMain();
+    }
+  }
+
+  void _navigateToMain() {
+    if (_hasNavigated) return;
+    _hasNavigated = true;
+    
+    if (mounted) {
+      Navigator.of(context).pushReplacement(
+        PageRouteBuilder(
+          pageBuilder: (context, animation, secondaryAnimation) => const MainPage(),
+          transitionDuration: const Duration(milliseconds: 300),
+          transitionsBuilder: (context, animation, secondaryAnimation, child) {
+            return FadeTransition(
+              opacity: animation,
+              child: child,
+            );
+          },
+        ),
+      );
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller?.removeListener(_videoListener);
+    _controller?.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      backgroundColor: const Color(0xFF121212), // 어두운 배경
+      body: Center(
+        child: _isVideoInitialized && _controller != null
+            ? AspectRatio(
+                aspectRatio: _controller!.value.aspectRatio,
+                child: VideoPlayer(_controller!),
+              )
+            : _buildLoadingFallback(),
+      ),
+    );
+  }
+
+  Widget _buildLoadingFallback() {
+    return Column(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        // 로딩 중이거나 비디오 실패 시 대체 UI
+        Icon(
+          Icons.currency_bitcoin,
+          size: 64,
+          color: Colors.orange.withValues(alpha: 0.8),
+        ),
+        const SizedBox(height: 16),
+        Text(
+          'NOONCHIT',
+          style: TextStyle(
+            fontSize: 24,
+            fontWeight: FontWeight.bold,
+            color: Colors.white.withValues(alpha: 0.9),
+            letterSpacing: 2.0,
+          ),
+        ),
+        const SizedBox(height: 24),
+        SizedBox(
+          width: 32,
+          height: 32,
+          child: CircularProgressIndicator(
+            strokeWidth: 3,
+            valueColor: AlwaysStoppedAnimation<Color>(
+              Colors.orange.withValues(alpha: 0.8),
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+}\n\n// ====== lib/presentation/pages/market_mood_page.dart ======\n
+// lib/presentation/pages/market_mood_page.dart
+// 📱 Presentation Layer: Market Mood 페이지 (모달 형태, 클린 아키텍처)
+
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../core/di/app_providers.dart';
+import '../controllers/market_mood_controller.dart';
+
+/// 📱 마켓무드 상세 페이지 (모달 형태)
+class MarketMoodPage extends ConsumerStatefulWidget {
+  final double statusIconSize;
+  final MarketMoodData data;
+
+  const MarketMoodPage({
+    super.key,
+    required this.statusIconSize,
+    required this.data,
+  });
+
+  @override
+  ConsumerState<MarketMoodPage> createState() => _MarketMoodPageState();
+}
+
+class _MarketMoodPageState extends ConsumerState<MarketMoodPage>
+    with SingleTickerProviderStateMixin {
+  late AnimationController _animationController;
+  late Animation<double> _scaleAnimation;
+  late Animation<double> _opacityAnimation;
+
+  @override
+  void initState() {
+    super.initState();
+    _setupAnimations();
+    _animationController.forward();
+  }
+
+  void _setupAnimations() {
+    _animationController = AnimationController(
+      duration: const Duration(milliseconds: 200),
+      vsync: this,
+    );
+
+    _scaleAnimation = Tween<double>(
+      begin: 0.0,
+      end: 1.0,
+    ).animate(CurvedAnimation(
+      parent: _animationController,
+      curve: Curves.elasticOut,
+    ));
+
+    _opacityAnimation = Tween<double>(
+      begin: 0.0,
+      end: 1.0,
+    ).animate(CurvedAnimation(
+      parent: _animationController,
+      curve: const Interval(0.0, 0.5),
+    ));
+  }
+
+  @override
+  void dispose() {
+    _animationController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _animationController,
+      builder: (context, child) {
+        return Transform.scale(
+          scale: _scaleAnimation.value,
+          alignment: Alignment.center,
+          child: Opacity(
+            opacity: _opacityAnimation.value,
+            child: _buildPageContent(),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildPageContent() {
+    // 화면 크기 계산
+    final screenSize = MediaQuery.of(context).size;
+    final maxWidth = screenSize.width * 0.9;
+
+    return IntrinsicWidth(
+      child: Container(
+        constraints: BoxConstraints(
+          minWidth: widget.statusIconSize * 4.2,
+          maxWidth: maxWidth,
+        ),
+        decoration: _buildContainerDecoration(),
+        child: Padding(
+          padding: const EdgeInsets.all(14),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              _buildHeader(),
+              const SizedBox(height: 8),
+              _buildCoreMetrics(),
+              const SizedBox(height: 8),
+              _buildIntradayAnalysis(),
+              const SizedBox(height: 8),
+              _buildLongTermAnalysis(),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  BoxDecoration _buildContainerDecoration() {
+    return BoxDecoration(
+      color: Theme.of(context).colorScheme.surface,
+      borderRadius: BorderRadius.circular(16),
+      boxShadow: [
+        BoxShadow(
+          // [수정] withOpacity -> withValues
+          color: Colors.black.withValues(alpha: 0.08),
+          blurRadius: 16,
+          offset: const Offset(0, 6),
+          spreadRadius: 2,
+        ),
+        BoxShadow(
+          // [수정] withOpacity -> withValues
+          color: Colors.black.withValues(alpha: 0.04),
+          blurRadius: 4,
+          offset: const Offset(0, 2),
+        ),
+      ],
+      border: Border.all(
+        // [수정] withOpacity -> withValues
+        color: Theme.of(context).colorScheme.outline.withValues(alpha: 0.12),
+        width: 0.8,
+      ),
+    );
+  }
+
+  Widget _buildHeader() {
+    final controller = ref.read(marketMoodPageControllerProvider.notifier);
+    final updateTime = controller.formatUpdateTime(widget.data.updatedAt);
+
+    return Consumer(
+      builder: (context, ref, child) {
+        final computedAsync = ref.watch(marketMoodComputedDataProvider);
+
+        return computedAsync.when(
+          data: (computedData) {
+            final currentMood = ref.watch(currentMarketMoodProvider);
+            final moodEmoji = controller.getMoodEmoji(currentMood);
+            final moodName = controller.getMoodName(currentMood);
+
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      moodEmoji,
+                      style: const TextStyle(fontSize: 12),
+                    ),
+                    const SizedBox(width: 4),
+                    Flexible(
+                      child: Text(
+                        '$moodName - ᖾ ᖽ',
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w700,
+                          color: Theme.of(context).colorScheme.onSurface,
+                          letterSpacing: 0.3,
+                        ),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 2),
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      Icons.schedule,
+                      size: 9,
+                      // [수정] withOpacity -> withValues
+                      color: Theme.of(context).colorScheme.primary.withValues(alpha: 0.7),
+                    ),
+                    const SizedBox(width: 3),
+                    Text(
+                      '실시간 기준 • ',
+                      style: TextStyle(
+                        fontSize: 8,
+                        fontWeight: FontWeight.w500,
+                        // [수정] withOpacity -> withValues
+                        color: Theme.of(context).colorScheme.primary.withValues(alpha: 0.7),
+                      ),
+                    ),
+                    Icon(
+                      Icons.access_time,
+                      size: 9,
+                      // [수정] withOpacity -> withValues
+                      color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.6),
+                    ),
+                    const SizedBox(width: 3),
+                    Flexible(
+                      child: Text(
+                        '$updateTime 업데이트',
+                        style: TextStyle(
+                          fontSize: 8,
+                          // [수정] withOpacity -> withValues
+                          color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.6),
+                        ),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            );
+          },
+          loading: () => _buildLoadingHeader(),
+          error: (_, __) => _buildErrorHeader(),
+        );
+      },
+    );
+  }
+
+  Widget _buildLoadingHeader() {
+    return const Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            SizedBox(
+              width: 16, height: 16,
+              child: CircularProgressIndicator(strokeWidth: 2)
+            ),
+            SizedBox(width: 8),
+            Text(
+              '로딩중...',
+              style: TextStyle(
+                fontSize: 11,
+                fontWeight: FontWeight.w700,
+              ),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  Widget _buildErrorHeader() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              Icons.error_outline,
+              size: 12,
+              color: Theme.of(context).colorScheme.error,
+            ),
+            const SizedBox(width: 4),
+            Text(
+              '데이터 로드 오류',
+              style: TextStyle(
+                fontSize: 11,
+                fontWeight: FontWeight.w700,
+                color: Theme.of(context).colorScheme.error,
+              ),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  Widget _buildCoreMetrics() {
+    return Consumer(
+      builder: (context, ref, child) {
+        final exchangeAsync = ref.watch(exchangeRateProvider);
+
+        return exchangeAsync.when(
+          data: (exchangeRate) => _buildCoreMetricsContent(exchangeRate),
+          loading: () => _buildLoadingMetrics(),
+          error: (_, __) => _buildCoreMetricsContent(1400.0),
+        );
+      },
+    );
+  }
+
+  Widget _buildCoreMetricsContent(double exchangeRate) {
+    final controller = ref.read(marketMoodPageControllerProvider.notifier);
+
+    return FutureBuilder<List<String>>(
+      future: Future.wait([
+        controller.formatVolume(widget.data.totalVolumeUsd),
+        controller.formatMarketCap(widget.data.totalMarketCapUsd),
+      ]),
+      builder: (context, snapshot) {
+        if (snapshot.connectionState == ConnectionState.waiting) {
+          return _buildLoadingMetrics();
+        }
+        if (snapshot.hasData) {
+          final values = snapshot.data!;
+          return Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              _buildSectionTitle('핵심 지표', Icons.analytics),
+              const SizedBox(height: 4),
+              _buildStatRow(
+                icon: Icons.monetization_on,
+                label: '24시간 거래대금',
+                value: values[0],
+                isHighlight: true,
+              ),
+              _buildStatRow(
+                icon: Icons.pie_chart,
+                label: '총 시가총액',
+                value: values[1],
+              ),
+              _buildStatRow(
+                icon: Icons.trending_up,
+                label: '시총 24시간 변화',
+                value: '${widget.data.marketCapChange24h >= 0 ? '+' : ''}${widget.data.marketCapChange24h.toStringAsFixed(2)}%',
+                isHighlight: widget.data.marketCapChange24h > 0,
+                isWarning: widget.data.marketCapChange24h < -2,
+              ),
+              _buildStatRow(
+                icon: Icons.flash_on,
+                label: 'BTC 도미넌스',
+                value: '${widget.data.btcDominance.toStringAsFixed(1)}%',
+              ),
+            ],
+          );
+        }
+        return _buildLoadingMetrics();
+      },
+    );
+  }
+
+  Widget _buildLoadingMetrics() {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _buildSectionTitle('핵심 지표', Icons.analytics),
+        const SizedBox(height: 4),
+        const SizedBox(
+          width: 16, height: 16,
+          child: CircularProgressIndicator(strokeWidth: 2),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildIntradayAnalysis() {
+    return Consumer(
+      builder: (context, ref, child) {
+        final computedAsync = ref.watch(marketMoodComputedDataProvider);
+
+        return computedAsync.when(
+          data: (computedData) {
+            final comparisonData = ref.watch(volumeComparisonProvider);
+            return Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _buildSectionTitle('인트라데이 비교 분석', Icons.schedule),
+                const SizedBox(height: 4),
+                _buildComparisonRow('30분 대비', comparisonData.thirtyMin, Icons.hourglass_empty),
+                _buildComparisonRow('1시간 대비', comparisonData.oneHour, Icons.hourglass_full),
+                _buildComparisonRow('2시간 대비', comparisonData.twoHour, Icons.access_time),
+                _buildComparisonRow('4시간 대비', comparisonData.fourHour, Icons.timer),
+                _buildComparisonRow('8시간 대비', comparisonData.eightHour, Icons.timer_outlined),
+                _buildComparisonRow('12시간 대비', comparisonData.twelveHour, Icons.update),
+              ],
+            );
+          },
+          loading: () => _buildLoadingSection('인트라데이 비교 분석', Icons.schedule),
+          error: (_, __) => _buildErrorSection('인트라데이 비교 분석', Icons.schedule),
+        );
+      },
+    );
+  }
+
+  Widget _buildLongTermAnalysis() {
+    return Consumer(
+      builder: (context, ref, child) {
+        final computedAsync = ref.watch(marketMoodComputedDataProvider);
+
+        return computedAsync.when(
+          data: (computedData) {
+            final comparisonData = ref.watch(volumeComparisonProvider);
+            return Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _buildSectionTitle('장기 비교 분석', Icons.calendar_month),
+                const SizedBox(height: 4),
+                _buildComparisonRow('24시간 대비', comparisonData.twentyFourHour, Icons.calendar_today),
+                _buildComparisonRow('3일 평균 대비', comparisonData.threeDayAverage, Icons.view_day),
+                _buildComparisonRow('일주일 평균 대비', comparisonData.weeklyAverage, Icons.date_range),
+              ],
+            );
+          },
+          loading: () => _buildLoadingSection('장기 비교 분석', Icons.calendar_month),
+          error: (_, __) => _buildErrorSection('장기 비교 분석', Icons.calendar_month),
+        );
+      },
+    );
+  }
+
+  Widget _buildLoadingSection(String title, IconData icon) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _buildSectionTitle(title, icon),
+        const SizedBox(height: 4),
+        const SizedBox(
+          width: 16, height: 16,
+          child: CircularProgressIndicator(strokeWidth: 2),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildErrorSection(String title, IconData icon) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _buildSectionTitle(title, icon),
+        const SizedBox(height: 4),
+        Text(
+          '데이터 로드 오류',
+          style: TextStyle(
+            fontSize: 9,
+            color: Theme.of(context).colorScheme.error,
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildComparisonRow(String label, ComparisonResult result, IconData icon) {
+    final controller = ref.read(marketMoodPageControllerProvider.notifier);
+
+    if (result.isReady && result.changePercent != null) {
+      return _buildStatRow(
+        icon: icon,
+        label: label,
+        value: controller.formatComparisonValue(result),
+        isHighlight: controller.isHighlight(result),
+        isWarning: controller.isWarning(result),
+      );
+    } else {
+      return _buildProgressRow(icon, label, result);
+    }
+  }
+
+  Widget _buildProgressRow(IconData icon, String label, ComparisonResult result) {
+    final controller = ref.read(marketMoodPageControllerProvider.notifier);
+    final progressPercent = controller.getProgressPercent(result);
+
+    return Container(
+      margin: const EdgeInsets.symmetric(vertical: 1),
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            icon,
+            size: 11,
+            // [수정] withOpacity -> withValues
+            color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.6),
+          ),
+          const SizedBox(width: 5),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  '$label: $progressPercent% (${result.status})',
+                  style: TextStyle(
+                    fontSize: 9,
+                    fontWeight: FontWeight.w500,
+                    // [수정] withOpacity -> withValues
+                    color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.7),
+                  ),
+                ),
+                const SizedBox(height: 2),
+                LinearProgressIndicator(
+                  value: result.progressPercent.clamp(0.0, 1.0),
+                  // [수정] withOpacity -> withValues
+                  backgroundColor: Theme.of(context).colorScheme.outline.withValues(alpha: 0.2),
+                  valueColor: AlwaysStoppedAnimation(
+                    result.progressPercent >= 1.0
+                      ? Colors.green
+                      // [수정] withOpacity -> withValues
+                      : Theme.of(context).colorScheme.primary.withValues(alpha: 0.8),
+                  ),
+                  minHeight: 3,
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSectionTitle(String title, IconData icon) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(
+          icon,
+          size: 11,
+          // [수정] withOpacity -> withValues
+          color: Theme.of(context).colorScheme.primary.withValues(alpha: 0.8),
+        ),
+        const SizedBox(width: 4),
+        Text(
+          title,
+          style: TextStyle(
+            fontSize: 9,
+            fontWeight: FontWeight.w700,
+            // [수정] withOpacity -> withValues
+            color: Theme.of(context).colorScheme.primary.withValues(alpha: 0.8),
+            letterSpacing: 0.3,
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildStatRow({
+    required IconData icon,
+    required String label,
+    required String value,
+    bool isError = false,
+    bool isHighlight = false,
+    bool isWarning = false,
+  }) {
+    Color getColor() {
+      if (isError) return Theme.of(context).colorScheme.error;
+      if (isHighlight) return Colors.green;
+      if (isWarning) return Colors.red;
+      // [수정] withOpacity -> withValues
+      return Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.6);
+    }
+
+    return Container(
+      margin: const EdgeInsets.symmetric(vertical: 1),
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+      decoration: BoxDecoration(
+        color: isHighlight
+            // [수정] withOpacity -> withValues
+            ? Colors.green.withValues(alpha: 0.08)
+            : isWarning
+            // [수정] withOpacity -> withValues
+            ? Colors.red.withValues(alpha: 0.08)
+            : Colors.transparent,
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(
+            icon,
+            size: 11,
+            color: getColor(),
+          ),
+          const SizedBox(width: 5),
+          Text(
+            '$label: ',
+            style: TextStyle(
+              fontSize: 9,
+              fontWeight: FontWeight.w500,
+              // [수정] withOpacity -> withValues
+              color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.7),
+            ),
+          ),
+          Flexible(
+            child: Text(
+              value,
+              style: TextStyle(
+                fontSize: 9,
+                fontWeight: FontWeight.w600,
+                color: getColor(),
+                letterSpacing: 0.2,
+              ),
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}\n\n// ====== lib/presentation/pages/sector_page.dart ======\n
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../core/config/app_config.dart';
+import '../../core/di/sector_provider.dart';
+import '../../core/di/app_providers.dart';
+import '../../domain/entities/app_settings.dart';
+import '../../shared/widgets/slider_widget.dart';
+import '../controllers/sector_controller.dart';
+import '../widgets/sector_tile.dart';
+
+class SectorPage extends ConsumerWidget {
+  final ScrollController scrollController;
+
+  const SectorPage({
+    Key? key,
+    required this.scrollController,
+  }) : super(key: key);
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    // ✅ Controller state watch (데이터 + UI 상태)
+    final state = ref.watch(sectorControllerProvider);
+    final controller = ref.read(sectorControllerProvider.notifier);
+    
+    // ✅ TimeFrame 관련
+    final timeFrames = AppConfig.timeFrames.map((tf) => '${tf}m').toList();
+    final index = ref.watch(sectorTimeFrameIndexProvider);
+    final timeFrameCtrl = ref.read(sectorTimeFrameController);
+    
+    // ✅ UI 설정
+    final sliderPosition = ref.watch(appSettingsProvider).sliderPosition;
+    
+    // ✅ 공통 슬라이더 위젯
+    final sliderWidget = CommonSliderWidget(
+      leftText: '시간대: ${AppConfig.timeFrameNames[AppConfig.timeFrames[index]] ?? timeFrames[index]}',
+      sliderValue: index.toDouble(),
+      sliderMin: 0.0,
+      sliderMax: (timeFrames.length - 1).toDouble(),
+      sliderDivisions: timeFrames.length - 1,
+      sliderLabel: AppConfig.timeFrameNames[AppConfig.timeFrames[index]] ?? timeFrames[index],
+      onSliderChanged: (value) {
+        final i = value.round();
+        controller.setTimeFrame(timeFrames[i], i); 
+      },
+      centerWidget: CommonToggleButton(
+        text: timeFrameCtrl.currentSectorClassificationName,
+        isActive: state.isDetailedClassification, // 상세일 때 active
+        onTap: () => controller.toggleSectorClassification(),
+        icon: state.isDetailedClassification ? Icons.view_module : Icons.view_list,
+      ),
+      rightWidget: CommonCountdownWidget(
+        nextResetTime: timeFrameCtrl.getNextResetTime(),
+      ),
+    );
+
+    return PrimaryScrollController(
+      controller: scrollController,
+      child: Column(
+        children: [
+          if (sliderPosition == SliderPosition.top) sliderWidget,
+          Expanded(child: _buildSectorList(state, controller, timeFrames, index, context)),
+          if (sliderPosition == SliderPosition.bottom) sliderWidget,
+        ],
+      ),
+    );
+  }
+
+  /// ✅ 섹터 리스트 (Controller state 기반)
+  Widget _buildSectorList(
+    SectorControllerState state,
+    SectorController controller,
+    List<String> timeFrames,
+    int index,
+    BuildContext context,
+  ) {
+    // ✅ 로딩 상태
+    if (state.isLoading) {
+      return const Center(child: CircularProgressIndicator());
+    }
+
+    // ✅ 에러 상태
+    if (state.errorMessage != null) {
+      return Center(child: Text('섹터 데이터 로드 중 오류: ${state.errorMessage}'));
+    }
+
+    // ✅ 빈 데이터
+    if (state.sectorVolumes.isEmpty) {
+      return Center(
+        child: Text(
+          '섹터 거래대금 데이터가 없습니다.\n(시간대: ${AppConfig.timeFrameNames[AppConfig.timeFrames[index]] ?? timeFrames[index]})',
+          textAlign: TextAlign.center,
+          style: TextStyle(color: Theme.of(context).hintColor, fontSize: 16),
+        ),
+      );
+    }
+
+    // ✅ 섹터 리스트 (이미 정렬된 데이터 사용)
+    return CommonScrollableList(
+      scrollController: scrollController,
+      itemCount: state.sectorVolumes.length,
+      itemBuilder: (_, i) {
+        final volume = state.sectorVolumes[i];
+        final sectorName = volume.market.replaceFirst('SECTOR-', '');
+        final rank = i + 1;
+        
+        return SectorTile(
+          sectorName: sectorName,
+          totalVolume: volume.totalVolume,
+          rank: rank,
+          timeFrame: volume.timeFrame,
+          lastUpdated: volume.lastUpdated,
+          // ✅ 안전한 상태 조회
+          isHot: controller.isHot(sectorName),
+          shouldBlink: controller.shouldBlink(sectorName),
+          // ✅ 분류 상태 전달
+          isDetailedClassification: state.isDetailedClassification,
+        );
+      },
+    );
+  }
+}\n\n// ====== lib/presentation/pages/notification_page.dart ======\n
+// lib/presentation/pages/notification_page.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+/// 임시 알림 페이지 (에러 해결용)
+class NotificationPage extends ConsumerWidget {
+  const NotificationPage({Key? key}) : super(key: key);
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('알림'),
+        centerTitle: true,
+        elevation: 0,
+      ),
+      body: const Center(
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(
+              Icons.notifications_outlined,
+              size: 80,
+              color: Colors.orange,
+            ),
+            SizedBox(height: 24),
+            Text(
+              '알림 페이지',
+              style: TextStyle(
+                fontSize: 24,
+                fontWeight: FontWeight.bold,
+                color: Colors.orange,
+              ),
+            ),
+            SizedBox(height: 12),
+            Text(
+              '임시 페이지입니다',
+              style: TextStyle(
+                fontSize: 16,
+                color: Colors.grey,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}\n\n// ====== lib/presentation/pages/volume_page.dart ======\n
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../core/config/app_config.dart';
+import '../../core/di/volume_provider.dart';
+import '../../core/di/app_providers.dart';
+import '../../domain/entities/app_settings.dart';
+import '../../shared/widgets/slider_widget.dart';
+import '../controllers/volume_controller.dart';
+import '../widgets/volume_tile.dart';
+
+class VolumePage extends ConsumerWidget {
+  final ScrollController scrollController;
+
+  const VolumePage({
+    Key? key,
+    required this.scrollController,
+  }) : super(key: key);
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    // ✅ Controller state watch (데이터 + UI 상태)
+    final state = ref.watch(volumeControllerProvider);
+    final controller = ref.read(volumeControllerProvider.notifier);
+    
+    // ✅ TimeFrame 관련
+    final timeFrames = AppConfig.timeFrames.map((tf) => '${tf}m').toList();
+    final index = ref.watch(volumeTimeFrameIndexProvider);
+    final timeFrameCtrl = ref.read(volumeTimeFrameController);
+    
+    // ✅ UI 설정
+    final sliderPosition = ref.watch(appSettingsProvider).sliderPosition;
+    
+    // ✅ 공통 슬라이더 위젯
+    final sliderWidget = CommonSliderWidget(
+      leftText: '시간대: ${AppConfig.timeFrameNames[AppConfig.timeFrames[index]] ?? timeFrames[index]}',
+      sliderValue: index.toDouble(),
+      sliderMin: 0.0,
+      sliderMax: (timeFrames.length - 1).toDouble(),
+      sliderDivisions: timeFrames.length - 1,
+      sliderLabel: AppConfig.timeFrameNames[AppConfig.timeFrames[index]] ?? timeFrames[index],
+      onSliderChanged: (value) {
+        final i = value.round();
+        controller.setTimeFrame(timeFrames[i], i); 
+      },
+      centerWidget: CommonToggleButton(
+        text: controller.currentLimitName,
+        isActive: state.isTop100,
+        onTap: () => controller.toggleTopLimit(),
+      ),
+      rightWidget: CommonCountdownWidget(
+        nextResetTime: timeFrameCtrl.getNextResetTime(),
+      ),
+    );
+
+    return PrimaryScrollController(
+      controller: scrollController,
+      child: Column(
+        children: [
+          if (sliderPosition == SliderPosition.top) sliderWidget,
+          Expanded(child: _buildVolumeList(state, controller, timeFrames, index, context)),
+          if (sliderPosition == SliderPosition.bottom) sliderWidget,
+        ],
+      ),
+    );
+  }
+
+  /// ✅ 볼륨 리스트 (Controller state 기반)
+  Widget _buildVolumeList(
+    VolumeControllerState state,
+    VolumeController controller,
+    List<String> timeFrames,
+    int index,
+    BuildContext context,
+  ) {
+    // ✅ 로딩 상태
+    if (state.isLoading) {
+      return const Center(child: CircularProgressIndicator());
+    }
+
+    // ✅ 에러 상태
+    if (state.errorMessage != null) {
+      return Center(child: Text('볼륨 로드 중 오류: ${state.errorMessage}'));
+    }
+
+    // ✅ 빈 데이터
+    if (state.volumes.isEmpty) {
+      return Center(
+        child: Text(
+          '거래량 데이터가 없습니다.\n(시간대: ${AppConfig.timeFrameNames[AppConfig.timeFrames[index]] ?? timeFrames[index]})',
+          textAlign: TextAlign.center,
+          style: TextStyle(color: Theme.of(context).hintColor, fontSize: 16),
+        ),
+      );
+    }
+
+    // ✅ 볼륨 리스트 (이미 정렬된 데이터 사용)
+    return CommonScrollableList(
+      scrollController: scrollController,
+      itemCount: state.volumes.length,
+      itemBuilder: (_, i) {
+        final volume = state.volumes[i];
+        final rank = i + 1;
+        
+        return VolumeTile(
+          market: volume.market,
+          totalVolume: volume.totalVolume,
+          rank: rank,
+          // ✅ 안전한 상태 조회 (rank 파라미터 불필요)
+          isHot: controller.isHot(volume.market),
+          shouldBlink: controller.shouldBlink(volume.market),
+        );
+      },
+    );
+  }
+}\n\n// ====== lib/presentation/pages/surge_page.dart ======\n
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../core/config/app_config.dart';
+import '../../core/di/surge_provider.dart';
+import '../../core/di/app_providers.dart';
+import '../../domain/entities/app_settings.dart';
+import '../../shared/widgets/slider_widget.dart';
+import '../controllers/surge_controller.dart';
+import '../widgets/surge_tile.dart';
+
+class SurgePage extends ConsumerWidget {
+  final ScrollController scrollController;
+
+  const SurgePage({
+    Key? key,
+    required this.scrollController,
+  }) : super(key: key);
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    // ✅ Controller state watch (데이터 + UI 상태)
+    final state = ref.watch(surgeControllerProvider);
+    final controller = ref.read(surgeControllerProvider.notifier);
+    
+    // ✅ TimeFrame 관련
+    final timeFrames = AppConfig.timeFrames.map((tf) => '${tf}m').toList();
+    final index = ref.watch(surgeTimeFrameIndexProvider);
+    final timeFrameCtrl = ref.read(surgeTimeFrameController);
+    
+    // ✅ UI 설정
+    final sliderPosition = ref.watch(appSettingsProvider).sliderPosition;
+    
+    // ✅ 공통 슬라이더 위젯 - Surge 고유의 복잡한 5분할 구조
+    final sliderWidget = CommonSliderWidget(
+      leftText: '시간대: ${AppConfig.timeFrameNames[AppConfig.timeFrames[index]] ?? timeFrames[index]}',
+      sliderValue: index.toDouble(),
+      sliderMin: 0.0,
+      sliderMax: (timeFrames.length - 1).toDouble(),
+      sliderDivisions: timeFrames.length - 1,
+      sliderLabel: AppConfig.timeFrameNames[AppConfig.timeFrames[index]] ?? timeFrames[index],
+      onSliderChanged: (value) {
+        final i = value.round();
+        controller.setTimeFrame(timeFrames[i], i);
+      },
+      // 🔥 Surge 고유: 복잡한 5분할 레이아웃 (12-6-10-10-11)
+      extraWidgets: [
+        // 필터 토글 버튼 (6/49)
+        Expanded(
+          flex: 6,
+          child: Center(
+            child: CommonToggleButton(
+              text: controller.currentFilterName,
+              isActive: state.filterType != SurgeFilterType.all,
+              onTap: () {
+                // 필터 순환: 전체 → 급등만 → 급락만 → 전체
+                SurgeFilterType nextFilter;
+                switch (state.filterType) {
+                  case SurgeFilterType.all:
+                    nextFilter = SurgeFilterType.risingOnly;
+                    break;
+                  case SurgeFilterType.risingOnly:
+                    nextFilter = SurgeFilterType.fallingOnly;
+                    break;
+                  case SurgeFilterType.fallingOnly:
+                    nextFilter = SurgeFilterType.all;
+                    break;
+                }
+                controller.setFilterType(nextFilter);
+              },
+              activeColor: Colors.blue,
+              borderColor: Colors.blue,
+              fontSize: 10,
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
+            ),
+          ),
+        ),
+        
+        // Top 50/100 토글 버튼 (10/49)
+        Expanded(
+          flex: 10,
+          child: Center(
+            child: CommonToggleButton(
+              text: controller.currentLimitName,
+              isActive: state.isTop100,
+              onTap: () => controller.toggleTopLimit(),
+              fontSize: 10,
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
+            ),
+          ),
+        ),
+        
+        // 급등/급락 카운터 (10/49)
+        Expanded(
+          flex: 10,
+          child: Center(
+            child: _buildSurgeCounter(controller, state),
+          ),
+        ),
+      ],
+      rightWidget: CommonCountdownWidget(
+        nextResetTime: timeFrameCtrl.getNextResetTime(),
+      ),
+    );
+
+    return PrimaryScrollController(
+      controller: scrollController,
+      child: Column(
+        children: [
+          if (sliderPosition == SliderPosition.top) sliderWidget,
+          Expanded(child: _buildSurgeList(state, controller, timeFrames, index, context)),
+          if (sliderPosition == SliderPosition.bottom) sliderWidget,
+        ],
+      ),
+    );
+  }
+
+  /// ✅ 급등/급락 카운터 위젯
+  Widget _buildSurgeCounter(SurgeController controller, SurgeControllerState state) {
+    if (state.surges.isEmpty) {
+      return Container(
+        height: 29,
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(12),
+          color: Colors.grey.withValues(alpha: 0.1),
+        ),
+        child: const Center(
+          child: Text(
+            '로딩중',
+            style: TextStyle(fontSize: 8, color: Colors.grey),
+          ),
+        ),
+      );
+    }
+
+    final count = controller.getSurgeCount();
+    final risingCount = count['rising'] ?? 0;
+    final fallingCount = count['falling'] ?? 0;
+    
+    return Container(
+      height: 29,
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.grey.withValues(alpha: 0.3), width: 1),
+      ),
+      child: Row(
+        children: [
+          // 좌측: 급등 카운터 (초록 배경)
+          Expanded(
+            child: Container(
+              decoration: const BoxDecoration(
+                color: Colors.green,
+                borderRadius: BorderRadius.only(
+                  topLeft: Radius.circular(11),
+                  bottomLeft: Radius.circular(11),
+                ),
+              ),
+              child: Center(
+                child: Text(
+                  '$risingCount',
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 10,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+            ),
+          ),
+          // 우측: 급락 카운터 (빨간 배경)
+          Expanded(
+            child: Container(
+              decoration: const BoxDecoration(
+                color: Colors.red,
+                borderRadius: BorderRadius.only(
+                  topRight: Radius.circular(11),
+                  bottomRight: Radius.circular(11),
+                ),
+              ),
+              child: Center(
+                child: Text(
+                  '$fallingCount',
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 10,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// ✅ 급등/급락 리스트 (Controller state 기반)
+  Widget _buildSurgeList(
+    SurgeControllerState state,
+    SurgeController controller,
+    List<String> timeFrames,
+    int index,
+    BuildContext context,
+  ) {
+    // ✅ 로딩 상태
+    if (state.isLoading) {
+      return const Center(child: CircularProgressIndicator());
+    }
+
+    // ✅ 에러 상태
+    if (state.errorMessage != null) {
+      return Center(child: Text('급등/급락 로드 중 오류: ${state.errorMessage}'));
+    }
+
+    // ✅ 빈 데이터
+    if (state.surges.isEmpty) {
+      return Center(
+        child: Text(
+          '급등/급락 데이터가 없습니다.\n(시간대: ${AppConfig.timeFrameNames[AppConfig.timeFrames[index]] ?? timeFrames[index]})',
+          textAlign: TextAlign.center,
+          style: TextStyle(color: Theme.of(context).hintColor, fontSize: 16),
+        ),
+      );
+    }
+
+    // ✅ 급등/급락 리스트 (이미 정렬/필터된 데이터 사용)
+    return CommonScrollableList(
+      scrollController: scrollController,
+      itemCount: state.surges.length,
+      itemBuilder: (_, i) {
+        final surge = state.surges[i];
+        final rank = i + 1;
+        
+        return SurgeTile(
+          market: surge.market,
+          changePercent: surge.changePercent,
+          basePrice: surge.basePrice,
+          currentPrice: surge.currentPrice,
+          rank: rank,
+          // ✅ 안전한 상태 조회
+          isHot: controller.isHot(surge.market),
+          shouldBlink: controller.shouldBlink(surge.market),
+        );
+      },
+    );
+  }
+}\n\n// ====== lib/presentation/pages/signal_page.dart ======\n
+// lib/presentation/pages/signal_page.dart
+
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../core/config/app_config.dart';
+import '../../core/di/settings_provider.dart';
+import '../../core/di/signal_provider.dart';
+import '../../core/di/trade_provider.dart';
+import '../../domain/entities/app_settings.dart';
+import '../../domain/entities/signal.dart';
+import '../controllers/signal_controller.dart';
+import '../widgets/signal_tile.dart';
+
+/// 🚀 Signal Page V4.1 - 온라인 지표 연동
+class SignalPage extends ConsumerWidget {
+  final ScrollController scrollController;
+
+  const SignalPage({
+    super.key,
+    required this.scrollController,
+  });
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    // V4.1 Controller 기반 시스템
+    final controller = ref.watch(signalControllerProvider.notifier);
+    final state = ref.watch(signalControllerProvider);
+
+    // 시그널 스트림 (V4.1 온라인 지표 연동)
+    final signalsAsync = ref.watch(signalListProvider);
+
+    // markets 정보
+    final marketsAsync = ref.watch(marketsProvider);
+
+    // 슬라이더 위치 설정
+    final sliderPosition = ref.watch(appSettingsProvider).sliderPosition;
+
+    // 🆕 V4.1 시스템 모니터링
+    ref.listen(signalSystemMonitorProvider, (prev, next) {
+      if (next.hasError && AppConfig.enableTradeLog) {
+        debugPrint('⚠️ Signal system monitoring error: ${next.error}');
+      }
+    });
+
+    // 에러 메시지 자동 클리어
+    ref.listen(signalControllerProvider.select((s) => s.errorMessage), (prev, next) {
+      if (next != null) {
+        Future.delayed(const Duration(seconds: 5), () {
+          controller.clearError();
+        });
+      }
+    });
+
+    // 🆕 V4.1 슬라이더 위젯 (온라인 지표 상태 포함)
+    final sliderWidget = _buildEnhancedSliderWidget(
+      controller,
+      state,
+      marketsAsync,
+      ref,
+      context,
+    );
+
+    // 🆕 V4.1 시그널 리스트 (정렬 및 필터링 포함)
+    final signalListWidget = _buildEnhancedSignalList(
+      signalsAsync,
+      controller,
+      scrollController,
+      state,
+      context,
+      ref,
+    );
+
+    return PrimaryScrollController(
+      controller: scrollController,
+      child: Column(
+        children: [
+          // 슬라이더 위치에 따른 조건부 배치
+          if (sliderPosition == SliderPosition.top) sliderWidget,
+
+          // 🆕 V4.1 에러 메시지 표시
+          if (state.errorMessage != null) _buildErrorBanner(state.errorMessage!, controller),
+
+          // 시그널 리스트 (항상 중간)
+          Expanded(child: signalListWidget),
+
+          // 슬라이더가 하단일 때
+          if (sliderPosition == SliderPosition.bottom) sliderWidget,
+        ],
+      ),
+    );
+  }
+
+  /// 🆕 V4.1 에러 배너
+  Widget _buildErrorBanner(String errorMessage, SignalController controller) {
+    return Container(
+      width: double.infinity,
+      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        color: Colors.red.withValues(alpha: 0.1),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: Colors.red.withValues(alpha: 0.3)),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.error_outline, color: Colors.red, size: 16),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              errorMessage,
+              style: const TextStyle(color: Colors.red, fontSize: 12),
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+          GestureDetector(
+            onTap: controller.clearError,
+            child: const Icon(Icons.close, color: Colors.red, size: 16),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 🚀 V4.1 강화된 슬라이더 위젯 (온라인 지표 상태 포함)
+  Widget _buildEnhancedSliderWidget(
+    SignalController controller,
+    SignalState state,
+    AsyncValue<List<String>> marketsAsync,
+    WidgetRef ref,
+    BuildContext context,
+  ) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // 🎯 첫 번째 줄: 아이콘 + 제목 + 설명 + 상태 표시
+          Row(
+            children: [
+              // 패턴 아이콘 + 제목
+              Icon(
+                _getPatternIcon(state.currentPattern),
+                size: 18,
+                color: _getPatternColor(state.currentPattern),
+              ),
+              const SizedBox(width: 8),
+              
+              // 제목 + 설명
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      state.currentPattern.displayName,
+                      style: const TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    Text(
+                      state.currentPattern.description,
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: Colors.grey[600],
+                      ),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ],
+                ),
+              ),
+
+              // 🆕 V4.1 시스템 상태 표시
+              _buildSystemStatusChip(state),
+              const SizedBox(width: 8),
+
+              // 활성화/비활성화 토글
+              _buildPatternToggle(state, controller, ref),
+            ],
+          ),
+
+          const SizedBox(height: 8),
+
+          // 🎯 두 번째 줄: 임계값 + 신뢰도 정보
+          Row(
+            children: [
+              Text(
+                '임계값: ${controller.getThresholdDisplayText()}',
+                style: const TextStyle(fontSize: 12, color: Colors.grey),
+              ),
+              const Spacer(),
+              // 🆕 V4.1 신뢰도 정보
+              Text(
+                controller.getConfidenceStatusText(),
+                style: const TextStyle(fontSize: 10, color: Colors.grey),
+              ),
+            ],
+          ),
+
+          const SizedBox(height: 8),
+
+          // 🎯 세 번째 줄: 패턴 슬라이더
+          Row(
+            children: [
+              // 슬라이더
+              Expanded(
+                child: Slider(
+                  value: state.selectedIndex.toDouble(),
+                  min: 0,
+                  max: (PatternType.values.length - 1).toDouble(),
+                  divisions: PatternType.values.length - 1,
+                  label: state.currentPattern.displayName,
+                  activeColor: _getPatternColor(state.currentPattern),
+                  onChanged: (v) {
+                    if (ref.read(appSettingsProvider).isHapticEnabled) {
+                      HapticFeedback.lightImpact();
+                    }
+                    final index = v.round();
+                    marketsAsync.whenData((markets) {
+                      controller.setPatternIndex(index, markets);
+                    });
+                  },
+                ),
+              ),
+
+              // 🆕 V4.1 정렬 버튼
+              _buildSortButton(state, controller),
+            ],
+          ),
+
+          // 🆕 V4.1 온라인 지표 상태 바
+          _buildOnlineMetricsStatusBar(state),
+        ],
+      ),
+    );
+  }
+
+  /// 🆕 V4.1 시스템 상태 칩
+  Widget _buildSystemStatusChip(SignalState state) {
+    final isHealthy = state.isSystemHealthy;
+    final color = isHealthy ? Colors.green : Colors.orange;
+    final icon = isHealthy ? Icons.check_circle : Icons.warning;
+    
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(8),
+        color: color.withValues(alpha: 0.1),
+        border: Border.all(color: color.withValues(alpha: 0.3), width: 0.5),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 10, color: color),
+          const SizedBox(width: 2),
+          Text(
+            isHealthy ? 'OK' : 'WARN',
+            style: TextStyle(fontSize: 8, color: color, fontWeight: FontWeight.bold),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 🆕 V4.1 패턴 토글 버튼
+  Widget _buildPatternToggle(SignalState state, SignalController controller, WidgetRef ref) {
+    return GestureDetector(
+      onTap: () {
+        if (ref.read(appSettingsProvider).isHapticEnabled) {
+          HapticFeedback.lightImpact();
+        }
+        controller.togglePatternEnabled();
+      },
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(
+            color: Colors.orange,
+            width: 1.5,
+          ),
+          color: state.isPatternEnabled ? Colors.orange : Colors.transparent,
+        ),
+        child: Text(
+          state.isPatternEnabled ? '활성' : '비활성',
+          style: TextStyle(
+            color: state.isPatternEnabled ? Colors.white : Colors.orange,
+            fontSize: 11,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// 🆕 V4.1 정렬 버튼
+  Widget _buildSortButton(SignalState state, SignalController controller) {
+    return PopupMenuButton<String>(
+      icon: Icon(
+        Icons.sort,
+        size: 18,
+        color: Colors.grey[600],
+      ),
+      onSelected: (value) {
+        controller.setSortField(value);
+      },
+      itemBuilder: (context) => [
+        PopupMenuItem(value: 'time', child: Text('시간 ${_getSortIcon(state, 'time')}')),
+        PopupMenuItem(value: 'confidence', child: Text('신뢰도 ${_getSortIcon(state, 'confidence')}')),
+        PopupMenuItem(value: 'change', child: Text('변화율 ${_getSortIcon(state, 'change')}')),
+        PopupMenuItem(value: 'amount', child: Text('거래액 ${_getSortIcon(state, 'amount')}')),
+        PopupMenuItem(value: 'market', child: Text('마켓 ${_getSortIcon(state, 'market')}')),
+      ],
+    );
+  }
+
+  /// 🆕 정렬 아이콘 헬퍼
+  String _getSortIcon(SignalState state, String field) {
+    if (state.sortField != field) return '';
+    return state.sortAscending ? '↑' : '↓';
+  }
+
+  /// 🆕 V4.1 온라인 지표 상태 바
+  Widget _buildOnlineMetricsStatusBar(SignalState state) {
+    if (!state.hasOnlineMetrics) {
+      return Container(
+        height: 2,
+        margin: const EdgeInsets.only(top: 4),
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(1),
+          color: Colors.grey[300],
+        ),
+      );
+    }
+
+    final health = state.onlineMetricsHealth!;
+    final totalMarkets = health['totalMarkets'] ?? 0;
+    final healthyMarkets = health['healthyMarkets'] ?? 0;
+    final staleMarkets = health['staleMarkets'] ?? 0;
+    
+    final healthRatio = totalMarkets > 0 ? healthyMarkets / totalMarkets : 0.0;
+    final color = staleMarkets > 0 ? Colors.orange : Colors.green;
+
+    return Container(
+      height: 2,
+      margin: const EdgeInsets.only(top: 4),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(1),
+        color: Colors.grey[300],
+      ),
+      child: FractionallySizedBox(
+        widthFactor: healthRatio,
+        alignment: Alignment.centerLeft,
+        child: Container(
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(1),
+            color: color,
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// 🚀 V4.1 강화된 시그널 리스트 (정렬 및 온라인 지표 표시)
+  Widget _buildEnhancedSignalList(
+    AsyncValue<List<Signal>> signalsAsync,
+    SignalController controller,
+    ScrollController scrollController,
+    SignalState state,
+    BuildContext context,
+    WidgetRef ref,
+  ) {
+    return signalsAsync.when(
+      data: (list) {
+        final viewList = controller.apply(list);
+
+        if (viewList.isEmpty) {
+          return _buildEmptyState(state, context, controller);
+        }
+
+        return _buildSignalListView(viewList, scrollController, state, ref);
+      },
+      loading: () => _buildLoadingState(context),
+      error: (e, _) => _buildErrorState(e, context, ref),
+    );
+  }
+
+  /// 🆕 V4.1 빈 상태 (온라인 지표 정보 포함)
+  Widget _buildEmptyState(SignalState state, BuildContext context, SignalController controller) {
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(
+            Icons.radar,
+            size: 64,
+            color: Theme.of(context).hintColor.withValues(alpha: 0.5),
+          ),
+          const SizedBox(height: 16),
+          Text(
+            state.isPatternEnabled
+                ? '${state.currentPattern.displayName} 패턴이 감지되지 않았습니다.'
+                : '패턴 감지가 비활성화되어 있습니다.',
+            textAlign: TextAlign.center,
+            style: TextStyle(
+                color: Theme.of(context).hintColor, fontSize: 16),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            '임계값: ${controller.getThresholdDisplayText()}',
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              color: Theme.of(context).hintColor.withValues(alpha: 0.7),
+              fontSize: 14,
+            ),
+          ),
+          // 🆕 V4.1 온라인 지표 상태
+          if (state.hasOnlineMetrics) ...[
+            const SizedBox(height: 8),
+            Text(
+              controller.getSystemStatusText(),
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                color: Theme.of(context).hintColor.withValues(alpha: 0.7),
+                fontSize: 12,
+              ),
+            ),
+          ],
+          // 🆕 V4.1 빠른 액션 버튼들
+          const SizedBox(height: 24),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              // 온라인 지표 리셋 버튼
+              ElevatedButton.icon(
+                onPressed: () => controller.resetOnlineMetrics(),
+                icon: const Icon(Icons.refresh, size: 16),
+                label: const Text('지표 리셋'),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.blue,
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                  textStyle: const TextStyle(fontSize: 12),
+                ),
+              ),
+              const SizedBox(width: 12),
+              // 프리셋 적용 버튼
+              ElevatedButton.icon(
+                onPressed: () => _showPresetDialog(context, controller),
+                icon: const Icon(Icons.tune, size: 16),
+                label: const Text('프리셋'),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.green,
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                  textStyle: const TextStyle(fontSize: 12),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 🆕 V4.1 로딩 상태 (개선된 디자인)
+  Widget _buildLoadingState(BuildContext context) {
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          const CircularProgressIndicator(),
+          const SizedBox(height: 16),
+          Text(
+            '온라인 지표 연동 중...',
+            style: TextStyle(
+              color: Theme.of(context).hintColor,
+              fontSize: 14,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 🆕 V4.1 에러 상태 (개선된 에러 처리)
+  Widget _buildErrorState(Object error, BuildContext context, WidgetRef ref) {
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(
+            Icons.error_outline,
+            size: 64,
+            color: Theme.of(context).colorScheme.error.withValues(alpha: 0.5),
+          ),
+          const SizedBox(height: 16),
+          Text(
+            '시그널 로드 중 오류가 발생했습니다.',
+            style: TextStyle(
+              color: Theme.of(context).colorScheme.error,
+              fontSize: 16,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          const SizedBox(height: 8),
+          Text(
+            '$error',
+            textAlign: TextAlign.center,
+            style: TextStyle(
+              color: Theme.of(context).hintColor,
+              fontSize: 14,
+            ),
+          ),
+          const SizedBox(height: 16),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              ElevatedButton.icon(
+                onPressed: () {
+                  ref.invalidate(signalListProvider);
+                },
+                icon: const Icon(Icons.refresh),
+                label: const Text('다시 시도'),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.orange,
+                  foregroundColor: Colors.white,
+                ),
+              ),
+              const SizedBox(width: 12),
+              // 🆕 V4.1 고급 진단 버튼
+              ElevatedButton.icon(
+                onPressed: () => _showDiagnosticsDialog(context, ref),
+                icon: const Icon(Icons.info),
+                label: const Text('진단'),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.blue,
+                  foregroundColor: Colors.white,
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 🆕 V4.1 시그널 리스트 뷰 (온라인 지표 표시 포함)
+  Widget _buildSignalListView(
+    List<Signal> viewList,
+    ScrollController scrollController,
+    SignalState state,
+    WidgetRef ref,
+  ) {
+    return RawScrollbar(
+      controller: scrollController,
+      thumbVisibility: false,
+      trackVisibility: false,
+      thickness: 6.4,
+      radius: const Radius.circular(3.2),
+      thumbColor: Colors.orange.withValues(alpha: 0.5),
+      interactive: true,
+      minThumbLength: 40,
+      child: ListView.builder(
+        controller: scrollController,
+        physics: const BouncingScrollPhysics(
+          parent: AlwaysScrollableScrollPhysics(),
+        ),
+        padding: const EdgeInsets.only(left: 16, right: 20, top: 16, bottom: 16),
+        itemCount: viewList.length,
+        itemBuilder: (context, index) {
+          final signal = viewList[index];
+          
+          return Column(
+            children: [
+              // 🆕 V4.1 Signal Tile 사용 (탭 기능 추가)
+              GestureDetector(
+                onTap: () => _showSignalDetails(context, signal, ref),
+                child: SignalTile(
+                  signal: signal,
+                  showOnlineMetrics: true,
+                ),
+              ),
+              
+              // 구분선 (마지막 아이템 제외)
+              if (index < viewList.length - 1)
+                Divider(
+                  height: 1,
+                  thickness: 0.5,
+                  color: Colors.grey[300],
+                  indent: 16,
+                  endIndent: 16,
+                ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  // ==========================================================================
+  // 🆕 V4.1 대화상자들
+  // ==========================================================================
+
+  /// 🆕 프리셋 선택 대화상자
+  void _showPresetDialog(BuildContext context, SignalController controller) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('패턴 프리셋 선택'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.security, color: Colors.blue),
+              title: const Text('Conservative'),
+              subtitle: const Text('False Positive 최소화'),
+              onTap: () {
+                controller.applyPreset('conservative');
+                Navigator.pop(context);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.balance, color: Colors.green),
+              title: const Text('Balanced'),
+              subtitle: const Text('균형잡힌 기본 설정'),
+              onTap: () {
+                controller.applyPreset('balanced');
+                Navigator.pop(context);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.speed, color: Colors.red),
+              title: const Text('Aggressive'),
+              subtitle: const Text('감지율 최대화'),
+              onTap: () {
+                controller.applyPreset('aggressive');
+                Navigator.pop(context);
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 🆕 진단 정보 대화상자
+  void _showDiagnosticsDialog(BuildContext context, WidgetRef ref) {
+    final controller = ref.read(signalControllerProvider.notifier);
+    
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('시스템 진단'),
+        content: FutureBuilder<Map<String, dynamic>>(
+          future: controller.getSystemHealthReport(),
+          builder: (context, snapshot) {
+            if (snapshot.connectionState == ConnectionState.waiting) {
+              return const Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  CircularProgressIndicator(),
+                  SizedBox(height: 16),
+                  Text('진단 중...'),
+                ],
+              );
+            }
+            
+            if (snapshot.hasError) {
+              return Text('진단 실패: ${snapshot.error}');
+            }
+            
+            final report = snapshot.data!;
+            return SingleChildScrollView(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text('버전: ${report['version']}'),
+                  Text('상태: ${report['status']}'),
+                  Text('업타임: ${report['uptime']}분'),
+                  Text('처리된 거래: ${report['totalProcessedTrades']}건'),
+                  Text('활성 패턴: ${report['activePatterns']}개'),
+                  Text('추적 마켓: ${report['trackedMarkets']}개'),
+                  const SizedBox(height: 16),
+                  const Text('온라인 지표 상태:', style: TextStyle(fontWeight: FontWeight.bold)),
+                  if (report['onlineMetricsHealth'] != null) ...[
+                    Text('총 마켓: ${report['onlineMetricsHealth']['totalMarkets']}'),
+                    Text('정상: ${report['onlineMetricsHealth']['healthyMarkets']}'),
+                    Text('만료: ${report['onlineMetricsHealth']['staleMarkets']}'),
+                  ],
+                ],
+              ),
+            );
+          },
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('닫기'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 🆕 시그널 상세 정보 대화상자
+  void _showSignalDetails(BuildContext context, Signal signal, WidgetRef ref) {
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('${signal.patternType.displayName} - ${signal.ticker}'),
+        content: SingleChildScrollView(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // 기본 정보
+              _buildDetailRow('마켓', signal.market),
+              _buildDetailRow('현재가', '${signal.currentPrice.toStringAsFixed(0)}원'),
+              _buildDetailRow('변화율', '${signal.changePercent.toStringAsFixed(2)}%'),
+              _buildDetailRow('거래액', '${(signal.tradeAmount / 1000000).toStringAsFixed(1)}M'),
+              _buildDetailRow('감지시간', signal.detectedAt.toString().substring(0, 19)),
+              
+              if (signal.confidence != null)
+                _buildDetailRow('신뢰도', '${(signal.confidence! * 100).toStringAsFixed(1)}%'),
+              
+              // 온라인 지표 정보
+              if (signal.hasOnlineMetrics) ...[
+                const SizedBox(height: 16),
+                const Text('온라인 지표', style: TextStyle(fontWeight: FontWeight.bold)),
+                const SizedBox(height: 8),
+                
+                if (signal.onlineIndicators?.rsi != null)
+                  _buildDetailRow('RSI', '${signal.onlineIndicators!.rsi!.toStringAsFixed(1)} (${signal.onlineIndicators!.rsiState})'),
+                
+                if (signal.onlineIndicators?.macd != null)
+                  _buildDetailRow('MACD', '${signal.onlineIndicators!.macd!.toStringAsFixed(2)} (${signal.onlineIndicators!.macdState})'),
+              ],
+              
+              // 다이버전스 정보
+              if (signal.divergence != null) ...[
+                const SizedBox(height: 16),
+                const Text('다이버전스', style: TextStyle(fontWeight: FontWeight.bold)),
+                const SizedBox(height: 8),
+                _buildDetailRow('타입', signal.divergence!.type),
+                _buildDetailRow('강도', signal.divergence!.confidenceLevel),
+                _buildDetailRow('소스', signal.divergence!.source),
+              ],
+              
+              // 고급 지표들
+              const SizedBox(height: 16),
+              const Text('고급 지표', style: TextStyle(fontWeight: FontWeight.bold)),
+              const SizedBox(height: 8),
+              
+              if (signal.zScore != null)
+                _buildDetailRow('Z-Score', signal.zScore!.toStringAsFixed(2)),
+              
+              if (signal.liquidityVortex != null)
+                _buildDetailRow('Liquidity Vortex', signal.liquidityVortex!.toStringAsFixed(3)),
+              
+              if (signal.flashPulse != null)
+                _buildDetailRow('Flash Pulse', signal.flashPulse!.toStringAsFixed(2)),
+              
+              // 버전 정보
+              if (signal.version != null) ...[
+                const SizedBox(height: 16),
+                _buildDetailRow('버전', signal.version!),
+              ],
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('닫기'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 상세 정보 행
+  Widget _buildDetailRow(String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 2),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          SizedBox(
+            width: 80,
+            child: Text(
+              '$label:',
+              style: const TextStyle(fontWeight: FontWeight.w500),
+            ),
+          ),
+          Expanded(
+            child: Text(value),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ==========================================================================
+  // 헬퍼 함수들
+  // ==========================================================================
+
+  /// 패턴별 아이콘 반환
+  IconData _getPatternIcon(PatternType pattern) {
+    switch (pattern) {
+      case PatternType.surge:
+        return Icons.trending_up;
+      case PatternType.flashFire:
+        return Icons.flash_on;
+      case PatternType.stackUp:
+        return Icons.stacked_line_chart;
+      case PatternType.stealthIn:
+        return Icons.visibility_off;
+      case PatternType.blackHole:
+        return Icons.radio_button_unchecked;
+      case PatternType.reboundShot:
+        return Icons.trending_up;
+    }
+  }
+
+  /// 패턴별 색상 반환
+  Color _getPatternColor(PatternType pattern) {
+    switch (pattern) {
+      case PatternType.surge:
+        return Colors.red;
+      case PatternType.flashFire:
+        return Colors.orange;
+      case PatternType.stackUp:
+        return Colors.amber;
+      case PatternType.stealthIn:
+        return Colors.green;
+      case PatternType.blackHole:
+        return Colors.purple;
+      case PatternType.reboundShot:
+        return Colors.blue;
+    }
+  }
+}\n\n// ====== lib/presentation/widgets/sector_tile.dart ======\n
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../core/di/app_providers.dart';
+import '../../domain/entities/app_settings.dart';
+import '../../shared/widgets/sector_names.dart';
+import '../../shared/widgets/sector_logo_provider.dart';
+import '../../shared/widgets/amount_display_widget.dart';
+import '../../shared/utils/tile_common.dart';
+import '../../shared/utils/blink_animation_mixin.dart';
+import '../../shared/utils/amount_formatter.dart';
+import '../controllers/sector_controller.dart';
+
+class SectorTile extends ConsumerStatefulWidget {
+  final String sectorName;
+  final double totalVolume;
+  final int rank;
+  final String timeFrame;
+  final DateTime lastUpdated;
+  final bool isHot;        // ✅ Controller에서 계산된 값
+  final bool shouldBlink;  // ✅ Controller에서 계산된 값
+  final bool isDetailedClassification; // ✅ 분류 상태
+
+  const SectorTile({
+    Key? key,
+    required this.sectorName,
+    required this.totalVolume,
+    required this.rank,
+    required this.timeFrame,
+    required this.lastUpdated,
+    required this.isHot,
+    required this.shouldBlink,
+    required this.isDetailedClassification,
+  }) : super(key: key);
+
+  @override
+  ConsumerState<SectorTile> createState() => _SectorTileState();
+}
+
+class _SectorTileState extends ConsumerState<SectorTile>
+    with SingleTickerProviderStateMixin {
+
+  late AnimationController _blinkController;
+  late Animation<double> _blinkAnimation;
+  bool _isBlinking = false;
+
+  @override
+  void initState() {
+    super.initState();
+    // ✅ 애니메이션 초기화
+    _blinkController = AnimationController(
+      duration: const Duration(milliseconds: 600),
+      vsync: this,
+    );
+    _blinkAnimation = Tween<double>(begin: 1.0, end: 0.3).animate(
+      CurvedAnimation(parent: _blinkController, curve: Curves.easeInOut),
+    );
+  }
+
+  @override
+  void didUpdateWidget(SectorTile oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    
+    // ✅ shouldBlink props 변화 감지해서 애니메이션 시작
+    if (widget.shouldBlink && !oldWidget.shouldBlink && !_isBlinking) {
+      _startBlink();
+    }
+  }
+
+  @override
+  void dispose() {
+    _blinkController.dispose();
+    super.dispose();
+  }
+
+  /// ✅ 블링크 시작 (설정 체크 + Controller 상태 초기화)
+  void _startBlink() {
+    final blinkEnabled = ref.read(appSettingsProvider).blinkEnabled;
+    if (!mounted || !blinkEnabled) return;
+    
+    _isBlinking = true;
+    _blinkController.forward().then((_) {
+      if (mounted) {
+        _blinkController.reverse().then((_) {
+          if (mounted) {
+            setState(() {
+              _isBlinking = false;
+            });
+            
+            // ✅ 애니메이션 완료 후 Controller에 상태 초기화 요청
+            ref.read(sectorControllerProvider.notifier).clearBlinkState(widget.sectorName);
+          }
+        });
+      }
+    });
+  }
+
+  /// ✅ 섹터 번호 매핑 (기존 유지 - 섹터 전용 로직)
+  int _getSectorNumber(String sectorName) {
+    const sectorNumberMap = {
+      // 상세 분류 (1-28번)
+      '비트코인 그룹': 1, '이더리움 그룹': 2, '스테이킹': 3, '모놀리식 블록체인': 4,
+      '모듈러 블록체인': 5, '스테이블 코인': 6, 'DEX/애그리게이터': 7, '랜딩': 8,
+      '유동화 스테이킹/리스테이킹': 9, 'RWA': 10, '지급결제 인프라': 11, '상호운용성/브릿지': 12,
+      '엔터프라이즈 블록체인': 13, '오라클': 14, '데이터 인프라': 15, '스토리지': 16,
+      'AI': 17, '메타버스': 18, 'NFT/게임': 19, '미디어/스트리밍': 20,
+      '광고': 21, '교육/기타 콘텐츠': 22, '소셜/DAO': 23, '팬토큰': 24,
+      '밈': 25, 'DID': 26, '의료': 27, '월렛/메세징': 28,
+      // 기본 분류 (29-46번)
+      '메이저 코인': 29, '비트코인 계열': 30, '이더리움 생태계': 31, '레이어1 블록체인': 32,
+      '고 시총': 33, '중 시총': 34, '저 시총': 35, '마이너 알트코인': 36,
+      'DeFi 토큰': 37, '스테이블코인': 38, '게임/NFT/메타버스': 39, '한국 프로젝트': 40,
+      '솔라나 생태계': 41, 'AI/기술 토큰': 42, '2023년 신규상장': 43, '2024년 상반기 신규상장': 44,
+      '2024년 하반기 신규상장': 45, '2025년 상반기 신규상장': 46,
+    };
+    return sectorNumberMap[sectorName] ?? 1;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final onSurface = theme.colorScheme.onSurface;
+    final onSurface70 = onSurface.withValues(alpha: 0.7);
+
+    // ✅ 섹터명 표시 (내부에서 DisplayMode 처리)
+    final displayMode = ref.watch(appSettingsProvider).displayMode;
+    final displaySectorName = SectorNames.getDisplayName(
+      widget.sectorName, 
+      displayMode, 
+      isDetailed: widget.isDetailedClassification
+    );
+
+    // ✅ 표준 카드 위젯 생성
+    Widget cardWidget = TileCommon.buildStandardCard(
+      child: TileCommon.buildFlexRow(
+        children: [
+          // 🏆 순위 부분
+          FlexChild.fixed(
+            TileCommon.buildRankWidget(context, widget.rank),
+          ),
+
+          const FlexChild.fixed(SizedBox(width: 12)),
+
+          // 🎨 섹터 아이콘 부분
+          FlexChild.fixed(
+            SectorLogoProvider.buildSectorIcon(
+              sectorNumber: _getSectorNumber(widget.sectorName),
+              size: 40.0,
+            ),
+          ),
+
+          const FlexChild.fixed(SizedBox(width: 12)),
+
+          // 📱 섹터명 부분
+          FlexChild.expanded(
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Flexible(
+                      child: Text(
+                        displaySectorName,
+                        style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          color: theme.colorScheme.primary,
+                          fontSize: 16,
+                        ),
+                        overflow: TextOverflow.ellipsis,
+                        maxLines: 1,
+                      ),
+                    ),
+                    const SizedBox(width: 4),
+                    // ✅ HOT 아이콘 (받은 props 사용)
+                    if (TileCommon.buildHotIcon(widget.isHot) case final hotIcon?)
+                      hotIcon,
+                  ],
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  SectorNames.getDisplayName(
+                    widget.sectorName, 
+                    DisplayMode.ticker, 
+                    isDetailed: widget.isDetailedClassification
+                  ),
+                  style: TextStyle(
+                    color: onSurface70,
+                    fontSize: 12,
+                  ),
+                ),
+              ],
+            ),
+            flex: 25,
+          ),
+
+          // 💰 거래량 부분
+          FlexChild.expanded(
+            Align(
+              alignment: Alignment.centerRight,
+              child: Consumer(
+                builder: (context, ref, child) {
+                  final amountDisplayMode = ref.watch(appSettingsProvider).amountDisplayMode;
+
+                  return amountDisplayMode == AmountDisplayMode.icon
+                      ? AmountDisplayWidget(
+                          totalAmount: widget.totalVolume,
+                          isBuy: true, // Sector도 중립적 색상
+                          fontSize: 15,
+                          fontWeight: FontWeight.w600,
+                        )
+                      : Text(
+                          AmountFormatter.formatVolume(widget.totalVolume),
+                          style: TextStyle(
+                            color: onSurface,
+                            fontSize: 15,
+                            fontWeight: FontWeight.w600,
+                          ),
+                          overflow: TextOverflow.ellipsis,
+                          maxLines: 1,
+                        );
+                },
+              ),
+            ),
+            flex: 30,
+          ),
+        ],
+      ),
+    );
+
+    // ✅ 블링크 애니메이션 적용 (설정 체크)
+    final blinkEnabled = ref.watch(appSettingsProvider).blinkEnabled;
+
+    // ✅ 블링크 상태에 따른 애니메이션 적용
+    if (blinkEnabled && (_isBlinking || widget.shouldBlink)) {
+      return BlinkAnimationHelper.wrapWithBlinkEffect(
+        child: cardWidget,
+        shouldBlink: _isBlinking,
+        blinkAnimation: _blinkAnimation,
+        blinkColor: Colors.amber, // Sector도 앰버 색상
+      );
+    }
+
+    return cardWidget;
+  }
+}\n\n// ====== lib/presentation/widgets/trade_tile.dart ======\n
+// lib/presentation/widgets/trade_tile.dart
+
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:intl/intl.dart';
+import '../../domain/entities/trade.dart';
+import '../../core/di/app_providers.dart';
+import '../../shared/widgets/amount_display_widget.dart';
+import '../../shared/utils/tile_common.dart';
+import '../../shared/utils/amount_formatter.dart';
+
+class TradeTile extends ConsumerWidget {
+  // 🕒 시간 포맷터만 유지 (고유 기능)
+  static final _timeFormat = DateFormat('HH:mm:ss');
+  
+  final Trade trade;
+  final DisplayMode displayMode;  // ✅ 상위에서 받아옴 (Volume/Surge 패턴)
+
+  const TradeTile({
+    Key? key,
+    required this.trade,
+    required this.displayMode,
+  }) : super(key: key);
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final theme = Theme.of(context);
+    final onSurface = theme.colorScheme.onSurface;
+    final onSurface70 = onSurface.withValues(alpha: 0.7);
+    
+    // ✅ 최적화된 코인명 표시 (TileCommon 사용)
+    final displayName = TileCommon.getDisplayNameOptimized(
+      ref,
+      trade.market,
+      displayMode, // 상위에서 받은 DisplayMode 사용
+    );
+    
+    // ✅ 표준 카드 위젯 사용 (Volume/Surge와 동일한 패턴)
+    return TileCommon.buildStandardCard(
+      child: TileCommon.buildFlexRow(
+        children: [
+          // 🕒 시간 부분: flex 12
+          FlexChild.expanded(
+            Text(
+              _timeFormat.format(trade.timestamp),
+              style: TextStyle(color: onSurface, fontSize: 11),
+            ),
+            flex: 12,
+          ),
+          
+          // 🪙 코인명 부분: flex 18 - 최적화된 버전 사용
+          FlexChild.expanded(
+            Text(
+              displayName, // ✅ 최적화된 방식
+              style: TextStyle(
+                fontWeight: FontWeight.bold,
+                color: theme.colorScheme.primary,
+                fontSize: 16,
+              ),
+              overflow: TextOverflow.ellipsis,
+              maxLines: 1,
+            ),
+            flex: 18,
+          ),
+          
+          // 💵 가격/거래량 부분: flex 20
+          FlexChild.expanded(
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                Text(
+                  '${AmountFormatter.formatPrice(trade.price)}원', // ✅ 공통 포맷터
+                  style: TextStyle(color: onSurface, fontSize: 14),
+                  overflow: TextOverflow.ellipsis,
+                  maxLines: 1,
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  '${AmountFormatter.formatTradeVolume(trade.volume)}개', // ✅ 공통 포맷터
+                  style: TextStyle(color: onSurface70, fontSize: 12),
+                  overflow: TextOverflow.ellipsis,
+                  maxLines: 1,
+                ),
+              ],
+            ),
+            flex: 20,
+          ),
+          
+          // 💰 총액 부분: flex 20 - AmountDisplayWidget 사용
+          FlexChild.expanded(
+            Align(
+              alignment: Alignment.centerRight,
+              child: AmountDisplayWidget(
+                totalAmount: trade.total,
+                isBuy: trade.isBuy,
+                fontSize: 16,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            flex: 20,
+          ),
+          
+          // 📈 방향 아이콘: 고정 크기
+          FlexChild.fixed(
+            Icon(
+              trade.isBuy ? Icons.arrow_upward : Icons.arrow_downward,
+              color: trade.isBuy ? Colors.green : Colors.red,
+              size: 16,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}\n\n// ====== lib/presentation/widgets/surge_tile.dart ======\n
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../core/di/app_providers.dart';
+import '../../shared/widgets/coin_logo_provider.dart';
+import '../../shared/utils/tile_common.dart';
+import '../../shared/utils/blink_animation_mixin.dart';
+import '../../shared/utils/amount_formatter.dart';
+import '../controllers/surge_controller.dart';
+
+class SurgeTile extends ConsumerStatefulWidget {
+  final String market;
+  final double changePercent;
+  final double basePrice;
+  final double currentPrice;
+  final int rank;
+  final bool isHot;        // ✅ Controller에서 계산된 값
+  final bool shouldBlink;  // ✅ Controller에서 계산된 값
+  
+  const SurgeTile({
+    Key? key, 
+    required this.market,
+    required this.changePercent,
+    required this.basePrice,
+    required this.currentPrice,
+    required this.rank,
+    required this.isHot,
+    required this.shouldBlink,
+  }) : super(key: key);
+
+  @override
+  ConsumerState<SurgeTile> createState() => _SurgeTileState();
+}
+
+class _SurgeTileState extends ConsumerState<SurgeTile> 
+    with SingleTickerProviderStateMixin {
+
+  late AnimationController _blinkController;
+  late Animation<double> _blinkAnimation;
+  bool _isBlinking = false;
+
+  @override
+  void initState() {
+    super.initState();
+    // ✅ 애니메이션 초기화
+    _blinkController = AnimationController(
+      duration: const Duration(milliseconds: 600),
+      vsync: this,
+    );
+    _blinkAnimation = Tween<double>(begin: 1.0, end: 0.3).animate(
+      CurvedAnimation(parent: _blinkController, curve: Curves.easeInOut),
+    );
+  }
+
+  @override
+  void didUpdateWidget(SurgeTile oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    
+    // ✅ shouldBlink props 변화 감지해서 애니메이션 시작
+    if (widget.shouldBlink && !oldWidget.shouldBlink && !_isBlinking) {
+      _startBlink();
+    }
+  }
+
+  @override
+  void dispose() {
+    _blinkController.dispose();
+    super.dispose();
+  }
+
+  /// ✅ 블링크 시작 (설정 체크 + Controller 상태 초기화)
+  void _startBlink() {
+    final blinkEnabled = ref.read(appSettingsProvider).blinkEnabled;
+    if (!mounted || !blinkEnabled) return;
+    
+    _isBlinking = true;
+    _blinkController.forward().then((_) {
+      if (mounted) {
+        _blinkController.reverse().then((_) {
+          if (mounted) {
+            setState(() {
+              _isBlinking = false;
+            });
+            
+            // ✅ 애니메이션 완료 후 Controller에 상태 초기화 요청
+            ref.read(surgeControllerProvider.notifier).clearBlinkState(widget.market);
+          }
+        });
+      }
+    });
+  }
+
+  // ✅ 변동률 포맷팅 (색상 포함)
+  String _formatChangePercent(double changePercent) {
+    final sign = changePercent >= 0 ? '+' : '';
+    return '$sign${changePercent.toStringAsFixed(2)}%';
+  }
+
+  // ✅ 변동률에 따른 색상
+  Color _getChangeColor() {
+    if (widget.changePercent > 0) {
+      return Colors.green; // 🟢 급등 - 초록
+    } else if (widget.changePercent < 0) {
+      return Colors.red; // 🔴 급락 - 빨강
+    } else {
+      return Colors.grey; // ⚪ 변동 없음 - 회색
+    }
+  }
+  
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final onSurface = theme.colorScheme.onSurface;
+    final changeColor = _getChangeColor();
+    
+    // ✅ 표준 카드 위젯 생성
+    Widget cardWidget = TileCommon.buildStandardCard(
+      child: TileCommon.buildFlexRow(
+        children: [
+          // 🏆 순위 부분
+          FlexChild.fixed(
+            TileCommon.buildRankWidget(context, widget.rank),
+          ),
+          
+          const FlexChild.fixed(SizedBox(width: 12)),
+          
+          // 🎨 코인 로고 부분
+          FlexChild.fixed(
+            CoinLogoProvider.buildCoinLogo(
+              ticker: widget.market.replaceFirst('KRW-', ''),
+              radius: 16,
+            ),
+          ),
+          
+          const FlexChild.fixed(SizedBox(width: 12)),
+          
+          // 📱 코인명 부분
+          FlexChild.expanded(
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Flexible(
+                      child: Text(
+                        // ✅ 백업처럼 심플하게 (DisplayMode props 없이)
+                        TileCommon.getDisplayName(ref, widget.market),
+                        style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          color: theme.colorScheme.primary,
+                          fontSize: 16,
+                        ),
+                        overflow: TextOverflow.ellipsis,
+                        maxLines: 1,
+                      ),
+                    ),
+                    const SizedBox(width: 4),
+                    // ✅ HOT 아이콘 (받은 props 사용)
+                    if (TileCommon.buildHotIcon(widget.isHot) case final hotIcon?) 
+                      hotIcon,
+                  ],
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  widget.market.replaceFirst('KRW-', ''),
+                  style: TextStyle(
+                    color: onSurface.withValues(alpha: 0.7),
+                    fontSize: 12,
+                  ),
+                ),
+              ],
+            ),
+            flex: 25,
+          ),
+          
+          // 🚀 변동률 부분
+          FlexChild.expanded(
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                Text(
+                  _formatChangePercent(widget.changePercent),
+                  style: TextStyle(
+                    color: changeColor,
+                    fontSize: 15,
+                    fontWeight: FontWeight.w600,
+                  ),
+                  overflow: TextOverflow.ellipsis,
+                  maxLines: 1,
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  '${AmountFormatter.formatPrice(widget.currentPrice)}원',
+                  style: TextStyle(
+                    color: onSurface.withValues(alpha: 0.7),
+                    fontSize: 11,
+                    fontWeight: FontWeight.w500,
+                  ),
+                  overflow: TextOverflow.ellipsis,
+                  maxLines: 1,
+                ),
+              ],
+            ),
+            flex: 30,
+          ),
+        ],
+      ),
+    );
+
+    // ✅ 블링크 애니메이션 적용 (설정 체크)
+    final blinkEnabled = ref.watch(appSettingsProvider).blinkEnabled;
+    
+    // ✅ 블링크 상태에 따른 애니메이션 적용
+    if (blinkEnabled && (_isBlinking || widget.shouldBlink)) {
+      return BlinkAnimationHelper.wrapWithBlinkEffect(
+        child: cardWidget,
+        shouldBlink: _isBlinking,
+        blinkAnimation: _blinkAnimation,
+        blinkColor: changeColor, // Surge는 변동률 색상으로
+      );
+    }
+    
+    return cardWidget;
+  }
+}\n\n// ====== lib/presentation/widgets/volume_tile.dart ======\n
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../core/di/app_providers.dart';
+import '../../domain/entities/app_settings.dart';
+import '../../shared/widgets/coin_logo_provider.dart';
+import '../../shared/widgets/amount_display_widget.dart';
+import '../../shared/utils/tile_common.dart';
+import '../../shared/utils/blink_animation_mixin.dart';
+import '../../shared/utils/amount_formatter.dart';
+import '../controllers/volume_controller.dart';
+
+class VolumeTile extends ConsumerStatefulWidget {
+  final String market;
+  final double totalVolume;
+  final int rank;
+  final bool isHot;        // ✅ Controller에서 계산된 값
+  final bool shouldBlink;  // ✅ Controller에서 계산된 값
+  
+  const VolumeTile({
+    Key? key, 
+    required this.market,
+    required this.totalVolume,
+    required this.rank,
+    required this.isHot,
+    required this.shouldBlink,
+  }) : super(key: key);
+
+  @override
+  ConsumerState<VolumeTile> createState() => _VolumeTileState();
+}
+
+class _VolumeTileState extends ConsumerState<VolumeTile> 
+    with SingleTickerProviderStateMixin {
+
+  late AnimationController _blinkController;
+  late Animation<double> _blinkAnimation;
+  bool _isBlinking = false;
+
+  @override
+  void initState() {
+    super.initState();
+    // ✅ 애니메이션 초기화
+    _blinkController = AnimationController(
+      duration: const Duration(milliseconds: 600),
+      vsync: this,
+    );
+    _blinkAnimation = Tween<double>(begin: 1.0, end: 0.3).animate(
+      CurvedAnimation(parent: _blinkController, curve: Curves.easeInOut),
+    );
+  }
+
+  @override
+  void didUpdateWidget(VolumeTile oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    
+    // ✅ shouldBlink props 변화 감지해서 애니메이션 시작
+    if (widget.shouldBlink && !oldWidget.shouldBlink && !_isBlinking) {
+      _startBlink();
+    }
+  }
+
+  @override
+  void dispose() {
+    _blinkController.dispose();
+    super.dispose();
+  }
+
+  /// ✅ 블링크 시작 (설정 체크 + Controller 상태 초기화)
+  void _startBlink() {
+    final blinkEnabled = ref.read(appSettingsProvider).blinkEnabled;
+    if (!mounted || !blinkEnabled) return;
+    
+    _isBlinking = true;
+    _blinkController.forward().then((_) {
+      if (mounted) {
+        _blinkController.reverse().then((_) {
+          if (mounted) {
+            setState(() {
+              _isBlinking = false;
+            });
+            
+            // ✅ 애니메이션 완료 후 Controller에 상태 초기화 요청
+            ref.read(volumeControllerProvider.notifier).clearBlinkState(widget.market);
+          }
+        });
+      }
+    });
+  }
+  
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final onSurface = theme.colorScheme.onSurface;
+    
+    // ✅ 표준 카드 위젯 생성
+    Widget cardWidget = TileCommon.buildStandardCard(
+      child: TileCommon.buildFlexRow(
+        children: [
+          // 🏆 순위 부분
+          FlexChild.fixed(
+            TileCommon.buildRankWidget(context, widget.rank),
+          ),
+          
+          const FlexChild.fixed(SizedBox(width: 12)),
+          
+          // 🎨 코인 로고 부분
+          FlexChild.fixed(
+            CoinLogoProvider.buildCoinLogo(
+              ticker: widget.market.replaceFirst('KRW-', ''),
+              radius: 16,
+            ),
+          ),
+          
+          const FlexChild.fixed(SizedBox(width: 12)),
+          
+          // 📱 코인명 부분
+          FlexChild.expanded(
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Flexible(
+                      child: Text(
+                        // ✅ 백업처럼 심플하게 (DisplayMode props 없이)
+                        TileCommon.getDisplayName(ref, widget.market),
+                        style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          color: theme.colorScheme.primary,
+                          fontSize: 16,
+                        ),
+                        overflow: TextOverflow.ellipsis,
+                        maxLines: 1,
+                      ),
+                    ),
+                    const SizedBox(width: 4),
+                    // ✅ HOT 아이콘 (받은 props 사용)
+                    if (TileCommon.buildHotIcon(widget.isHot) case final hotIcon?) 
+                      hotIcon,
+                  ],
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  widget.market.replaceFirst('KRW-', ''),
+                  style: TextStyle(
+                    color: onSurface.withValues(alpha: 0.7),
+                    fontSize: 12,
+                  ),
+                ),
+              ],
+            ),
+            flex: 25,
+          ),
+          
+          // 💰 거래량 부분
+          FlexChild.expanded(
+            Align(
+              alignment: Alignment.centerRight,
+              child: Consumer(
+                builder: (context, ref, child) {
+                  final amountDisplayMode = ref.watch(appSettingsProvider).amountDisplayMode;
+                  
+                  return amountDisplayMode == AmountDisplayMode.icon
+                      ? AmountDisplayWidget(
+                          totalAmount: widget.totalVolume,
+                          isBuy: true,
+                          fontSize: 15,
+                          fontWeight: FontWeight.w600,
+                        )
+                      : Text(
+                          AmountFormatter.formatVolume(widget.totalVolume),
+                          style: TextStyle(
+                            color: onSurface,
+                            fontSize: 15,
+                            fontWeight: FontWeight.w600,
+                          ),
+                          overflow: TextOverflow.ellipsis,
+                          maxLines: 1,
+                        );
+                },
+              ),
+            ),
+            flex: 30,
+          ),
+        ],
+      ),
+    );
+
+    // ✅ 블링크 애니메이션 적용 (설정 체크)
+    final blinkEnabled = ref.watch(appSettingsProvider).blinkEnabled;
+    
+    // ✅ 블링크 상태에 따른 애니메이션 적용
+    if (blinkEnabled && (_isBlinking || widget.shouldBlink)) {
+      return BlinkAnimationHelper.wrapWithBlinkEffect(
+        child: cardWidget,
+        shouldBlink: _isBlinking,
+        blinkAnimation: _blinkAnimation,
+        blinkColor: Colors.amber,
+      );
+    }
+    
+    return cardWidget;
+  }
+}\n\n// ====== lib/presentation/widgets/signal_tile.dart ======\n
+// lib/presentation/widgets/signal_tile.dart
+
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:intl/intl.dart';
+import '../../core/di/app_providers.dart';
+import '../../domain/entities/signal.dart';
+import '../../shared/widgets/amount_display_widget.dart';
+import '../../shared/widgets/coin_logo_provider.dart';
+import '../../shared/utils/tile_common.dart';
+import '../../shared/utils/blink_animation_mixin.dart';
+import '../../shared/utils/amount_formatter.dart';
+
+// 🎯 중복 반짝임 방지를 위한 전역 Set
+final Set<String> _blinkedSignals = {};
+
+/// 🚀 SignalTile V4.1 - Clean UI (온라인 지표 연동)
+class SignalTile extends ConsumerStatefulWidget {
+  final Signal signal;
+  final bool showOnlineMetrics; // 🆕 V4.1 온라인 지표 표시 옵션
+
+  const SignalTile({
+    super.key, 
+    required this.signal,
+    this.showOnlineMetrics = true, // 기본값: 표시
+  });
+
+  @override
+  ConsumerState<SignalTile> createState() => _SignalTileState();
+}
+
+class _SignalTileState extends ConsumerState<SignalTile>
+    with SingleTickerProviderStateMixin {
+  
+  // 🕒 시간 포맷터만 유지 (고유 기능)
+  static final _timeFormat = DateFormat('HH:mm:ss');
+
+  late AnimationController _blinkController;
+  late Animation<double> _blinkAnimation;
+  bool _shouldBlink = false;
+
+  @override
+  void initState() {
+    super.initState();
+    // ✨ 반짝임 애니메이션 초기화 (기존 방식)
+    _blinkController = AnimationController(
+      duration: const Duration(milliseconds: 800), // Signal은 조금 더 길게
+      vsync: this,
+    );
+    _blinkAnimation = Tween<double>(begin: 1.0, end: 0.2).animate(
+      CurvedAnimation(parent: _blinkController, curve: Curves.easeInOut),
+    );
+
+    _checkNewSignal();
+  }
+
+  /// 🎯 새로운 시그널 감지 및 반짝임 처리 (헬퍼 클래스 사용)
+  void _checkNewSignal() {
+    final signalKey = '${widget.signal.market}_${widget.signal.detectedAt.millisecondsSinceEpoch}';
+    
+    if (BlinkAnimationHelper.checkNewSignal(
+      blinkedSignalsSet: _blinkedSignals,
+      detectedAt: widget.signal.detectedAt,
+      signalKey: signalKey,
+      maxAgeSeconds: 10,
+    )) {
+      _startBlink();
+    }
+  }
+
+  /// 반짝임 시작 (설정 연동 추가)
+  void _startBlink() {
+    final blinkEnabled = ref.read(appSettingsProvider).blinkEnabled;
+    if (!mounted || !blinkEnabled) return; // 🎯 설정 체크 추가!
+    
+    _shouldBlink = true;
+    _blinkController.forward().then((_) {
+      _blinkController.reverse().then((_) {
+        if (mounted) {
+          setState(() {
+            _shouldBlink = false;
+          });
+        }
+      });
+    });
+  }
+
+  @override
+  void dispose() {
+    _blinkController.dispose();
+    super.dispose();
+  }
+
+  /// 🆕 V4.1 신뢰도 칩
+  Widget? _buildConfidenceChip() {
+    final confidence = widget.signal.confidence;
+    if (confidence == null) return null;
+
+    Color color;
+    if (confidence >= 0.8) {
+      color = Colors.green;
+    } else if (confidence >= 0.6) {
+      color = Colors.amber;
+    } else {
+      color = Colors.orange;
+    }
+
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(4),
+        color: color.withValues(alpha: 0.15),
+        border: Border.all(color: color.withValues(alpha: 0.4), width: 0.5),
+      ),
+      child: Text(
+        '${(confidence * 100).toStringAsFixed(0)}%',
+        style: TextStyle(
+          fontSize: 9,
+          color: color,
+          fontWeight: FontWeight.bold,
+        ),
+      ),
+    );
+  }
+
+  /// 🆕 V4.1 온라인 지표 칩들 생성
+  List<Widget> _buildOnlineIndicatorChips() {
+    if (!widget.showOnlineMetrics || !widget.signal.hasOnlineMetrics) {
+      return [];
+    }
+
+    final indicators = widget.signal.onlineIndicators!;
+    final chips = <Widget>[];
+
+    // RSI 칩
+    if (indicators.rsi != null) {
+      Color rsiColor;
+      String rsiText;
+      
+      if (indicators.rsi! >= 70) {
+        rsiColor = Colors.red;
+        rsiText = 'RSI${indicators.rsi!.toStringAsFixed(0)}';
+      } else if (indicators.rsi! <= 30) {
+        rsiColor = Colors.blue;
+        rsiText = 'RSI${indicators.rsi!.toStringAsFixed(0)}';
+      } else {
+        rsiColor = Colors.grey[600]!;
+        rsiText = 'RSI${indicators.rsi!.toStringAsFixed(0)}';
+      }
+
+      chips.add(_buildIndicatorChip(rsiText, rsiColor));
+    }
+
+    // MACD 칩
+    if (indicators.macd != null && indicators.macdSignal != null) {
+      final isBullish = indicators.macd! > indicators.macdSignal!;
+      final macdColor = isBullish ? Colors.green : Colors.red;
+      final macdText = isBullish ? 'M+' : 'M-';
+
+      chips.add(_buildIndicatorChip(macdText, macdColor));
+    }
+
+    return chips;
+  }
+
+  /// 🆕 V4.1 지표 칩 위젯
+  Widget _buildIndicatorChip(String text, Color color) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+      margin: const EdgeInsets.only(right: 4),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(4),
+        color: color.withValues(alpha: 0.15),
+        border: Border.all(color: color.withValues(alpha: 0.4), width: 0.5),
+      ),
+      child: Text(
+        text,
+        style: TextStyle(
+          fontSize: 9,
+          color: color,
+          fontWeight: FontWeight.bold,
+        ),
+      ),
+    );
+  }
+
+  /// 🆕 V4.1 다이버전스 인디케이터
+  Widget? _buildDivergenceIndicator() {
+    final divergence = widget.signal.divergence;
+    if (divergence == null || (!divergence.isBullish && !divergence.isBearish)) {
+      return null;
+    }
+
+    Color color;
+    IconData icon;
+    
+    if (divergence.isBullish) {
+      color = Colors.green;
+      icon = Icons.trending_up;
+    } else {
+      color = Colors.red;
+      icon = Icons.trending_down;
+    }
+
+    return Container(
+      padding: const EdgeInsets.all(3),
+      margin: const EdgeInsets.only(right: 4),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(4),
+        color: color.withValues(alpha: 0.15),
+        border: Border.all(color: color.withValues(alpha: 0.4), width: 0.5),
+      ),
+      child: Icon(
+        icon,
+        size: 10,
+        color: color,
+      ),
+    );
+  }
+
+  /// 🆕 V4.1 모든 배지들을 오버플로우 방지하며 배치
+  Widget _buildBadgeRow() {
+    final badges = <Widget>[];
+    
+    // 신뢰도 칩 추가
+    final confidenceChip = _buildConfidenceChip();
+    if (confidenceChip != null) {
+      badges.add(confidenceChip);
+    }
+    
+    // 온라인 지표 칩들 추가
+    badges.addAll(_buildOnlineIndicatorChips());
+    
+    // 다이버전스 인디케이터 추가
+    final divergenceIndicator = _buildDivergenceIndicator();
+    if (divergenceIndicator != null) {
+      badges.add(divergenceIndicator);
+    }
+
+    if (badges.isEmpty) {
+      return const SizedBox.shrink();
+    }
+
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      child: Row(
+        children: badges,
+      ),
+    );
+  }
+
+  /// 🆕 V4.1 패턴 색상 (온라인 지표 연동시 더 생동감있게)
+  Color _getEnhancedPatternColor() {
+    Color baseColor;
+    
+    switch (widget.signal.patternType) {
+      case PatternType.surge:
+        baseColor = Colors.red;
+        break;
+      case PatternType.flashFire:
+        baseColor = Colors.orange;
+        break;
+      case PatternType.stackUp:
+        baseColor = Colors.amber;
+        break;
+      case PatternType.stealthIn:
+        baseColor = Colors.green;
+        break;
+      case PatternType.blackHole:
+        baseColor = Colors.purple;
+        break;
+      case PatternType.reboundShot:
+        baseColor = Colors.blue;
+        break;
+    }
+
+    // 🆕 온라인 지표가 있으면 더 선명하게
+    if (widget.signal.hasOnlineMetrics) {
+      return baseColor;
+    } else {
+      return baseColor.withValues(alpha: 0.7);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final onSurface = theme.colorScheme.onSurface;
+
+    // 🎯 표준 카드 위젯 생성 (V4.1 Clean 버전)
+    Widget cardWidget = TileCommon.buildStandardCard(
+      child: TileCommon.buildFlexRow(
+        children: [
+          // 🕒 시간 부분: flex 13
+          FlexChild.expanded(
+            Text(
+              _timeFormat.format(widget.signal.detectedAt),
+              style: TextStyle(color: onSurface, fontSize: 11),
+            ),
+            flex: 13,
+          ),
+
+          const FlexChild.fixed(SizedBox(width: 8)),
+
+          // 🎨 코인 로고 부분: 고정 크기 (V4.1 패턴 색상 테두리 추가)
+          FlexChild.fixed(
+            Container(
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                border: Border.all(
+                  color: _getEnhancedPatternColor(),
+                  width: 1.5,
+                ),
+              ),
+              child: CoinLogoProvider.buildCoinLogo(
+                ticker: widget.signal.market.replaceFirst('KRW-', ''),
+                radius: 14,
+              ),
+            ),
+          ),
+
+          const FlexChild.fixed(SizedBox(width: 8)),
+
+          // 🪙 코인명 + 배지들: flex 24 (🆕 Clean 버전)
+          FlexChild.expanded(
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // 첫 번째 줄: 코인명 + NEW 뱃지
+                Row(
+                  children: [
+                    Flexible(
+                      child: Text(
+                        TileCommon.getDisplayName(ref, widget.signal.market),
+                        style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          color: theme.colorScheme.primary,
+                          fontSize: 15,
+                        ),
+                        overflow: TextOverflow.ellipsis,
+                        maxLines: 1,
+                      ),
+                    ),
+                    const SizedBox(width: 4),
+                    // NEW 뱃지 (필요한 경우)
+                    if (TileCommon.buildNewBadge(widget.signal.detectedAt) case final badge?) 
+                      badge,
+                  ],
+                ),
+                
+                const SizedBox(height: 3),
+                
+                // 🆕 두 번째 줄: 모든 배지들 (오버플로우 방지)
+                _buildBadgeRow(),
+              ],
+            ),
+            flex: 24,
+          ),
+
+          // 💵 가격 + 변화율: flex 18 (신뢰도 칩 제거됨)
+          FlexChild.expanded(
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                Text(
+                  '${AmountFormatter.formatPrice(widget.signal.currentPrice)}원',
+                  style: TextStyle(color: onSurface, fontSize: 13),
+                  overflow: TextOverflow.ellipsis,
+                  maxLines: 1,
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  TileCommon.formatChangePercent(widget.signal.changePercent),
+                  style: TextStyle(
+                    color: TileCommon.getChangeColor(widget.signal.changePercent),
+                    fontSize: 12,
+                    fontWeight: FontWeight.bold,
+                  ),
+                  overflow: TextOverflow.ellipsis,
+                  maxLines: 1,
+                ),
+              ],
+            ),
+            flex: 18,
+          ),
+
+          const FlexChild.fixed(SizedBox(width: 8)),
+
+          // 💰 거래대금: flex 18 (AmountDisplayWidget 사용)
+          FlexChild.expanded(
+            Align(
+              alignment: Alignment.centerRight,
+              child: AmountDisplayWidget(
+                totalAmount: widget.signal.tradeAmount,
+                isBuy: widget.signal.changePercent >= 0,
+                fontSize: 14,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+            flex: 18,
+          ),
+        ],
+      ),
+    );
+
+    // 🎯 반짝임 애니메이션 적용 (V4.1 패턴 색상 연동)
+    final blinkEnabled = ref.watch(appSettingsProvider).blinkEnabled;
+    
+    return blinkEnabled 
+        ? BlinkAnimationHelper.wrapWithBlinkEffect(
+            child: cardWidget,
+            shouldBlink: _shouldBlink,
+            blinkAnimation: _blinkAnimation,
+            blinkColor: _getEnhancedPatternColor(), // 🆕 V4.1 동적 색상
+          )
+        : cardWidget;
+  }
+}
+
+/// 🆕 V4.1 확장: AmountDisplayWidget에 highlightColor 파라미터 추가용 확장
+/// (실제로는 AmountDisplayWidget 클래스에 추가해야 함)
+extension AmountDisplayWidgetV41 on AmountDisplayWidget {
+  /// V4.1 강조 색상이 적용된 위젯 생성
+  static Widget withHighlight({
+    required double totalAmount,
+    required bool isBuy,
+    double fontSize = 14,
+    FontWeight fontWeight = FontWeight.w600,
+    Color? highlightColor,
+  }) {
+    return Container(
+      padding: highlightColor != null 
+          ? const EdgeInsets.symmetric(horizontal: 4, vertical: 1)
+          : null,
+      decoration: highlightColor != null
+          ? BoxDecoration(
+              borderRadius: BorderRadius.circular(3),
+              color: highlightColor.withValues(alpha: 0.1),
+              border: Border.all(color: highlightColor.withValues(alpha: 0.3), width: 0.5),
+            )
+          : null,
+      child: AmountDisplayWidget(
+        totalAmount: totalAmount,
+        isBuy: isBuy,
+        fontSize: fontSize,
+        fontWeight: fontWeight,
+      ),
+    );
+  }
+}

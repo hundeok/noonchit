@@ -1,101 +1,116 @@
-import 'dart:async';
+// lib/presentation/controllers/trade_controller.dart
+
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/config/app_config.dart';
-import '../../core/di/trade_provider.dart'; // usecaseProvider, repoProvider
-import '../../core/error/app_exception.dart';
-import '../../core/extensions/result.dart';
+import '../../core/di/trade_provider.dart';
 import '../../domain/entities/trade.dart';
 import '../../domain/usecases/trade_usecase.dart';
 
-/// 화면 상태를 캡슐화하는 immutable 모델
-class TradeState {
-  final List<Trade> trades;
-  final bool isLoading;
-  final bool isConnected;
-  final double threshold;
-  final int selectedIndex;
-  final String? errorMessage;
-
-  const TradeState({
-    this.trades = const [],
-    this.isLoading = false,
-    this.isConnected = false,
-    this.threshold = 20000000,
-    this.selectedIndex = 0,
-    this.errorMessage,
-  });
-
-  TradeState copyWith({
-    List<Trade>? trades,
-    bool? isLoading,
-    bool? isConnected,
-    double? threshold,
-    int? selectedIndex,
-    String? errorMessage,
-  }) {
-    return TradeState(
-      trades: trades ?? this.trades,
-      isLoading: isLoading ?? this.isLoading,
-      isConnected: isConnected ?? this.isConnected,
-      threshold: threshold ?? this.threshold,
-      selectedIndex: selectedIndex ?? this.selectedIndex,
-      errorMessage: errorMessage,
-    );
-  }
-}
-
-/// Trade 화면 전용 ViewModel
-class TradeController extends StateNotifier<TradeState> {
+/// 🎯 신버전 맞춤 TradeController (TradeFilter/TradeMode Enum 기반)
+class TradeController extends StateNotifier<TradeControllerState> {
+  final Ref _ref;
   final TradeUsecase _usecase;
-  final Ref _ref;  // 🔥 추가: Repository 접근을 위한 ref
-  StreamSubscription<Result<List<Trade>, AppException>>? _subscription;
+  
+  // ✅ Provider 구독 관리
+  final List<ProviderSubscription> _subscriptions = [];
 
-  TradeController(this._usecase, this._ref) : super(const TradeState());  // 🔥 수정: ref 매개변수 추가
+  TradeController(this._usecase, this._ref) : super(const TradeControllerState()) {
+    // ✅ 데이터 구독 초기화
+    _initializeDataSubscription();
+  }
 
-  /// 임계값 및 인덱스 설정 후 스트림 구독
-  void setThreshold(double threshold, int index, List<String> markets) {
-    // 🔥 추가: Repository의 updateThreshold 호출 (핵심 누락 부분)
-    final repository = _ref.read(repoProvider);
-    repository.updateThreshold(threshold);
+  /// ✅ 데이터 구독 초기화 (신버전 Provider 이름 사용)
+  void _initializeDataSubscription() {
+    final subscription = _ref.listen(
+      tradeListProvider,  // ✅ 신버전 Provider 유지
+      (previous, next) {
+        next.when(
+          data: (trades) => _processTradeData(trades),
+          loading: () => state = state.copyWith(isLoading: true),
+          error: (error, _) => state = state.copyWith(
+            errorMessage: error.toString(),
+            isLoading: false,
+          ),
+        );
+      },
+    );
+    _subscriptions.add(subscription);
+  }
+
+  /// ✅ 거래 데이터 처리
+  void _processTradeData(List<Trade> trades) {
+    // 1. 데이터 정렬 (신버전은 이미 reverse 처리됨)
+    final sortedTrades = trades; // 신버전에서는 이미 최신순 정렬됨
     
+    // 2. 상태 업데이트
     state = state.copyWith(
-      threshold: threshold,
-      selectedIndex: index,
-      isLoading: true,
+      trades: sortedTrades,
+      isLoading: false,
       errorMessage: null,
     );
-    _subscription?.cancel();
-    _subscription = _usecase
-        .filterTrades(threshold, markets)
-        .listen(_handleResult);
   }
 
-  void _handleResult(Result<List<Trade>, AppException> result) {
-    result.when(
-      ok: (trades) {
-        state = state.copyWith(
-          trades: trades,
-          isLoading: false,
-          isConnected: true,
-          errorMessage: null,
-        );
-      },
-      err: (e) {
-        state = state.copyWith(
-          isLoading: false,
-          isConnected: false,
-          errorMessage: e.message,
-        );
-      },
+  /// ✅ 임계값 설정 - 신버전 TradeFilter 기반
+  void setThreshold(TradeFilter filter) {
+    final controller = _ref.read(tradeThresholdController);
+    
+    // 신버전 updateThreshold 사용
+    final index = controller.availableFilters.indexOf(filter);
+    controller.updateThreshold(filter, index);
+    
+    // ✅ UI 상태 업데이트
+    state = state.copyWith(
+      currentFilter: filter,
+      selectedIndex: index,
     );
   }
 
-  /// 재연결/새로고침: markets만 받아서 내부적으로 setThreshold 호출
-  void refresh(List<String> markets) {
-    setThreshold(state.threshold, state.selectedIndex, markets);
+  /// ✅ 구간/누적 모드 토글 - 신버전 TradeMode 기반
+  void setMode(TradeMode mode) {
+    final controller = _ref.read(tradeThresholdController);
+    
+    // 신버전 updateMode 사용
+    controller.updateMode(mode);
+    
+    // ✅ UI 상태 업데이트
+    state = state.copyWith(currentMode: mode);
   }
 
-  /// 거래 목록 추가 필터 (시장명)
+  /// ✅ 편의 메서드: 모드 토글
+  void toggleMode() {
+    final currentMode = state.currentMode;
+    final newMode = currentMode.isAccumulated ? TradeMode.range : TradeMode.accumulated;
+    setMode(newMode);
+  }
+
+  /// ✅ 현재 설정에 따른 표시 텍스트 생성 (신버전 기반)
+  String getThresholdDisplayText() {
+    final filter = state.currentFilter;
+    final mode = state.currentMode;
+    final availableFilters = this.availableFilters;
+    
+    if (mode.isRange) {
+      // 구간 모드
+      final currentIndex = availableFilters.indexOf(filter);
+      if (currentIndex >= 0 && currentIndex < availableFilters.length - 1) {
+        final nextFilter = availableFilters[currentIndex + 1];
+        return '금액 레인지: ${filter.displayName} ~ ${nextFilter.displayName}';
+      } else {
+        return '금액 레인지: ${filter.displayName} 이상';
+      }
+    } else {
+      // 누적 모드
+      return '최소 거래금액: ${filter.displayName}';
+    }
+  }
+
+  /// ✅ 토글 버튼 텍스트 (신버전 기반)
+  String get toggleButtonText => state.currentMode.displayName;
+
+  /// ✅ 사용 가능한 필터 옵션들 (신버전 기반)
+  List<TradeFilter> get availableFilters => TradeConfig.supportedFilters;
+
+  /// ✅ 거래 목록 추가 필터 (시장명)
   List<Trade> filterByMarket(String? marketFilter) {
     if (marketFilter == null || marketFilter.isEmpty) {
       return state.trades;
@@ -104,7 +119,7 @@ class TradeController extends StateNotifier<TradeState> {
     return state.trades.where((t) => t.market.contains(upper)).toList();
   }
 
-  /// 거래 목록 정렬
+  /// ✅ 거래 목록 정렬
   void sortTrades(String field, bool ascending) {
     final list = [...state.trades];
     list.sort((a, b) {
@@ -143,29 +158,80 @@ class TradeController extends StateNotifier<TradeState> {
     state = state.copyWith(trades: list);
   }
 
-  /// 거래 목록 필터링/정렬 적용
-  List<Trade> apply(List<Trade> trades) {
-    // 현재 threshold로 필터링
-    final filtered = trades.where((trade) => trade.total >= state.threshold).toList();
-    // 기본 정렬 (timestampMs 내림차순)
-    filtered.sort((a, b) => b.timestampMs.compareTo(a.timestampMs));
-    return filtered;
+  /// ✅ 호환성 메서드들 (기존 UI 코드와의 호환성을 위해)
+  void setThresholdByValue(double value, int index) {
+    final filter = TradeFilter.fromValue(value);
+    setThreshold(filter);
   }
 
-  /// 사용 가능한 임계값 옵션들
-  List<double> get availableThresholds =>
-    AppConfig.tradeFilters.where((f) => f >= 20000000).toList();
+  void toggleRangeMode() {
+    toggleMode();
+  }
 
+  /// ✅ 현재 상태 조회 메서드들
+  TradeFilter get currentFilter => state.currentFilter;
+  TradeMode get currentMode => state.currentMode;
+  double get currentThreshold => state.currentFilter.value;
+  bool get isRangeMode => state.currentMode.isRange;
+
+  /// ✅ 리소스 정리
   @override
   void dispose() {
-    _subscription?.cancel();
+    // Provider 구독 해제
+    for (final subscription in _subscriptions) {
+      subscription.close();
+    }
+    _subscriptions.clear();
+    
     super.dispose();
   }
 }
 
-/// Provider 선언
-final tradeControllerProvider =
-    StateNotifierProvider<TradeController, TradeState>((ref) {
-  final usecase = ref.read(usecaseProvider);
-  return TradeController(usecase, ref);  // 🔥 수정: ref도 함께 전달
-});
+/// ✅ 상태 클래스 (신버전 Enum 기반)
+class TradeControllerState {
+  final List<Trade> trades;              // 표시용 거래 데이터
+  final bool isLoading;                 // 로딩 상태
+  final TradeFilter currentFilter;      // 현재 필터 (신버전)
+  final TradeMode currentMode;          // 현재 모드 (신버전)
+  final int selectedIndex;              // 슬라이더 인덱스
+  final String? errorMessage;           // 에러 메시지
+
+  const TradeControllerState({
+    this.trades = const [],
+    this.isLoading = false,
+    this.currentFilter = TradeFilter.min20M,  // 신버전 기본값
+    this.currentMode = TradeMode.accumulated, // 신버전 기본값
+    this.selectedIndex = 0,
+    this.errorMessage,
+  });
+
+  TradeControllerState copyWith({
+    List<Trade>? trades,
+    bool? isLoading,
+    TradeFilter? currentFilter,
+    TradeMode? currentMode,
+    int? selectedIndex,
+    String? errorMessage,
+  }) {
+    return TradeControllerState(
+      trades: trades ?? this.trades,
+      isLoading: isLoading ?? this.isLoading,
+      currentFilter: currentFilter ?? this.currentFilter,
+      currentMode: currentMode ?? this.currentMode,
+      selectedIndex: selectedIndex ?? this.selectedIndex,
+      errorMessage: errorMessage ?? this.errorMessage,
+    );
+  }
+
+  // ✅ 호환성을 위한 getter들
+  double get threshold => currentFilter.value;
+  bool get isRangeMode => currentMode.isRange;
+}
+
+/// ✅ Provider 선언 (신버전 기반)
+final tradeControllerProvider = StateNotifierProvider<TradeController, TradeControllerState>(
+  (ref) {
+    final usecase = ref.read(usecaseProvider);  // ✅ 신버전 Provider 사용
+    return TradeController(usecase, ref);
+  },
+);

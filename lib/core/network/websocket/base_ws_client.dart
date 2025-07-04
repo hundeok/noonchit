@@ -120,11 +120,37 @@ class BaseWsClient<T> {
     
     await _channel?.sink.close();
 
+    Timer? connectionTimer;
+    
     try {
       if (_symbols.length > AppConfig.wsMaxSubscriptionCount) {
         throw const WebSocketException('Subscribe limit exceeded');
       }
-      _channel = WebSocketChannel.connect(Uri.parse(url));
+      
+      // ✅ 핵심 수정: 타이머로 연결 타임아웃 구현
+      final completer = Completer<WebSocketChannel>();
+      
+      connectionTimer = Timer(const Duration(seconds: 15), () {
+        if (!completer.isCompleted) {
+          log.w('WebSocket connection timeout after 15s');
+          completer.completeError(
+            TimeoutException('WebSocket connection timeout', const Duration(seconds: 15))
+          );
+        }
+      });
+      
+      try {
+        final channel = WebSocketChannel.connect(Uri.parse(url));
+        completer.complete(channel);
+      } catch (e) {
+        if (!completer.isCompleted) {
+          completer.completeError(e);
+        }
+      }
+      
+      _channel = await completer.future;
+      connectionTimer.cancel();
+      
       _setupPing();
       _send(encodeSubscribe(_symbols));
 
@@ -141,6 +167,7 @@ class BaseWsClient<T> {
       _notify(WsStatus.connected);
       log.i('WS connected to $url (subscriptions: ${_symbols.length})');
     } catch (e, st) {
+      connectionTimer?.cancel();
       log.w('WS connect failed: $e', e, st);
       _backoffCalculator.recordFailure();
       _notify(WsStatus.failed);
@@ -187,7 +214,7 @@ class BaseWsClient<T> {
     _pongTimer?.cancel();
     _pingTimer =
         Timer.periodic(AppConfig.wsPingInterval, (_) {
-      _send(jsonEncode({'type': 'ping'}));
+     _send('PING');
       _pongTimer = Timer(AppConfig.wsPongTimeout, () {
         log.w('Pong timeout, reconnecting');
         _notify(WsStatus.pongTimeout);

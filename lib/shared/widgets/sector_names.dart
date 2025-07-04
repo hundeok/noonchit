@@ -188,9 +188,9 @@ class SectorNames {
       'english': 'Layer 1 Blockchain',
     },
     '고 시총': {
-      'ticker': 'HIGH-CAP',
+      'ticker': 'LARGE-CAP',
       'korean': '고 시총',
-      'english': 'High Market Cap',
+      'english': 'Large Market Cap',
     },
     '중 시총': {
       'ticker': 'MID-CAP',
@@ -198,9 +198,9 @@ class SectorNames {
       'english': 'Mid Market Cap',
     },
     '저 시총': {
-      'ticker': 'LOW-CAP',
+      'ticker': 'SMALL-CAP',
       'korean': '저 시총',
-      'english': 'Low Market Cap',
+      'english': 'Small Market Cap',
     },
     '마이너 알트코인': {
       'ticker': 'MINOR-ALT',
