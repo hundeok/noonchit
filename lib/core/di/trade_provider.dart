@@ -1,12 +1,14 @@
 import 'dart:async';
 import 'dart:collection';
+import 'dart:math' as math;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:rxdart/rxdart.dart'; // 🔥 추가: share() 메서드용
+import 'package:rxdart/rxdart.dart';
 
 import '../config/app_config.dart';
 import '../services/hive_service.dart';
 import '../network/api_client.dart';
 import '../utils/logger.dart';
+import '../common/time_frame_types.dart'; // 🔥 공통 타입 시스템 사용
 import 'app_providers.dart' show signalBusProvider;
 import 'websocket_provider.dart' show wsClientProvider;
 import '../../data/datasources/trade_cache_ds.dart';
@@ -17,115 +19,13 @@ import '../../domain/usecases/trade_usecase.dart';
 import '../../data/processors/trade_aggregator.dart';
 
 // ══════════════════════════════════════════════════════════════════════════════
-// 🎯 핵심 타입 정의
+// 🔥 타입 정의 제거 - 공통 time_frame_types.dart 사용
 // ══════════════════════════════════════════════════════════════════════════════
 
-/// 거래 필터 Enum
-enum TradeFilter {
-  min20M(20000000, '2천만원'),
-  min50M(50000000, '5천만원'),
-  min100M(100000000, '1억원'),
-  min200M(200000000, '2억원'),
-  min300M(300000000, '3억원'),
-  min400M(400000000, '4억원'),
-  min500M(500000000, '5억원'),
-  min1B(1000000000, '10억원');
-  
-  const TradeFilter(this.value, this.displayName);
-  final double value;
-  final String displayName;
-  
-  static TradeFilter fromValue(double value) {
-    return values.firstWhere(
-      (filter) => filter.value == value,
-      orElse: () => TradeFilter.min20M,
-    );
-  }
-  
-  static List<TradeFilter> get available => values;
-  static List<double> get availableValues => values.map((f) => f.value).toList();
-}
-
-/// 거래 모드 Enum
-enum TradeMode {
-  accumulated('누적'),
-  range('구간');
-  
-  const TradeMode(this.displayName);
-  final String displayName;
-  
-  bool get isRange => this == TradeMode.range;
-  bool get isAccumulated => this == TradeMode.accumulated;
-}
-
-/// 거래 설정
-class TradeConfig {
-  static const int maxTradesPerFilter = 200;
-  static const int maxCacheSize = 250;
-  static const Duration batchInterval = Duration(milliseconds: 100);
-  
-  static List<TradeFilter> get supportedFilters => TradeFilter.available;
-  static List<double> get supportedValues => TradeFilter.availableValues;
-}
-
-/// 마켓 정보 클래스
-class MarketInfo {
-  final String market;
-  final String koreanName;
-  final String englishName;
-
-  const MarketInfo({
-    required this.market,
-    required this.koreanName,
-    required this.englishName,
-  });
-
-  factory MarketInfo.fromJson(Map<String, dynamic> json) {
-    return MarketInfo(
-      market: json['market'] ?? '',
-      koreanName: json['korean_name'] ?? '',
-      englishName: json['english_name'] ?? '',
-    );
-  }
-}
-
-// ══════════════════════════════════════════════════════════════════════════════
-// 🔧 Extension
-// ══════════════════════════════════════════════════════════════════════════════
-
-extension TradeFilterList on List<TradeFilter> {
-  List<double> get values => map((f) => f.value).toList();
-  List<String> get displayNames => map((f) => f.displayName).toList();
-  
-  TradeFilter? findByValue(double value) {
-    try {
-      return firstWhere((f) => f.value == value);
-    } catch (e) {
-      return null;
-    }
-  }
-}
-
-extension SafeTradeMap on Map<double, List<Trade>> {
-  void addTradeToFilter(double filterValue, Trade trade) {
-    final list = this[filterValue] ?? <Trade>[];
-    list.add(trade);
-    
-    if (list.length > TradeConfig.maxTradesPerFilter) {
-      list.removeAt(0);
-    }
-    
-    this[filterValue] = list;
-  }
-  
-  List<Trade> getTradesForFilter(double filterValue) {
-    return this[filterValue] ?? <Trade>[];
-  }
-  
-  void clearAllFilters() {
-    forEach((key, value) => value.clear());
-  }
-}
+// TradeFilter enum → time_frame_types.dart로 이관 ✅
+// TradeMode enum → time_frame_types.dart로 이관 ✅  
+// TradeConfig class → time_frame_types.dart로 이관 ✅
+// MarketInfo class → time_frame_types.dart로 이관 ✅
 
 // ══════════════════════════════════════════════════════════════════════════════
 // 🏗️ Infrastructure Layer
@@ -175,13 +75,11 @@ final marketInfoProvider = FutureProvider<Map<String, MarketInfo>>((ref) async {
     return result.when(
       ok: (markets) {
         final Map<String, MarketInfo> marketMap = {};
-        int filteredCount = 0;
         
         for (final market in markets) {
           if (market is Map<String, dynamic>) {
             final warning = market['market_warning'] as String?;
             if (warning == 'CAUTION') {
-              filteredCount++;
               continue;
             }
             
@@ -190,7 +88,6 @@ final marketInfoProvider = FutureProvider<Map<String, MarketInfo>>((ref) async {
           }
         }
         
-        // Markets loaded: ${marketMap.length} (filtered: $filteredCount)
         return marketMap;
       },
       err: (error) {
@@ -246,11 +143,7 @@ final marketsProvider = FutureProvider<List<String>>((ref) async {
 
 final tradeFilterIndexProvider = StateProvider<int>((_) => 0);
 
-final tradeFilterThresholdProvider = StateProvider<TradeFilter>((ref) =>
-    TradeFilter.available.firstWhere(
-      (f) => f.value >= 20000000,
-      orElse: () => TradeFilter.min20M,
-    ));
+final tradeFilterThresholdProvider = StateProvider<TradeFilter>((ref) => TradeFilter.min20M);
 
 final tradeModeProvider = StateProvider<TradeMode>((ref) => TradeMode.accumulated);
 
@@ -340,7 +233,31 @@ final tradeAggregatorProvider = Provider<TradeAggregator>((ref) {
 });
 
 // ══════════════════════════════════════════════════════════════════════════════
-// 🔄 Processing Layer
+// 🔄 Master Stream Layer (Single WS Connection for All Modules)
+// ══════════════════════════════════════════════════════════════════════════════
+
+/// 🎯 Master Trade Stream - 모든 모듈이 공유하는 단일 데이터 소스
+final masterTradeStreamProvider = FutureProvider.autoDispose<Stream<Trade>>((ref) async {
+  final markets = await ref.watch(marketsProvider.future); // watch로 새 코인 자동 감지
+  final repo = ref.read(repoProvider);
+  
+  // 연결 유지 (백그라운드에서도 WS 끊어지지 않음)
+  ref.keepAlive();
+  
+  if (AppConfig.isDebugMode) {
+    // log.d('Master trade stream started (${markets.length} markets)');
+  }
+  
+  // 단일 WS 연결 + 브로드캐스트로 모든 모듈에서 재사용
+  return repo.watchTrades(markets)
+    .distinct((prev, next) => 
+      prev.sequentialId == next.sequentialId && 
+      prev.market == next.market)
+    .shareReplay(maxSize: 1); // 재연결 방지
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 🔄 Processing Layer (Master Stream 기반)
 // ══════════════════════════════════════════════════════════════════════════════
 
 final tradeProcessingTimerProvider = StreamProvider((ref) {
@@ -348,15 +265,10 @@ final tradeProcessingTimerProvider = StreamProvider((ref) {
 });
 
 final rawTradeProcessingProvider = StreamProvider<Trade>((ref) async* {
-  final markets = await ref.read(marketsProvider.future);
-  final repo = ref.read(repoProvider);
+  final masterStream = await ref.read(masterTradeStreamProvider.future);
   final aggregator = ref.read(tradeAggregatorProvider);
   final seenIdsNotifier = ref.read(tradeSeenIdsProvider.notifier);
   final filterCacheNotifier = ref.read(tradeFilterCacheProvider.notifier);
-
-  if (AppConfig.isDebugMode) {
-    // log.d('Trade processing started (${markets.length} markets)');
-  }
 
   ref.listen(tradeProcessingTimerProvider, (previous, next) {
     next.whenData((value) {
@@ -376,7 +288,7 @@ final rawTradeProcessingProvider = StreamProvider<Trade>((ref) async* {
     });
   });
 
-  yield* repo.watchTrades(markets).where((trade) {
+  yield* masterStream.where((trade) {
     final key = '${trade.market}/${trade.sequentialId}';
     if (!seenIdsNotifier.addId(key)) return false;
 
@@ -405,7 +317,7 @@ final rawTradeProcessingProvider = StreamProvider<Trade>((ref) async* {
     );
 
     return true;
-  }).share(); // 🔥 추가: 브로드캐스트 스트림으로 변환
+  });
 });
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -435,14 +347,12 @@ class TradeListNotifier extends AsyncNotifier<List<Trade>> {
 
     ref.listen<TradeFilter>(tradeFilterThresholdProvider, (prev, next) {
       if (prev != null && prev != next) {
-        // Filter changed: ${prev.displayName} → ${next.displayName}
         _updateTrades();
       }
     });
 
     ref.listen<TradeMode>(tradeModeProvider, (prev, next) {
       if (prev != null && prev != next) {
-        // Mode changed: ${prev.displayName} → ${next.displayName}
         _updateTrades();
       }
     });
@@ -450,7 +360,6 @@ class TradeListNotifier extends AsyncNotifier<List<Trade>> {
 
   void _updateTrades() {
     final newTrades = _calculateTrades();
-    // Trades updated: ${newTrades.length}
     state = AsyncValue.data(newTrades);
   }
 
@@ -460,14 +369,9 @@ class TradeListNotifier extends AsyncNotifier<List<Trade>> {
     final usecase = ref.read(usecaseProvider);
     final filterCache = ref.read(tradeFilterCacheProvider);
     
-    final legacyFilterCache = <double, List<Trade>>{};
-    filterCache.forEach((filter, trades) {
-      legacyFilterCache[filter.value] = trades;
-    });
-    
     return usecase.calculateFilteredTrades(
-      legacyFilterCache,
-      filterThreshold.value,
+      filterCache,
+      filterThreshold,
       tradeMode.isRange,
     );
   }
@@ -477,10 +381,9 @@ final tradeListProvider = AsyncNotifierProvider<TradeListNotifier, List<Trade>>(
   return TradeListNotifier();
 });
 
-final aggregatedTradeProvider = StreamProvider<Trade>((ref) {
-  ref.keepAlive();
-  return ref.watch(rawTradeProcessingProvider.stream);
-});
+// ⭐ 불필요한 aggregatedTradeProvider 제거!
+// 기존: final aggregatedTradeProvider = StreamProvider<Trade>((ref) { ... });
+// 변경: rawTradeProcessingProvider를 직접 사용하세요!
 
 // ══════════════════════════════════════════════════════════════════════════════
 // 🎛️ Controller Helper
@@ -495,7 +398,6 @@ class TradeThresholdController {
   void updateThreshold(TradeFilter filter, int index) {
     final options = TradeConfig.supportedFilters;
     if (index < 0 || index >= options.length) {
-      // Invalid threshold index: $index
       return;
     }
     
@@ -507,22 +409,10 @@ class TradeThresholdController {
     ref.read(tradeModeProvider.notifier).state = mode;
   }
 
-  void updateThresholdByValue(double thresholdValue, int index) {
-    final filter = TradeFilter.fromValue(thresholdValue);
-    updateThreshold(filter, index);
-  }
-
-  void updateModeByBool(bool isRange) {
-    final mode = isRange ? TradeMode.range : TradeMode.accumulated;
-    updateMode(mode);
-  }
-
   TradeFilter get currentFilter => ref.read(tradeFilterThresholdProvider);
   TradeMode get currentMode => ref.read(tradeModeProvider);
   int get currentIndex => ref.read(tradeFilterIndexProvider);
   List<TradeFilter> get availableFilters => TradeConfig.supportedFilters;
   
-  double get currentThreshold => currentFilter.value;
   bool get isRangeMode => currentMode.isRange;
-  List<double> get availableThresholds => TradeConfig.supportedValues;
 }

@@ -1,11 +1,11 @@
 import 'package:flutter/foundation.dart';
-import '../../core/config/app_config.dart';
+import '../../core/common/time_frame_types.dart'; // 🔥 공통 타입 시스템 사용
 import '../entities/surge.dart';
 
 /// 🔥 A+급 SurgeUsecase - 완전한 타입 안전성 + 함수형 설계
 /// - 모든 dynamic 제거로 컴파일타임 안전성 보장
 /// - 순수 함수 + 불변성 철저히 적용
-/// - 비즈니스 규칙을 enum/config로 추상화
+/// - 공통 TimeFrame enum 사용으로 타입 안전성 보장
 /// - 성능 최적화된 알고리즘 적용
 class SurgeUsecase {
   // 🔥 Repository는 향후 확장을 위해 보관 (현재는 순수 함수만 사용)
@@ -17,11 +17,11 @@ class SurgeUsecase {
   // 🎯 생성자에서 repository 제거 (순수 함수형 유틸리티로 사용)
   const SurgeUsecase();
 
-  /// 🔥 완전한 타입 안전성: PriceData 인터페이스 정의
+  /// 🔥 완전한 타입 안전성: PriceData 인터페이스 정의 + TimeFrame enum 사용
   /// dynamic 완전 제거!
   List<Surge> calculateSurgeList(
     Map<String, PriceData> surgeMap, // 🎯 dynamic → PriceData
-    String timeFrame,
+    TimeFrame timeFrame, // 🔥 String → TimeFrame enum
     DateTime startTime,
   ) {
     if (!isValidTimeFrame(timeFrame)) return <Surge>[];
@@ -44,10 +44,10 @@ class SurgeUsecase {
     return data.basePrice > 0 && data.changePercent != 0;
   }
 
-  /// 🎯 순수 함수: Surge 객체 생성
+  /// 🎯 순수 함수: Surge 객체 생성 - TimeFrame enum 사용
   Surge _createSurge(
     MapEntry<String, PriceData> entry,
-    String timeFrame,
+    TimeFrame timeFrame, // 🔥 TimeFrame enum 사용
     DateTime now,
     DateTime startTime,
   ) {
@@ -58,7 +58,7 @@ class SurgeUsecase {
       basePrice: data.basePrice,
       currentPrice: data.currentPrice,
       lastUpdatedMs: now.millisecondsSinceEpoch,
-      timeFrame: timeFrame,
+      timeFrame: timeFrame.key, // 🔥 enum.key 사용
       timeFrameStartMs: startTime.millisecondsSinceEpoch,
     );
   }
@@ -67,9 +67,11 @@ class SurgeUsecase {
   int _compareByChangePercent(Surge a, Surge b) => 
       b.changePercent.compareTo(a.changePercent);
 
-  /// 🔥 비즈니스 규칙 enum화 - 타입 안전성 극대화
-  bool isValidTimeFrame(String timeFrame) => 
-      SurgeTimeFrame.isValid(timeFrame);
+  /// 🔥 비즈니스 규칙 - 공통 TimeFrame enum 사용
+  bool isValidTimeFrame(TimeFrame timeFrame) {
+    final activeFrames = TimeFrame.fromAppConfig();
+    return activeFrames.contains(timeFrame);
+  }
 
   /// 🎯 함수형 체이닝: 필터링 메서드들
   List<Surge> filterByMinimumPercent(List<Surge> surges, double threshold) =>
@@ -110,25 +112,18 @@ class SurgeUsecase {
 
   bool isKrwMarket(String market) => market.startsWith('KRW-');
 
-  /// 🎯 설정 기반 메서드들
-  List<String> getActiveTimeFrames() => SurgeTimeFrame.allActive();
+  /// 🎯 설정 기반 메서드들 - 공통 TimeFrame enum 사용
+  List<TimeFrame> getActiveTimeFrames() => TimeFrame.fromAppConfig();
   
-  String getTimeFrameDisplayName(String timeFrame) => 
-      SurgeTimeFrame.getDisplayName(timeFrame);
+  String getTimeFrameDisplayName(TimeFrame timeFrame) => timeFrame.displayName;
 
-  /// 🔥 시간 계산 메서드들 - null 안전성 보장
-  int? parseTimeFrameMinutes(String timeFrame) => 
-      SurgeTimeFrame.parseMinutes(timeFrame);
-
-  DateTime? calculateNextResetTime(String timeFrame, DateTime startTime) {
-    final minutes = parseTimeFrameMinutes(timeFrame);
-    return minutes != null ? startTime.add(Duration(minutes: minutes)) : null;
+  /// 🔥 시간 계산 메서드들 - TimeFrame enum 사용
+  DateTime calculateNextResetTime(TimeFrame timeFrame, DateTime startTime) {
+    return startTime.add(timeFrame.duration); // 🔥 enum.duration 사용
   }
 
-  Duration? getTimeUntilReset(String timeFrame, DateTime startTime) {
+  Duration getTimeUntilReset(TimeFrame timeFrame, DateTime startTime) {
     final nextReset = calculateNextResetTime(timeFrame, startTime);
-    if (nextReset == null) return null;
-    
     final remaining = nextReset.difference(DateTime.now());
     return remaining.isNegative ? Duration.zero : remaining;
   }
@@ -152,13 +147,10 @@ class SurgeUsecase {
     return Map.fromIterables(markets, ranks);
   }
 
-  /// 🎯 진행률 계산 - clamp으로 안전성 보장
-  double calculateTimeFrameProgress(String timeFrame, DateTime startTime) {
-    final minutes = parseTimeFrameMinutes(timeFrame);
-    if (minutes == null) return 0.0;
-    
+  /// 🎯 진행률 계산 - TimeFrame enum 사용
+  double calculateTimeFrameProgress(TimeFrame timeFrame, DateTime startTime) {
     final elapsed = DateTime.now().difference(startTime);
-    final progress = elapsed.inMilliseconds / Duration(minutes: minutes).inMilliseconds;
+    final progress = elapsed.inMilliseconds / timeFrame.duration.inMilliseconds;
     return progress.clamp(0.0, 1.0);
   }
 
@@ -197,6 +189,33 @@ class SurgeUsecase {
     
     return classification;
   }
+
+  /// 🔥 호환성 메서드들 - 기존 String 기반 코드와의 호환성
+  @Deprecated('Use TimeFrame enum instead of String')
+  List<Surge> calculateSurgeListLegacy(
+    Map<String, PriceData> surgeMap,
+    String timeFrame,
+    DateTime startTime,
+  ) {
+    // String을 TimeFrame으로 변환
+    final tf = _parseStringToTimeFrame(timeFrame);
+    if (tf == null) return <Surge>[];
+    
+    return calculateSurgeList(surgeMap, tf, startTime);
+  }
+
+  /// 🔥 String → TimeFrame 변환 헬퍼
+  TimeFrame? _parseStringToTimeFrame(String timeFrame) {
+    try {
+      final minutes = int.parse(timeFrame.replaceAll('m', ''));
+      return TimeFrame.values.firstWhere(
+        (tf) => tf.minutes == minutes,
+        orElse: () => TimeFrame.min1,
+      );
+    } catch (e) {
+      return null;
+    }
+  }
 }
 
 /// 🔥 타입 안전성: PriceData 인터페이스 정의
@@ -207,41 +226,7 @@ abstract class PriceData {
   double get changePercent;
 }
 
-/// 🔥 비즈니스 규칙 enum화: TimeFrame 관리
-enum SurgeTimeFrame {
-  min1(1, '1분'),
-  min5(5, '5분'),
-  min15(15, '15분'),
-  min30(30, '30분'),
-  min60(60, '1시간'),
-  hour2(120, '2시간'),
-  hour4(240, '4시간'),
-  hour8(480, '8시간'),
-  hour12(720, '12시간'),
-  day1(1440, '1일');
-
-  const SurgeTimeFrame(this.minutes, this.displayName);
-  final int minutes;
-  final String displayName;
-  
-  String get key => '${minutes}m';
-  
-  static bool isValid(String timeFrame) => 
-      values.any((tf) => tf.key == timeFrame);
-  
-  static List<String> allActive() => 
-      AppConfig.timeFrames.map((tf) => '${tf}m').toList();
-  
-  static String getDisplayName(String timeFrame) {
-    final tf = values.where((tf) => tf.key == timeFrame).firstOrNull;
-    return tf?.displayName ?? timeFrame;
-  }
-  
-  static int? parseMinutes(String timeFrame) => 
-      int.tryParse(timeFrame.replaceAll('m', ''));
-}
-
-/// 🔥 변동률 범위 enum: 타입 안전성 + 성능 최적화
+/// 🔥 변동률 범위 enum: 타입 안전성 + 성능 최적화 (중복 제거 - 공통 타입으로 이관 고려)
 enum SurgeRangeType {
   extremeRise(10, double.infinity, 'extreme_rise'),
   strongRise(5, 10, 'strong_rise'),

@@ -1,8 +1,7 @@
 // lib/presentation/controllers/trade_controller.dart
-
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import '../../core/config/app_config.dart';
 import '../../core/di/trade_provider.dart';
+import '../../core/common/time_frame_types.dart'; // 🔥 공통 타입 시스템 사용
 import '../../domain/entities/trade.dart';
 import '../../domain/usecases/trade_usecase.dart';
 
@@ -22,7 +21,7 @@ class TradeController extends StateNotifier<TradeControllerState> {
   /// ✅ 데이터 구독 초기화 (신버전 Provider 이름 사용)
   void _initializeDataSubscription() {
     final subscription = _ref.listen(
-      tradeListProvider,  // ✅ 신버전 Provider 유지
+      tradeListProvider, // ✅ 신버전 Provider 유지
       (previous, next) {
         next.when(
           data: (trades) => _processTradeData(trades),
@@ -115,6 +114,7 @@ class TradeController extends StateNotifier<TradeControllerState> {
     if (marketFilter == null || marketFilter.isEmpty) {
       return state.trades;
     }
+    
     final upper = marketFilter.toUpperCase();
     return state.trades.where((t) => t.market.contains(upper)).toList();
   }
@@ -122,9 +122,11 @@ class TradeController extends StateNotifier<TradeControllerState> {
   /// ✅ 거래 목록 정렬
   void sortTrades(String field, bool ascending) {
     final list = [...state.trades];
+    
     list.sort((a, b) {
       dynamic aValue;
       dynamic bValue;
+      
       switch (field) {
         case 'market':
           aValue = a.market;
@@ -150,11 +152,13 @@ class TradeController extends StateNotifier<TradeControllerState> {
           aValue = a.timestampMs;
           bValue = b.timestampMs;
       }
+      
       final cmp = aValue is Comparable && bValue is Comparable
           ? aValue.compareTo(bValue)
           : 0;
       return ascending ? cmp : -cmp;
     });
+    
     state = state.copyWith(trades: list);
   }
 
@@ -182,24 +186,23 @@ class TradeController extends StateNotifier<TradeControllerState> {
       subscription.close();
     }
     _subscriptions.clear();
-    
     super.dispose();
   }
 }
 
 /// ✅ 상태 클래스 (신버전 Enum 기반)
 class TradeControllerState {
-  final List<Trade> trades;              // 표시용 거래 데이터
-  final bool isLoading;                 // 로딩 상태
-  final TradeFilter currentFilter;      // 현재 필터 (신버전)
-  final TradeMode currentMode;          // 현재 모드 (신버전)
-  final int selectedIndex;              // 슬라이더 인덱스
-  final String? errorMessage;           // 에러 메시지
+  final List<Trade> trades; // 표시용 거래 데이터
+  final bool isLoading; // 로딩 상태
+  final TradeFilter currentFilter; // 현재 필터 (신버전)
+  final TradeMode currentMode; // 현재 모드 (신버전)
+  final int selectedIndex; // 슬라이더 인덱스
+  final String? errorMessage; // 에러 메시지
 
   const TradeControllerState({
     this.trades = const [],
     this.isLoading = false,
-    this.currentFilter = TradeFilter.min20M,  // 신버전 기본값
+    this.currentFilter = TradeFilter.min20M, // 신버전 기본값
     this.currentMode = TradeMode.accumulated, // 신버전 기본값
     this.selectedIndex = 0,
     this.errorMessage,
@@ -231,7 +234,7 @@ class TradeControllerState {
 /// ✅ Provider 선언 (신버전 기반)
 final tradeControllerProvider = StateNotifierProvider<TradeController, TradeControllerState>(
   (ref) {
-    final usecase = ref.read(usecaseProvider);  // ✅ 신버전 Provider 사용
+    final usecase = ref.read(usecaseProvider); // ✅ 신버전 Provider 사용
     return TradeController(usecase, ref);
   },
 );

@@ -1,43 +1,449 @@
 import 'dart:async';
 import 'dart:collection';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../config/app_config.dart';
 import '../utils/logger.dart';
-import 'trade_provider.dart' show repoProvider, rawTradeProcessingProvider;
-import '../../data/repositories/volume_repository_impl.dart';
-import '../../domain/repositories/volume_repository.dart';
-import '../../domain/usecases/volume_usecase.dart';
+import '../common/time_frame_manager.dart'; // 🔥 공통 TimeFrame 시스템 사용
+import '../common/time_frame_types.dart';   // 🔥 공통 타입 사용
+import 'trade_provider.dart' show masterTradeStreamProvider, repoProvider;
 import '../../domain/entities/volume.dart';
 import '../../domain/entities/trade.dart';
+import '../../domain/usecases/volume_usecase.dart';
+import '../../domain/repositories/volume_repository.dart';
+import '../../data/repositories/volume_repository_impl.dart';
 
 // ══════════════════════════════════════════════════════════════════════════════
-// 📋 데이터 클래스 및 설정 (Enum 제거)
+// 💎 Volume Event Types (기존 유지)
 // ══════════════════════════════════════════════════════════════════════════════
 
-/// 볼륨 이벤트 클래스 (String 기반으로 단순화)
+/// 볼륨 이벤트 (완전히 개선된 설계)
+@immutable
 class VolumeEvent {
   final List<Volume> volumes;
-  final String? resetTimeFrame;
+  final TimeFrame timeFrame;
+  final bool isReset;
+  final DateTime? resetTime;
+  final DateTime eventTime;
 
-  const VolumeEvent(this.volumes, {this.resetTimeFrame});
+  const VolumeEvent({
+    required this.volumes,
+    required this.timeFrame,
+    this.isReset = false,
+    this.resetTime,
+    required this.eventTime,
+  });
+
+  /// 일반 데이터 이벤트 생성
+  factory VolumeEvent.data({
+    required List<Volume> volumes,
+    required TimeFrame timeFrame,
+  }) {
+    return VolumeEvent(
+      volumes: volumes,
+      timeFrame: timeFrame,
+      isReset: false,
+      eventTime: DateTime.now(),
+    );
+  }
+
+  /// 리셋 이벤트 생성
+  factory VolumeEvent.reset({
+    required TimeFrame timeFrame,
+    DateTime? resetTime,
+  }) {
+    final now = resetTime ?? DateTime.now();
+    return VolumeEvent(
+      volumes: const [],
+      timeFrame: timeFrame,
+      isReset: true,
+      resetTime: now,
+      eventTime: now,
+    );
+  }
 }
 
-/// 볼륨 설정 (Enum 없이 단순화)
-class VolumeConfig {
-  static const int maxVolumesPerTimeFrame = 200;
-  static const int maxCacheSize = 250;
-  static const Duration minBatchInterval = Duration(milliseconds: 50);
-  static const Duration maxBatchInterval = Duration(milliseconds: 200);
-  static const Duration defaultBatchInterval = Duration(milliseconds: 100);
-  
-  /// AppConfig 기반 시간대 목록 (String)
-  static List<String> get supportedTimeFrames => 
-    AppConfig.timeFrames.map((tf) => '${tf}m').toList();
+/// 볼륨 데이터 (불변)
+@immutable
+class VolumeData {
+  final double totalVolume;
+  final DateTime lastUpdated;
+
+  const VolumeData({
+    required this.totalVolume,
+    required this.lastUpdated,
+  });
+
+  factory VolumeData.initial() {
+    return VolumeData(
+      totalVolume: 0.0,
+      lastUpdated: DateTime.now(),
+    );
+  }
+
+  VolumeData addVolume(double volume) {
+    return VolumeData(
+      totalVolume: totalVolume + volume,
+      lastUpdated: DateTime.now(),
+    );
+  }
+
+  VolumeData reset() {
+    return VolumeData(
+      totalVolume: 0.0,
+      lastUpdated: DateTime.now(),
+    );
+  }
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// 🏗️ Infrastructure Layer
+// 🧠 Core Logic: VolumeTransformer (공통 TimeFrame 리셋 연동)
+// ══════════════════════════════════════════════════════════════════════════════
+
+/// 완전히 순수한 함수형 변환기 + 글로벌 TimeFrame 연동
+class VolumeTransformer extends StreamTransformerBase<Trade, VolumeEvent> {
+  final TimeFrame timeFrame;
+  final ProcessingConfig config; // 🔥 공통 ProcessingConfig 사용
+  
+  // 최적화된 메모리 관리
+  LinkedHashSet<String> _seenIds = LinkedHashSet<String>();
+  final Map<String, VolumeData> _volumeData = <String, VolumeData>{};
+  
+  // 배치 처리를 위한 버퍼와 타이머
+  final List<Trade> _batchBuffer = [];
+  Timer? _batchTimer;
+  
+  // 🔥 워밍업 모드 - 초기 CPU 스파이크 완화
+  bool _warmupMode = true;
+  final DateTime _warmupStartTime = DateTime.now();
+
+  VolumeTransformer(
+    this.timeFrame, {
+    required this.config, // 🔥 공통 설정 주입
+  });
+
+  @override
+  Stream<VolumeEvent> bind(Stream<Trade> stream) {
+    late StreamController<VolumeEvent> controller;
+    StreamSubscription<Trade>? subscription;
+    StreamSubscription<TimeFrameResetEvent>? resetSubscription;
+    
+    // 🔥 배치 플러시 - 최적화된 처리
+    void flushBatch() {
+      if (_batchBuffer.isEmpty || controller.isClosed) return;
+      
+      // 버퍼에 쌓인 모든 거래를 한 번에 처리
+      for (final trade in _batchBuffer) {
+        _processTrade(trade);
+      }
+      _batchBuffer.clear();
+
+      // 모든 처리 후, 최종 결과물 이벤트를 한 번만 발생
+      final volumes = _calculateVolumes();
+      if (!controller.isClosed) {
+        controller.add(VolumeEvent.data(
+          volumes: volumes,
+          timeFrame: timeFrame,
+        ));
+      }
+    }
+
+    // 🔥 적응형 배치 타이머 리셋 + 워밍업 모드
+    void resetBatchTimer() {
+      _batchTimer?.cancel();
+      
+      // 워밍업 모드: 300ms로 천천히, 정상 모드: 적응형 간격
+      final interval = _warmupMode
+        ? config.warmupBatchInterval  // 🔥 공통 설정 사용
+        : config.calculateBatchInterval(_batchBuffer.length);
+      
+      _batchTimer = Timer(interval, () {
+        // 3초 후 워밍업 모드 해제
+        if (_warmupMode && DateTime.now().difference(_warmupStartTime).inSeconds >= 3) {
+          _warmupMode = false;
+          if (AppConfig.enableTradeLog) {
+            // log.d('Volume warmup completed for ${timeFrame.displayName}');
+          }
+        }
+        
+        flushBatch();
+        resetBatchTimer();
+      });
+    }
+    
+    controller = StreamController<VolumeEvent>(
+      onListen: () {
+        // 🔥 글로벌 TimeFrame 리셋 이벤트 구독
+        resetSubscription = GlobalTimeFrameManager()
+            .getResetStream(timeFrame)
+            .listen((resetEvent) {
+          _resetData();
+          if (!controller.isClosed) {
+            controller.add(VolumeEvent.reset(
+              timeFrame: timeFrame,
+              resetTime: resetEvent.resetTime,
+            ));
+          }
+        });
+        
+        // 배치 타이머 시작
+        resetBatchTimer();
+
+        // 거래 데이터 구독
+        subscription = stream.listen(
+          (trade) {
+            // 즉시 처리하지 않고 버퍼에 추가만
+            _batchBuffer.add(trade);
+          },
+          onError: controller.addError,
+          onDone: () {
+            // 🔥 타이머 누수 방지
+            resetSubscription?.cancel();
+            _batchTimer?.cancel();
+            flushBatch(); // 마지막 배치 처리
+            controller.close();
+          },
+        );
+      },
+      onCancel: () {
+        // 모든 타이머와 구독 취소
+        resetSubscription?.cancel();
+        _batchTimer?.cancel();
+        subscription?.cancel();
+      },
+    );
+    
+    return controller.stream;
+  }
+
+  bool _processTrade(Trade trade) {
+    // 🔥 최적화된 중복 필터링 (LinkedHashSet + skip)
+    final key = '${trade.market}/${trade.sequentialId}';
+    if (_seenIds.contains(key)) return false;
+    
+    if (_seenIds.length >= config.maxCacheSize) {
+      // 🔥 GC 최적화: skip() 사용으로 임시 리스트 생성 제거
+      final removeCount = _seenIds.length ~/ 4;
+      _seenIds = LinkedHashSet<String>.from(_seenIds.skip(removeCount));
+    }
+    _seenIds.add(key);
+
+    // 볼륨 데이터 업데이트
+    final existing = _volumeData[trade.market];
+    if (existing != null) {
+      _volumeData[trade.market] = existing.addVolume(trade.total);
+    } else {
+      _volumeData[trade.market] = VolumeData.initial().addVolume(trade.total);
+    }
+
+    // 메모리 관리
+    if (_volumeData.length > config.maxMarketsPerTimeFrame) {
+      final sorted = _volumeData.entries.toList()
+        ..sort((a, b) => b.value.totalVolume.compareTo(a.value.totalVolume));
+      
+      _volumeData.clear();
+      _volumeData.addAll(Map.fromEntries(sorted.take(config.maxMarketsPerTimeFrame)));
+    }
+
+    return true;
+  }
+
+  void _resetData() {
+    for (final entry in _volumeData.entries) {
+      _volumeData[entry.key] = entry.value.reset();
+    }
+  }
+
+  List<Volume> _calculateVolumes() {
+    final now = DateTime.now();
+    final manager = GlobalTimeFrameManager();
+    final lastResetTime = manager.getLastResetTime(timeFrame) ?? now;
+    
+    final volumes = _volumeData.entries
+        .map((e) => Volume(
+              market: e.key,
+              totalVolume: e.value.totalVolume,
+              lastUpdatedMs: now.millisecondsSinceEpoch,
+              timeFrame: timeFrame.key,
+              timeFrameStartMs: lastResetTime.millisecondsSinceEpoch,
+            ))
+        .where((volume) => volume.totalVolume > 0)
+        .toList();
+
+    // 볼륨 내림차순 정렬
+    volumes.sort((a, b) => b.totalVolume.compareTo(a.totalVolume));
+    
+    return volumes;
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 🎯 Providers (공통 TimeFrame 시스템 연동)
+// ══════════════════════════════════════════════════════════════════════════════
+
+/// 🔥 개별 Provider 제거 - 공통 volumeSelectedTimeFrameProvider 사용
+// final selectedTimeFrameProvider = ... (제거)
+
+/// 🔥 개별 리셋 시간 관리 제거 - 공통 GlobalTimeFrameManager 사용  
+// final timeFrameResetTimesProvider = ... (제거)
+
+/// 🔥 개별 ProcessingConfig 제거 - 공통 commonProcessingConfigProvider 사용
+// final volumeProcessingConfigProvider = ... (제거)
+
+/// 시간대별 StreamController 관리 (멀티스트림)
+final volumeTimeFrameControllersProvider = Provider<Map<TimeFrame, StreamController<VolumeEvent>>>((ref) {
+  final controllers = <TimeFrame, StreamController<VolumeEvent>>{};
+  final availableTimeFrames = TimeFrame.fromAppConfig();
+  
+  for (final timeFrame in availableTimeFrames) {
+    controllers[timeFrame] = StreamController<VolumeEvent>.broadcast();
+  }
+
+  ref.onDispose(() {
+    for (final controller in controllers.values) {
+      if (!controller.isClosed) {
+        controller.close();
+      }
+    }
+    controllers.clear();
+    
+    if (AppConfig.enableTradeLog) {
+      log.i('🛑 Volume TimeFrame controllers disposed');
+    }
+  });
+
+  return controllers;
+});
+
+/// 🔥 Master Stream 기반 팬-아웃 (공통 TimeFrame 연동)
+final volumeStreamBinderProvider = Provider((ref) async {
+  // ✅ Master Trade Stream 사용 (Trade와 동일한 WS 연결 공유)
+  final masterStream = await ref.read(masterTradeStreamProvider.future);
+  final controllers = ref.read(volumeTimeFrameControllersProvider);
+  final availableTimeFrames = TimeFrame.fromAppConfig();
+  final config = ref.read(commonProcessingConfigProvider); // 🔥 공통 설정 사용
+  
+  // 🔥 각 시간대별로 마스터 스트림을 팬-아웃
+  for (final timeFrame in availableTimeFrames) {
+    final controller = controllers[timeFrame];
+    if (controller != null) {
+      // 🔥 마스터 스트림 → 시간대별 독립 변환 → 각 컨트롤러로 전송
+      masterStream
+          .transform(VolumeTransformer(
+            timeFrame,
+            config: config, // 🔥 공통 설정 주입
+          ))
+          .listen(
+            controller.add,
+            onError: controller.addError,
+          );
+    }
+  }
+
+  if (AppConfig.enableTradeLog) {
+    log.i('🔥 Volume Fan-out stream binding completed: ${availableTimeFrames.length} timeframes');
+  }
+  
+  return controllers;
+});
+
+/// 메인 볼륨 데이터 스트림 (공통 Provider 사용)
+final volumeDataProvider = StreamProvider<VolumeEvent>((ref) async* {
+  ref.keepAlive();
+  
+  final selectedTimeFrame = ref.watch(volumeSelectedTimeFrameProvider); // 🔥 공통 Provider 사용
+  final controllers = ref.read(volumeTimeFrameControllersProvider);
+  
+  // 스트림 바인더 활성화
+  await ref.read(volumeStreamBinderProvider);
+  
+  final controller = controllers[selectedTimeFrame];
+  if (controller == null) {
+    log.e('💥 Volume Controller not found for $selectedTimeFrame');
+    return;
+  }
+
+  if (AppConfig.enableTradeLog) {
+    log.i('🔥 Volume stream started: $selectedTimeFrame');
+  }
+
+  yield* controller.stream;
+});
+
+/// 현재 시간대의 Volume 리스트 (UI용)
+final currentVolumeListProvider = Provider<List<Volume>>((ref) {
+  final volumeEvent = ref.watch(volumeDataProvider).valueOrNull;
+  return volumeEvent?.volumes ?? [];
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 🎛️ Volume TimeFrame Controller (공통 시스템 연동)
+// ══════════════════════════════════════════════════════════════════════════════
+
+final volumeTimeFrameControllerProvider = Provider((ref) => VolumeTimeFrameController(ref));
+
+class VolumeTimeFrameController {
+  final Ref _ref;
+  
+  VolumeTimeFrameController(this._ref);
+
+  /// 시간대 변경 (공통 Provider 사용)
+  void setTimeFrame(TimeFrame timeFrame) {
+    _ref.read(volumeSelectedTimeFrameProvider.notifier).state = timeFrame;
+    
+    if (AppConfig.enableTradeLog) {
+      log.i('🔄 Volume TimeFrame changed: ${timeFrame.displayName}');
+    }
+  }
+
+  /// 현재 시간대 수동 리셋 (공통 GlobalTimeFrameManager 사용)
+  void resetCurrentTimeFrame() {
+    final currentTimeFrame = _ref.read(volumeSelectedTimeFrameProvider);
+    final globalController = _ref.read(globalTimeFrameControllerProvider);
+    
+    globalController.resetTimeFrame(currentTimeFrame);
+    
+    if (AppConfig.enableTradeLog) {
+      log.i('🔄 Volume Manual reset: ${currentTimeFrame.displayName}');
+    }
+  }
+
+  /// 모든 시간대 리셋 (공통 GlobalTimeFrameManager 사용)
+  void resetAllTimeFrames() {
+    final globalController = _ref.read(globalTimeFrameControllerProvider);
+    globalController.resetAllTimeFrames();
+    
+    if (AppConfig.enableTradeLog) {
+      log.i('🔄 Volume Manual reset: all timeframes');
+    }
+  }
+
+  /// 🔥 공통 시스템으로 다음 리셋 시간 계산
+  DateTime? getNextResetTime() {
+    final currentTimeFrame = _ref.read(volumeSelectedTimeFrameProvider);
+    final globalController = _ref.read(globalTimeFrameControllerProvider);
+    
+    return globalController.getNextResetTime(currentTimeFrame);
+  }
+
+  /// Getters (공통 Provider 사용)
+  TimeFrame get currentTimeFrame => _ref.read(volumeSelectedTimeFrameProvider);
+  
+  int get currentIndex {
+    final availableTimeFrames = TimeFrame.fromAppConfig();
+    return availableTimeFrames.indexOf(currentTimeFrame);
+  }
+  
+  List<TimeFrame> get availableTimeFrames => TimeFrame.fromAppConfig();
+  
+  String get currentTimeFrameName => currentTimeFrame.displayName;
+  
+  String getTimeFrameName(TimeFrame timeFrame) => timeFrame.displayName;
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 🏗️ UseCase Layer (기존 유지)
 // ══════════════════════════════════════════════════════════════════════════════
 
 final volumeRepositoryProvider = Provider<VolumeRepository>((ref) {
@@ -47,479 +453,3 @@ final volumeRepositoryProvider = Provider<VolumeRepository>((ref) {
 final volumeUsecaseProvider = Provider<VolumeUsecase>((ref) {
   return VolumeUsecase(ref.read(repoProvider));
 });
-
-// ══════════════════════════════════════════════════════════════════════════════
-// ⚙️ Settings Layer (단순 String 기반)
-// ══════════════════════════════════════════════════════════════════════════════
-
-/// 시간대 인덱스
-final volumeTimeFrameIndexProvider = StateProvider<int>((_) => 0);
-
-/// 현재 시간대 (String 반환)
-final volumeTimeFrameProvider = StateProvider<String>((ref) {
-  final index = ref.watch(volumeTimeFrameIndexProvider);
-  final timeFrames = VolumeConfig.supportedTimeFrames;
-  if (index >= 0 && index < timeFrames.length) {
-    return timeFrames[index];
-  }
-  return '1m';
-});
-
-// ══════════════════════════════════════════════════════════════════════════════
-// 🎯 State Management Layer (최적화 유지 + String 기반)
-// ══════════════════════════════════════════════════════════════════════════════
-
-/// 볼륨 데이터 캐시 (String Key + 메모리 최적화 유지)
-final volumeDataCacheProvider = StateNotifierProvider<VolumeDataNotifier, Map<String, Map<String, double>>>((ref) {
-  return VolumeDataNotifier(ref.read(volumeTimeFrameProvider));
-});
-
-class VolumeDataNotifier extends StateNotifier<Map<String, Map<String, double>>> {
-  final String _currentTimeFrame;
-  final Map<String, bool> _isActive = {}; // 메모리 최적화: 활성 상태 추적
-
-  VolumeDataNotifier(this._currentTimeFrame) : super({}) {
-    final initialState = <String, Map<String, double>>{};
-    for (final timeFrame in VolumeConfig.supportedTimeFrames) {
-      initialState[timeFrame] = <String, double>{};
-      _isActive[timeFrame] = timeFrame == _currentTimeFrame;
-    }
-    state = initialState;
-  }
-
-  /// 메모리 최적화: 시간대 활성화/비활성화
-  void setActiveTimeFrame(String timeFrame) {
-    _isActive.updateAll((key, value) => false);
-    _isActive[timeFrame] = true;
-    
-    // 비활성 시간대 데이터 압축 (상위 50개만 유지)
-    final newState = Map<String, Map<String, double>>.from(state);
-    _isActive.forEach((tf, isActive) {
-      if (!isActive && newState[tf] != null) {
-        final volumeMap = newState[tf]!;
-        if (volumeMap.length > 50) {
-          final sorted = volumeMap.entries.toList()
-            ..sort((a, b) => b.value.compareTo(a.value));
-          newState[tf] = Map.fromEntries(sorted.take(50));
-        }
-      }
-    });
-    state = newState;
-  }
-
-  void updateBatch(Map<String, Map<String, double>> batchData) {
-    final newState = Map<String, Map<String, double>>.from(state);
-    
-    batchData.forEach((timeFrame, volumeMap) {
-      final isActive = _isActive[timeFrame] ?? false;
-      final maxItems = isActive ? VolumeConfig.maxVolumesPerTimeFrame : 50;
-      
-      if (volumeMap.length > maxItems) {
-        final sorted = volumeMap.entries.toList()
-          ..sort((a, b) => b.value.compareTo(a.value));
-        volumeMap.clear();
-        volumeMap.addAll(Map.fromEntries(sorted.take(maxItems)));
-      }
-      newState[timeFrame] = Map<String, double>.from(volumeMap);
-    });
-    
-    state = newState;
-  }
-
-  void resetTimeFrame(String timeFrame) {
-    final newState = Map<String, Map<String, double>>.from(state);
-    newState[timeFrame] = <String, double>{};
-    state = newState;
-    log.i('🔄 Volume reset: $timeFrame');
-  }
-
-  void resetAll() {
-    final newState = <String, Map<String, double>>{};
-    for (final timeFrame in VolumeConfig.supportedTimeFrames) {
-      newState[timeFrame] = <String, double>{};
-    }
-    state = newState;
-  }
-}
-
-/// 중복 ID 관리 (LinkedHashSet LRU 유지)
-final volumeSeenIdsProvider = StateNotifierProvider<VolumeSeenIdsNotifier, Set<String>>((ref) {
-  return VolumeSeenIdsNotifier();
-});
-
-class VolumeSeenIdsNotifier extends StateNotifier<Set<String>> {
-  final LinkedHashSet<String> _orderedIds = LinkedHashSet<String>();
-
-  VolumeSeenIdsNotifier() : super(<String>{});
-
-  bool addId(String id) {
-    if (_orderedIds.contains(id)) return false;
-
-    _orderedIds.add(id);
-
-    // LinkedHashSet LRU 패턴: 25% 배치 제거
-    if (_orderedIds.length > VolumeConfig.maxCacheSize) {
-      final removeCount = (_orderedIds.length / 4).ceil();
-      final oldestIds = _orderedIds.take(removeCount).toList();
-      
-      for (final oldId in oldestIds) {
-        _orderedIds.remove(oldId);
-      }
-    }
-
-    state = Set<String>.from(_orderedIds);
-    return true;
-  }
-
-  void clear() {
-    _orderedIds.clear();
-    state = <String>{};
-  }
-}
-
-// ══════════════════════════════════════════════════════════════════════════════
-// 🔄 Processing Layer (개선된 절대 시간 기반 타이머)
-// ══════════════════════════════════════════════════════════════════════════════
-
-/// 주기적 리셋 타이머
-final volumeProcessingTimerProvider = StreamProvider((ref) {
-  return Stream.periodic(AppConfig.globalResetInterval, (i) => i);
-});
-
-/// 🎯 개선된 시간대별 리셋 타이머 (절대 시간 기준)
-final volumeResetTimersProvider = Provider<Map<String, Timer>>((ref) {
-  final timers = <String, Timer>{};
-  final dataCacheNotifier = ref.read(volumeDataCacheProvider.notifier);
-
-  /// 절대 시간 기준으로 다음 리셋을 예약하는 핵심 함수
-  void scheduleNextAbsoluteReset(String timeFrame) {
-    // 1. 현재 시간과 설정된 시간(분) 가져오기
-    final now = DateTime.now();
-    final minutes = int.tryParse(timeFrame.replaceAll('m', '')) ?? 1;
-
-    // 2. 현재 시간을 기준으로 '현재 봉'의 시작 시간을 계산
-    // 예: now=12:32, minutes=5 -> (32 ~/ 5) * 5 = 30 -> 현재 봉은 12:30:00에 시작됨
-    final currentChunkStartMinute = (now.minute ~/ minutes) * minutes;
-    final startOfCurrentChunk = DateTime(
-      now.year,
-      now.month,
-      now.day,
-      now.hour,
-      currentChunkStartMinute,
-      0, // 초는 0으로 설정
-      0, // 밀리초도 0으로 설정
-    );
-
-    // 3. '다음 봉'의 시작 시간을 계산 (가장 중요)
-    // 현재 봉 시작 시간에 해당 시간(minutes)을 더하면 다음 봉의 시작 시간이 됨
-    final nextResetTime = startOfCurrentChunk.add(Duration(minutes: minutes));
-
-    // 4. 다음 리셋까지 남은 시간을 계산
-    final delay = nextResetTime.difference(now);
-
-    // 5. 혹시 계산 오차로 음수가 나오면 다음 사이클로
-    if (delay.inMilliseconds <= 0) {
-      final nextNextResetTime = nextResetTime.add(Duration(minutes: minutes));
-      final newDelay = nextNextResetTime.difference(now);
-      
-      timers[timeFrame] = Timer(newDelay, () {
-        log.i('⏰ Absolute Time Reset: $timeFrame at ${nextNextResetTime.toLocal()}');
-        dataCacheNotifier.resetTimeFrame(timeFrame);
-        scheduleNextAbsoluteReset(timeFrame);
-      });
-      return;
-    }
-
-    // 6. 계산된 'delay' 후에 리셋 및 다음 스케줄링을 예약
-    timers[timeFrame] = Timer(delay, () {
-      log.i('⏰ Absolute Time Reset: $timeFrame at ${nextResetTime.toLocal()}');
-      
-      // 데이터 캐시에서 해당 시간대 리셋
-      dataCacheNotifier.resetTimeFrame(timeFrame);
-      
-      // ✅ 중요: 자기 자신을 다시 호출하여 다음 알람을 무한 예약 (연속 스케줄링 유지)
-      scheduleNextAbsoluteReset(timeFrame);
-    });
-
-    log.i('📅 Next reset scheduled: $timeFrame at ${nextResetTime.toLocal()} (in ${delay.inSeconds}s)');
-  }
-
-  // 지원하는 모든 시간대에 대해 타이머 스케줄링 시작
-  for (final timeFrame in VolumeConfig.supportedTimeFrames) {
-    scheduleNextAbsoluteReset(timeFrame);
-  }
-
-  // Provider가 소멸될 때 모든 타이머를 안전하게 취소
-  ref.onDispose(() {
-    for (final timer in timers.values) {
-      timer.cancel();
-    }
-    timers.clear();
-    log.i('🧹 All volume timers disposed');
-  });
-
-  return timers;
-});
-
-/// 원시 볼륨 처리 스트림 (Trade 구독으로 변경)
-final rawVolumeProcessingProvider = StreamProvider<Trade>((ref) async* {
-  // ❌ 기존: 독립 WebSocket 연결
-  // final markets = await ref.watch(marketsProvider.future);
-  // final repo = ref.read(repoProvider);
-  
-  final seenIdsNotifier = ref.read(volumeSeenIdsProvider.notifier);
-  final dataCacheNotifier = ref.read(volumeDataCacheProvider.notifier);
-
-  final Map<String, Map<String, double>> batchBuffer = {};
-  Timer? batchTimer;
-  int batchCount = 0;
-  
-  for (final timeFrame in VolumeConfig.supportedTimeFrames) {
-    batchBuffer[timeFrame] = <String, double>{};
-  }
-
-  // 적응형 배치: 동적 간격 계산
-  Duration calculateBatchInterval() {
-    if (batchCount > 50) {
-      return VolumeConfig.minBatchInterval;
-    } else if (batchCount < 10) {
-      return VolumeConfig.maxBatchInterval;
-    }
-    return VolumeConfig.defaultBatchInterval;
-  }
-
-  void flushBatch() {
-    if (batchBuffer.values.any((map) => map.isNotEmpty)) {
-      final currentState = ref.read(volumeDataCacheProvider);
-      final mergedData = <String, Map<String, double>>{};
-      
-      currentState.forEach((timeFrame, currentVolumeMap) {
-        final bufferedVolumeMap = batchBuffer[timeFrame] ?? {};
-        final merged = Map<String, double>.from(currentVolumeMap);
-        
-        bufferedVolumeMap.forEach((market, volume) {
-          merged[market] = (merged[market] ?? 0.0) + volume;
-        });
-        
-        mergedData[timeFrame] = merged;
-      });
-      
-      dataCacheNotifier.updateBatch(mergedData);
-      batchBuffer.forEach((timeFrame, map) => map.clear());
-      batchCount = 0;
-    }
-  }
-
-  void resetBatchTimer() {
-    batchTimer?.cancel();
-    batchTimer = Timer(calculateBatchInterval(), () {
-      flushBatch();
-      resetBatchTimer();
-    });
-  }
-
-  resetBatchTimer();
-
-  // ✅ 개선된 타이머 활성화
-  ref.read(volumeResetTimersProvider);
-
-  ref.listen(volumeProcessingTimerProvider, (previous, next) {
-    next.whenData((value) {
-      flushBatch();
-    });
-  });
-
-  ref.onDispose(() {
-    batchTimer?.cancel();
-    flushBatch();
-  });
-
-  // ✅ 핵심 변경: Trade 구독으로 교체
-  yield* ref.watch(rawTradeProcessingProvider.stream).where((trade) {
-    final key = '${trade.market}/${trade.sequentialId}';
-    if (!seenIdsNotifier.addId(key)) return false;
-
-    batchCount++;
-
-    for (final timeFrame in VolumeConfig.supportedTimeFrames) {
-      final bufferMap = batchBuffer[timeFrame];
-      if (bufferMap != null) {
-        bufferMap[trade.market] = (bufferMap[trade.market] ?? 0.0) + trade.total;
-      }
-    }
-
-    return true;
-  });
-});
-
-// ══════════════════════════════════════════════════════════════════════════════
-// 🎯 시간대별 스트림 컨트롤러 관리 (String 기반 + 멀티스트림 유지)
-// ══════════════════════════════════════════════════════════════════════════════
-
-/// 시간대별 스트림 컨트롤러들 (String Key)
-final volumeStreamControllersProvider = Provider<Map<String, StreamController<VolumeEvent>>>((ref) {
-  final controllers = <String, StreamController<VolumeEvent>>{};
-  
-  for (final timeFrame in VolumeConfig.supportedTimeFrames) {
-    controllers[timeFrame] = StreamController<VolumeEvent>.broadcast();
-  }
-
-  ref.onDispose(() {
-    for (final entry in controllers.entries) {
-      if (!entry.value.isClosed) {
-        entry.value.close();
-      }
-    }
-    controllers.clear();
-  });
-
-  return controllers;
-});
-
-/// 시간대별 볼륨 업데이트 로직 (String 기반)
-final volumeTimeFrameUpdaterProvider = Provider((ref) {
-  final controllers = ref.read(volumeStreamControllersProvider);
-  final usecase = ref.read(volumeUsecaseProvider);
-  
-  void updateTimeFrame(String timeFrame) {
-    final controller = controllers[timeFrame];
-    if (controller == null || controller.isClosed) return;
-    
-    final dataCache = ref.read(volumeDataCacheProvider);
-    final volumeMap = dataCache[timeFrame] ?? <String, double>{};
-    
-    // ✅ 절대 시간 기준이므로 startTime 불필요 - 현재 시간 사용
-    final now = DateTime.now();
-    final volumes = usecase.calculateVolumeList(volumeMap, timeFrame, now);
-    
-    controller.add(VolumeEvent(volumes));
-  }
-
-  ref.listen(volumeDataCacheProvider, (previous, next) {
-    for (final timeFrame in controllers.keys) {
-      updateTimeFrame(timeFrame);
-    }
-  });
-
-  return updateTimeFrame;
-});
-
-// ══════════════════════════════════════════════════════════════════════════════
-// 🔵 Public API Layer (String 기반 + 즉시 캐시 로드로 끊김 방지)
-// ══════════════════════════════════════════════════════════════════════════════
-
-/// 멀티 스트림 + 즉시 캐시 데이터 제공 (끊김 방지)
-final volumeDataProvider = StreamProvider<VolumeEvent>((ref) async* {
-  ref.keepAlive();
-  
-  final timeFrame = ref.watch(volumeTimeFrameProvider);
-  final controllers = ref.read(volumeStreamControllersProvider);
-  final controller = controllers[timeFrame];
-  
-  if (controller == null) {
-    log.e('💥 StreamController not found for $timeFrame');
-    return;
-  }
-
-  // 메모리 최적화: 현재 시간대 활성화
-  ref.read(volumeDataCacheProvider.notifier).setActiveTimeFrame(timeFrame);
-
-  // 🚀 즉시 캐시 데이터 방출 (끊김 방지)
-  final dataCache = ref.read(volumeDataCacheProvider);
-  final cachedVolumeMap = dataCache[timeFrame] ?? {};
-  
-  if (cachedVolumeMap.isNotEmpty) {
-    final usecase = ref.read(volumeUsecaseProvider);
-    // ✅ 절대 시간 기준이므로 현재 시간 사용
-    final now = DateTime.now();
-    
-    final volumes = usecase.calculateVolumeList(cachedVolumeMap, timeFrame, now);
-    yield VolumeEvent(volumes); // 즉시 데이터 제공
-  }
-
-  // 업데이터 활성화
-  ref.read(volumeTimeFrameUpdaterProvider);
-
-  // 원시 볼륨 처리 스트림 활성화
-  ref.listen(rawVolumeProcessingProvider, (previous, next) {
-    next.when(
-      data: (trade) => {},
-      loading: () => {},
-      error: (error, stack) => log.e('💥 Volume error: $error'),
-    );
-  });
-  
-  // 해당 시간대의 독립적인 스트림 반환 (멀티 스트림!)
-  yield* controller.stream;
-});
-
-// ══════════════════════════════════════════════════════════════════════════════
-// 🎛️ Controller Helper (단순 String 기반 + 개선된 리셋 시간 계산)
-// ══════════════════════════════════════════════════════════════════════════════
-
-final volumeTimeFrameController = Provider((ref) => VolumeTimeFrameController(ref));
-
-class VolumeTimeFrameController {
-  final Ref ref;
-  VolumeTimeFrameController(this.ref);
-
-  /// 시간대 설정 (String 기반) - 옛날 메서드명 유지
-  void updateTimeFrame(String timeFrame, int index) {
-    final timeFrames = VolumeConfig.supportedTimeFrames;
-    if (index < 0 || index >= timeFrames.length) return;
-    
-    ref.read(volumeTimeFrameProvider.notifier).state = timeFrame;
-    ref.read(volumeTimeFrameIndexProvider.notifier).state = index;
-  }
-
-  void resetCurrentTimeFrame() {
-    final timeFrame = ref.read(volumeTimeFrameProvider);
-    final dataCacheNotifier = ref.read(volumeDataCacheProvider.notifier);
-    
-    dataCacheNotifier.resetTimeFrame(timeFrame);
-  }
-
-  void resetAllTimeFrames() {
-    final dataCacheNotifier = ref.read(volumeDataCacheProvider.notifier);
-    
-    dataCacheNotifier.resetAll();
-  }
-
-  /// ✅ 개선된 다음 리셋 시간 계산 (절대 시간 기준)
-  DateTime? getNextResetTime() {
-    final timeFrame = ref.read(volumeTimeFrameProvider);
-    final now = DateTime.now();
-    final minutes = int.tryParse(timeFrame.replaceAll('m', '')) ?? 1;
-
-    // 절대 시간 기준으로 다음 리셋 시간 계산 (타이머와 동일한 로직)
-    final currentChunkStartMinute = (now.minute ~/ minutes) * minutes;
-    final startOfCurrentChunk = DateTime(
-      now.year,
-      now.month,
-      now.day,
-      now.hour,
-      currentChunkStartMinute,
-      0,
-      0,
-    );
-
-    final nextResetTime = startOfCurrentChunk.add(Duration(minutes: minutes));
-    
-    // 이미 지난 시간이면 다음 사이클
-    if (nextResetTime.isBefore(now)) {
-      return nextResetTime.add(Duration(minutes: minutes));
-    }
-    
-    return nextResetTime;
-  }
-
-  // 단순 Getter들
-  String get currentTimeFrame => ref.read(volumeTimeFrameProvider);
-  int get currentIndex => ref.read(volumeTimeFrameIndexProvider);
-  List<String> get availableTimeFrames => VolumeConfig.supportedTimeFrames;
-  
-  String getTimeFrameName(String timeFrame) {
-    final minutes = int.tryParse(timeFrame.replaceAll('m', ''));
-    return AppConfig.timeFrameNames[minutes] ?? timeFrame;
-  }
-}

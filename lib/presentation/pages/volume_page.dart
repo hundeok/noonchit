@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import '../../core/config/app_config.dart';
 import '../../core/di/app_providers.dart';
 import '../../shared/widgets/slider_widget.dart';
 import '../controllers/volume_controller.dart';
@@ -20,33 +19,41 @@ class VolumePage extends ConsumerWidget {
     final state = ref.watch(volumeControllerProvider);
     final controller = ref.read(volumeControllerProvider.notifier);
     
-    // ✅ TimeFrame 관련
-    final timeFrames = AppConfig.timeFrames.map((tf) => '${tf}m').toList();
-    final index = ref.watch(volumeTimeFrameIndexProvider);
-    final timeFrameCtrl = ref.read(volumeTimeFrameController);
+    // 🔥 TimeFrame 관련 - 공통 Provider 사용
+    final currentTimeFrame = ref.watch(volumeSelectedTimeFrameProvider);
+    final availableTimeFrames = TimeFrame.fromAppConfig();
+    final currentIndex = availableTimeFrames.indexOf(currentTimeFrame);
+    final globalController = ref.read(globalTimeFrameControllerProvider);
     
     // ✅ UI 설정
     final sliderPosition = ref.watch(appSettingsProvider).sliderPosition;
     
-    // ✅ 공통 슬라이더 위젯
+    // ✅ 공통 슬라이더 위젯 - 공통 TimeFrame 시스템 연동
     final sliderWidget = CommonSliderWidget(
-      leftText: '시간대: ${AppConfig.timeFrameNames[AppConfig.timeFrames[index]] ?? timeFrames[index]}',
-      sliderValue: index.toDouble(),
+      leftText: '시간대: ${currentTimeFrame.displayName}',
+      sliderValue: currentIndex.toDouble(),
       sliderMin: 0.0,
-      sliderMax: (timeFrames.length - 1).toDouble(),
-      sliderDivisions: timeFrames.length - 1,
-      sliderLabel: AppConfig.timeFrameNames[AppConfig.timeFrames[index]] ?? timeFrames[index],
+      sliderMax: (availableTimeFrames.length - 1).toDouble(),
+      sliderDivisions: availableTimeFrames.length - 1,
+      sliderLabel: currentTimeFrame.displayName,
       onSliderChanged: (value) {
-        final i = value.round();
-        controller.setTimeFrame(timeFrames[i], i); 
+        final newIndex = value.round();
+        if (newIndex >= 0 && newIndex < availableTimeFrames.length) {
+          // 🔥 공통 GlobalTimeFrameController 사용
+          globalController.setVolumeTimeFrame(availableTimeFrames[newIndex]);
+        }
       },
+      // 🔥 Volume 고유: 심플한 중앙 위젯 (Top 50/100 토글만)
       centerWidget: CommonToggleButton(
         text: controller.currentLimitName,
         isActive: state.isTop100,
         onTap: () => controller.toggleTopLimit(),
+        fontSize: 10,
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
       ),
       rightWidget: CommonCountdownWidget(
-        nextResetTime: timeFrameCtrl.getNextResetTime(),
+        // 🔥 공통 GlobalTimeFrameController로 완벽한 타이머 동기화
+        nextResetTime: globalController.getNextResetTime(currentTimeFrame),
       ),
     );
 
@@ -55,19 +62,18 @@ class VolumePage extends ConsumerWidget {
       child: Column(
         children: [
           if (sliderPosition == SliderPosition.top) sliderWidget,
-          Expanded(child: _buildVolumeList(state, controller, timeFrames, index, context)),
+          Expanded(child: _buildVolumeList(state, controller, currentTimeFrame, context)),
           if (sliderPosition == SliderPosition.bottom) sliderWidget,
         ],
       ),
     );
   }
 
-  /// ✅ 볼륨 리스트 (Controller state 기반)
+  /// ✅ 볼륨 리스트 (Controller state 기반) - 공통 TimeFrame enum 사용
   Widget _buildVolumeList(
     VolumeControllerState state,
     VolumeController controller,
-    List<String> timeFrames,
-    int index,
+    TimeFrame currentTimeFrame, // 🔥 TimeFrame enum 사용
     BuildContext context,
   ) {
     // ✅ 로딩 상태
@@ -84,7 +90,7 @@ class VolumePage extends ConsumerWidget {
     if (state.volumes.isEmpty) {
       return Center(
         child: Text(
-          '거래량 데이터가 없습니다.\n(시간대: ${AppConfig.timeFrameNames[AppConfig.timeFrames[index]] ?? timeFrames[index]})',
+          '거래량 데이터가 없습니다.\n(시간대: ${currentTimeFrame.displayName})', // 🔥 enum 직접 사용
           textAlign: TextAlign.center,
           style: TextStyle(color: Theme.of(context).hintColor, fontSize: 16),
         ),
@@ -103,7 +109,7 @@ class VolumePage extends ConsumerWidget {
           market: volume.market,
           totalVolume: volume.totalVolume,
           rank: rank,
-          // ✅ 안전한 상태 조회 (rank 파라미터 불필요)
+          // ✅ 안전한 상태 조회 (Controller 메서드 사용)
           isHot: controller.isHot(volume.market),
           shouldBlink: controller.shouldBlink(volume.market),
         );

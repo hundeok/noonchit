@@ -1,177 +1,136 @@
 import 'dart:async';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../config/app_config.dart';
 import '../utils/logger.dart';
-import 'volume_provider.dart' show 
-    volumeUsecaseProvider, 
-    volumeDataCacheProvider;
+import '../common/time_frame_manager.dart'; // 🔥 공통 TimeFrame 시스템 추가
+import '../common/time_frame_types.dart';   // 🔥 공통 타입 추가
+import 'volume_provider.dart';
 import '../../domain/entities/volume.dart';
-import '../../domain/usecases/volume_usecase.dart';
 import '../../shared/widgets/sector_classification.dart';
 
 // ══════════════════════════════════════════════════════════════════════════════
-// 📋 섹터 데이터 클래스
+// 📋 섹터 이벤트 클래스 (기존 유지)
 // ══════════════════════════════════════════════════════════════════════════════
 
-/// 섹터 볼륨 이벤트 클래스
+@immutable
 class SectorVolumeEvent {
   final List<Volume> volumes;
-  final String? resetTimeFrame;
+  final TimeFrame timeFrame;
+  final bool isReset;
+  final DateTime? resetTime;
+  final DateTime eventTime;
 
-  const SectorVolumeEvent(this.volumes, {this.resetTimeFrame});
+  const SectorVolumeEvent({
+    required this.volumes,
+    required this.timeFrame,
+    this.isReset = false,
+    this.resetTime,
+    required this.eventTime,
+  });
+
+  factory SectorVolumeEvent.data({
+    required List<Volume> volumes,
+    required TimeFrame timeFrame,
+  }) {
+    return SectorVolumeEvent(
+      volumes: volumes,
+      timeFrame: timeFrame,
+      eventTime: DateTime.now(),
+    );
+  }
+
+  factory SectorVolumeEvent.reset({
+    required TimeFrame timeFrame,
+    DateTime? resetTime,
+  }) {
+    final now = resetTime ?? DateTime.now();
+    return SectorVolumeEvent(
+      volumes: const [],
+      timeFrame: timeFrame,
+      isReset: true,
+      resetTime: now,
+      eventTime: now,
+    );
+  }
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
 // 🔧 기본 Provider들
 // ══════════════════════════════════════════════════════════════════════════════
 
-/// 섹터 분류 Provider
+/// 섹터 분류 Provider (기존 유지)
 final sectorClassificationProvider = ChangeNotifierProvider<SectorClassificationProvider>(
   (ref) => SectorClassificationProvider(),
 );
 
-/// SectorUsecase (Volume UseCase 공유)
-final sectorUsecaseProvider = Provider<VolumeUsecase>((ref) {
-  return ref.read(volumeUsecaseProvider);
-});
-
-/// 섹터 시간대 인덱스 (Volume과 완전 독립)
-final sectorTimeFrameIndexProvider = StateProvider<int>((_) => 0);
-
-/// 섹터 현재 시간대 (Volume과 완전 독립)
-final sectorTimeFrameProvider = StateProvider<String>((ref) {
-  final index = ref.watch(sectorTimeFrameIndexProvider);
-  final timeFrames = AppConfig.timeFrames.map((tf) => '${tf}m').toList();
-  if (index >= 0 && index < timeFrames.length) {
-    return timeFrames[index];
-  }
-  return '1m';
-});
+/// 🔥 섹터 전용 시간대 Provider (Volume과 독립)
+final selectedSectorTimeFrameProvider = StateProvider<TimeFrame>((ref) => TimeFrame.min1);
 
 // ══════════════════════════════════════════════════════════════════════════════
-// 🎯 섹터 시간대별 스트림 컨트롤러 관리
+// 🎯 메인 섹터 볼륨 Provider - 공통 시스템 연동
 // ══════════════════════════════════════════════════════════════════════════════
 
-/// 섹터 시간대별 스트림 컨트롤러들
-final sectorStreamControllersProvider = Provider<Map<String, StreamController<SectorVolumeEvent>>>((ref) {
-  final controllers = <String, StreamController<SectorVolumeEvent>>{};
-  
-  for (final timeFrameMinutes in AppConfig.timeFrames) {
-    final timeFrameStr = '${timeFrameMinutes}m';
-    controllers[timeFrameStr] = StreamController<SectorVolumeEvent>.broadcast();
-  }
-
-  ref.onDispose(() {
-    for (final entry in controllers.entries) {
-      if (!entry.value.isClosed) {
-        entry.value.close();
-      }
-    }
-    controllers.clear();
-  });
-
-  return controllers;
-});
-
-/// 섹터 시간대별 업데이트 로직 (절대 시간 기준으로 수정)
-final sectorTimeFrameUpdaterProvider = Provider((ref) {
-  final controllers = ref.read(sectorStreamControllersProvider);
-  final usecase = ref.read(sectorUsecaseProvider);
-  
-  void updateTimeFrame(String timeFrame) {
-    final controller = controllers[timeFrame];
-    if (controller == null || controller.isClosed) return;
-    
-    final dataCache = ref.read(volumeDataCacheProvider);
-    final volumeMap = dataCache[timeFrame] ?? <String, double>{};
-    
-    // ✅ 절대 시간 기준으로 변경 (volumeTimeFrameStartTimesProvider 제거)
-    final now = DateTime.now();
-    
-    // UseCase로 Volume 리스트 생성
-    final volumes = usecase.calculateVolumeList(volumeMap, timeFrame, now);
-    
-    if (volumes.isNotEmpty) {
-      // 섹터 분류 가져오기
-      final sectorClassification = ref.read(sectorClassificationProvider);
-      final sectorMapping = sectorClassification.currentSectors;
-      
-      // Volume 데이터를 섹터별로 집계
-      final sectorVolumes = _aggregateVolumesBySector(volumes, sectorMapping);
-      
-      controller.add(SectorVolumeEvent(sectorVolumes));
-    } else {
-      controller.add(const SectorVolumeEvent([]));
-    }
-  }
-
-  // Volume 캐시 변경 감지
-  ref.listen(volumeDataCacheProvider, (previous, next) {
-    for (final timeFrame in controllers.keys) {
-      updateTimeFrame(timeFrame);
-    }
-  });
-
-  // 섹터 분류 변경 감지
-  ref.listen(sectorClassificationProvider, (previous, next) {
-    if (previous != null && previous.currentSectors != next.currentSectors) {
-      for (final timeFrame in controllers.keys) {
-        updateTimeFrame(timeFrame);
-      }
-    }
-  });
-
-  return updateTimeFrame;
-});
-
-// ══════════════════════════════════════════════════════════════════════════════
-// 🔵 메인 섹터 볼륨 Provider (절대 시간 기준으로 수정)
-// ══════════════════════════════════════════════════════════════════════════════
-
-/// 멀티 스트림: 섹터 timeFrame 변경시 다른 스트림으로 전환
+/// 섹터 볼륨 데이터 Provider (공통 TimeFrame 시스템 연동)
 final sectorVolumeDataProvider = StreamProvider<SectorVolumeEvent>((ref) async* {
   ref.keepAlive();
   
-  final timeFrame = ref.watch(sectorTimeFrameProvider);
-  final controllers = ref.read(sectorStreamControllersProvider);
-  final controller = controllers[timeFrame];
+  // 🔥 섹터 전용 시간대 Provider 사용 (Volume과 독립)
+  final selectedTimeFrame = ref.watch(selectedSectorTimeFrameProvider);
+  final sectorClassification = ref.watch(sectorClassificationProvider);
+  
+  // 🔥 공통 Volume 시간대별 컨트롤러에서 직접 받기
+  final controllers = ref.read(volumeTimeFrameControllersProvider);
+  final controller = controllers[selectedTimeFrame];
   
   if (controller == null) {
-    log.e('💥 Sector StreamController not found for $timeFrame');
+    if (AppConfig.enableTradeLog) {
+      log.e('💥 Sector: Volume controller not found for $selectedTimeFrame');
+    }
     return;
   }
-
-  // 🚀 즉시 캐시 데이터 방출 (끊김 방지) - 절대 시간 기준으로 수정
-  final dataCache = ref.read(volumeDataCacheProvider);
-  final cachedVolumeMap = dataCache[timeFrame] ?? {};
   
-  if (cachedVolumeMap.isNotEmpty) {
-    final usecase = ref.read(sectorUsecaseProvider);
-    // ✅ 절대 시간 기준으로 변경
-    final now = DateTime.now();
-    
-    final volumes = usecase.calculateVolumeList(cachedVolumeMap, timeFrame, now);
-    
-    if (volumes.isNotEmpty) {
-      final sectorClassification = ref.read(sectorClassificationProvider);
-      final sectorMapping = sectorClassification.currentSectors;
-      final sectorVolumes = _aggregateVolumesBySector(volumes, sectorMapping);
+  // Volume 스트림 바인더 활성화
+  await ref.read(volumeStreamBinderProvider);
+  
+  if (AppConfig.enableTradeLog) {
+    log.i('🔥 Sector stream started: $selectedTimeFrame');
+  }
+  
+  await for (final volumeEvent in controller.stream) {
+    if (volumeEvent.isReset) {
+      yield SectorVolumeEvent.reset(
+        timeFrame: volumeEvent.timeFrame,
+        resetTime: volumeEvent.resetTime,
+      );
+    } else {
+      // 섹터별 집계
+      final sectorVolumes = _aggregateVolumesBySector(
+        volumeEvent.volumes,
+        sectorClassification.currentSectors,
+      );
       
-      yield SectorVolumeEvent(sectorVolumes);
+      yield SectorVolumeEvent.data(
+        volumes: sectorVolumes,
+        timeFrame: volumeEvent.timeFrame,
+      );
     }
   }
-
-  // 업데이터 활성화
-  ref.read(sectorTimeFrameUpdaterProvider);
-  
-  // 섹터 스트림 반환
-  yield* controller.stream;
 });
 
-/// Volume 리스트를 섹터별로 집계
+/// 현재 섹터 볼륨 리스트 (기존 유지)
+final currentSectorVolumeListProvider = Provider<List<Volume>>((ref) {
+  final sectorEvent = ref.watch(sectorVolumeDataProvider).valueOrNull;
+  return sectorEvent?.volumes ?? [];
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 🔄 섹터별 집계 로직 (기존 유지)
+// ══════════════════════════════════════════════════════════════════════════════
+
 List<Volume> _aggregateVolumesBySector(
-  List<Volume> coinVolumes, 
+  List<Volume> coinVolumes,
   Map<String, List<String>> sectorMapping,
 ) {
   if (coinVolumes.isEmpty) return [];
@@ -182,24 +141,18 @@ List<Volume> _aggregateVolumesBySector(
   // 각 코인을 해당 섹터에 합산
   for (final coinVolume in coinVolumes) {
     final ticker = coinVolume.market.replaceFirst('KRW-', '');
-    final sectors = <String>[];
     
     sectorMapping.forEach((sectorName, coins) {
       if (coins.contains(ticker)) {
-        sectors.add(sectorName);
+        sectorVolumeMap[sectorName] = 
+          (sectorVolumeMap[sectorName] ?? 0.0) + coinVolume.totalVolume;
       }
     });
-    
-    for (final sector in sectors) {
-      sectorVolumeMap[sector] = (sectorVolumeMap[sector] ?? 0.0) + coinVolume.totalVolume;
-    }
   }
   
-  // 볼륨이 0인 섹터 제거
-  sectorVolumeMap.removeWhere((key, value) => value <= 0);
-  
-  // Volume 객체로 변환
+  // 볼륨이 0인 섹터 제거하고 Volume 객체로 변환
   final sectorVolumes = sectorVolumeMap.entries
+      .where((entry) => entry.value > 0)
       .map((entry) => Volume(
             market: 'SECTOR-${entry.key}',
             totalVolume: entry.value,
@@ -216,7 +169,7 @@ List<Volume> _aggregateVolumesBySector(
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// 🎛️ Controller Helper (절대 시간 기준으로 개선)
+// 🎛️ 컨트롤러 - 공통 GlobalTimeFrameController 연동
 // ══════════════════════════════════════════════════════════════════════════════
 
 final sectorTimeFrameController = Provider((ref) => SectorTimeFrameController(ref));
@@ -225,72 +178,78 @@ class SectorTimeFrameController {
   final Ref ref;
   SectorTimeFrameController(this.ref);
 
-  void updateTimeFrame(String timeFrame, int index) {
-    final timeFrames = AppConfig.timeFrames.map((tf) => '${tf}m').toList();
-    if (index < 0 || index >= timeFrames.length) return;
+  /// 🔥 시간대 변경 - 섹터 독립적 TimeFrame 사용
+  void setTimeFrame(TimeFrame timeFrame) {
+    ref.read(selectedSectorTimeFrameProvider.notifier).state = timeFrame;
     
-    ref.read(sectorTimeFrameProvider.notifier).state = timeFrame;
-    ref.read(sectorTimeFrameIndexProvider.notifier).state = index;
+    if (AppConfig.enableTradeLog) {
+      log.i('🔄 Sector TimeFrame changed (independent): ${timeFrame.displayName}');
+    }
   }
 
+  /// 인덱스로 시간대 변경
+  void setTimeFrameByIndex(int index) {
+    final availableTimeFrames = TimeFrame.fromAppConfig();
+    if (index >= 0 && index < availableTimeFrames.length) {
+      setTimeFrame(availableTimeFrames[index]);
+    }
+  }
+
+  /// 섹터 분류 토글
   void toggleSectorClassification() {
     ref.read(sectorClassificationProvider.notifier).toggleClassificationType();
   }
 
+  /// 🔥 현재 시간대 리셋 - 공통 GlobalTimeFrameController 사용
   void resetCurrentTimeFrame() {
-    final timeFrame = ref.read(sectorTimeFrameProvider);
-    final dataCacheNotifier = ref.read(volumeDataCacheProvider.notifier);
-    
-    dataCacheNotifier.resetTimeFrame(timeFrame);
+    final currentTimeFrame = this.currentTimeFrame;
+    ref.read(globalTimeFrameControllerProvider).resetTimeFrame(currentTimeFrame);
   }
 
+  /// 🔥 모든 시간대 리셋 - 공통 GlobalTimeFrameController 사용
   void resetAllTimeFrames() {
-    final dataCacheNotifier = ref.read(volumeDataCacheProvider.notifier);
-    
-    dataCacheNotifier.resetAll();
+    ref.read(globalTimeFrameControllerProvider).resetAllTimeFrames();
   }
 
-  /// ✅ 개선된 다음 리셋 시간 계산 (절대 시간 기준, Volume과 동일한 로직)
+  /// 🔥 다음 리셋 시간 - 공통 GlobalTimeFrameController 사용
   DateTime? getNextResetTime() {
-    final timeFrame = ref.read(sectorTimeFrameProvider);
-    final now = DateTime.now();
-    final minutes = int.tryParse(timeFrame.replaceAll('m', '')) ?? 1;
-
-    // Volume Provider와 동일한 절대 시간 기준 계산
-    final currentChunkStartMinute = (now.minute ~/ minutes) * minutes;
-    final startOfCurrentChunk = DateTime(
-      now.year,
-      now.month,
-      now.day,
-      now.hour,
-      currentChunkStartMinute,
-      0,
-      0,
-    );
-
-    final nextResetTime = startOfCurrentChunk.add(Duration(minutes: minutes));
-    
-    // 이미 지난 시간이면 다음 사이클
-    if (nextResetTime.isBefore(now)) {
-      return nextResetTime.add(Duration(minutes: minutes));
-    }
-    
-    return nextResetTime;
+    final currentTimeFrame = this.currentTimeFrame;
+    return ref.read(globalTimeFrameControllerProvider).getNextResetTime(currentTimeFrame);
   }
 
-  String get currentTimeFrame => ref.read(sectorTimeFrameProvider);
-  int get currentIndex => ref.read(sectorTimeFrameIndexProvider);
-  List<String> get availableTimeFrames => AppConfig.timeFrames.map((tf) => '${tf}m').toList();
+  // ══════════════════════════════════════════════════════════════════════════════
+  // Getters - 공통 Provider 사용
+  // ══════════════════════════════════════════════════════════════════════════════
+
+  /// 🔥 섹터 전용 시간대 Provider 사용 (Volume과 독립)
+  TimeFrame get currentTimeFrame => ref.read(selectedSectorTimeFrameProvider);
   
-  String getTimeFrameName(String timeFrame) {
-    final minutes = int.tryParse(timeFrame.replaceAll('m', ''));
-    return AppConfig.timeFrameNames[minutes] ?? timeFrame;
+  int get currentIndex {
+    final availableTimeFrames = TimeFrame.fromAppConfig();
+    return availableTimeFrames.indexOf(currentTimeFrame);
+  }
+  
+  List<TimeFrame> get availableTimeFrames {
+    final globalController = ref.read(globalTimeFrameControllerProvider);
+    return globalController.availableTimeFrames;
+  }
+  
+  String get currentTimeFrameName => currentTimeFrame.displayName;
+  
+  String getTimeFrameName(TimeFrame timeFrame) {
+    final globalController = ref.read(globalTimeFrameControllerProvider);
+    return globalController.getTimeFrameName(timeFrame);
   }
 
-  // 섹터 고유 정보
-  bool get isDetailedClassification => ref.read(sectorClassificationProvider).isDetailedClassification;
-  String get currentSectorClassificationName => ref.read(sectorClassificationProvider).currentClassificationName;
-  int get totalSectors => ref.read(sectorClassificationProvider).currentSectors.length;
+  // 섹터 관련 정보 (기존 유지)
+  bool get isDetailedClassification => 
+    ref.read(sectorClassificationProvider).isDetailedClassification;
+  
+  String get currentSectorClassificationName => 
+    ref.read(sectorClassificationProvider).currentClassificationName;
+  
+  int get totalSectors => 
+    ref.read(sectorClassificationProvider).currentSectors.length;
 
   Map<String, int> getSectorSizes() {
     return ref.read(sectorClassificationProvider).sectorSizes;

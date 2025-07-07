@@ -1,498 +1,2276 @@
-\n\n// ====== lib/features/surge/domain/usecases/watch_surge.dart ======\n
-import 'dart:async';
-import '../../../../core/bridge/signal_bus.dart';
-import '../../../../core/config/app_config.dart';
-import '../entities/surge_item.dart';
+\n\n// ====== lib/core/di/surge_provider.dart ======\n
+// lib/core/di/surge_provider.dart
 
-class WatchSurgeUseCase {
-  final SignalBus _signalBus;
-  final Duration window;
-  final double percentThreshold;
+import 'dart:async';
+import 'dart:collection';
+import 'package:flutter/foundation.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:rxdart/rxdart.dart'; // 🔥 추가: share() 메서드용
+import '../config/app_config.dart';
+import '../utils/logger.dart';
+import 'trade_provider.dart' show marketsProvider, repoProvider;
+import '../../domain/entities/surge.dart';
+import '../../domain/entities/trade.dart';
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 💎 Core Types (완전한 타입 안전성 + 불변성)
+// ══════════════════════════════════════════════════════════════════════════════
+
+/// 시간대 Enum (완전한 타입 안전성)
+enum TimeFrame {
+  min1(1, '1분'),
+  min5(5, '5분'),
+  min15(15, '15분'),
+  min30(30, '30분'),
+  min60(60, '1시간'),
+  hour2(120, '2시간'),
+  hour4(240, '4시간'),
+  hour8(480, '8시간'),
+  hour12(720, '12시간'),
+  day1(1440, '1일');
+
+  const TimeFrame(this.minutes, this.displayName);
+  final int minutes;
+  final String displayName;
   
-  WatchSurgeUseCase(
-    this._signalBus, {
-    this.window = const Duration(minutes: 1),
-    this.percentThreshold = 1.1, // +1.1%
+  Duration get duration => Duration(minutes: minutes);
+  String get key => '${minutes}m';
+  
+  /// AppConfig에서 TimeFrame 변환
+  static List<TimeFrame> fromAppConfig() {
+    return AppConfig.timeFrames.map((minutes) {
+      return TimeFrame.values.firstWhere(
+        (tf) => tf.minutes == minutes,
+        orElse: () => TimeFrame.min1,
+      );
+    }).toList();
+  }
+}
+
+/// 배치 처리 및 캐시 설정 (완전한 외부 주입)
+@immutable
+class SurgeProcessingConfig {
+  final int maxCacheSize;
+  final int maxMarketsPerTimeFrame;
+  final Duration minBatchInterval;
+  final Duration maxBatchInterval;
+  final Duration defaultBatchInterval;
+  final int highLoadThreshold;
+  final int lowLoadThreshold;
+
+  const SurgeProcessingConfig({
+    this.maxCacheSize = 1000,
+    this.maxMarketsPerTimeFrame = 200,
+    this.minBatchInterval = const Duration(milliseconds: 50),
+    this.maxBatchInterval = const Duration(milliseconds: 200),
+    this.defaultBatchInterval = const Duration(milliseconds: 100),
+    this.highLoadThreshold = 50,
+    this.lowLoadThreshold = 10,
   });
 
-  Stream<SurgeItem> execute() {
-    final controller = StreamController<SurgeItem>.broadcast();
+  /// 적응형 배치 간격 계산
+  Duration calculateBatchInterval(int bufferSize) {
+    if (bufferSize > highLoadThreshold) return minBatchInterval;
+    if (bufferSize < lowLoadThreshold) return maxBatchInterval;
+    return defaultBatchInterval;
+  }
+}
+
+/// 급등/급락 이벤트 (완전히 개선된 설계)
+@immutable
+class SurgeEvent {
+  final List<Surge> surges;
+  final TimeFrame timeFrame;
+  final bool isReset;
+  final DateTime? resetTime;
+  final DateTime eventTime;
+
+  const SurgeEvent({
+    required this.surges,
+    required this.timeFrame,
+    this.isReset = false,
+    this.resetTime,
+    required this.eventTime,
+  });
+
+  /// 일반 데이터 이벤트 생성
+  factory SurgeEvent.data({
+    required List<Surge> surges,
+    required TimeFrame timeFrame,
+  }) {
+    return SurgeEvent(
+      surges: surges,
+      timeFrame: timeFrame,
+      isReset: false,
+      eventTime: DateTime.now(),
+    );
+  }
+
+  /// 리셋 이벤트 생성
+  factory SurgeEvent.reset({
+    required TimeFrame timeFrame,
+    DateTime? resetTime,
+  }) {
+    final now = resetTime ?? DateTime.now();
+    return SurgeEvent(
+      surges: const [],
+      timeFrame: timeFrame,
+      isReset: true,
+      resetTime: now,
+      eventTime: now,
+    );
+  }
+}
+
+/// 가격 데이터 (불변)
+@immutable
+class PriceData {
+  final double basePrice;
+  final double currentPrice;
+  final double changePercent;
+
+  const PriceData({
+    required this.basePrice,
+    required this.currentPrice,
+    required this.changePercent,
+  });
+
+  factory PriceData.initial(double price) {
+    return PriceData(
+      basePrice: price,
+      currentPrice: price,
+      changePercent: 0.0,
+    );
+  }
+
+  PriceData updatePrice(double newPrice) {
+    final percent = basePrice > 0 
+        ? ((newPrice - basePrice) / basePrice) * 100 
+        : 0.0;
     
-    // 코인별 최근 가격 기록 저장
-    final priceHistory = <String, List<_PricePoint>>{};
-    final detectedSurges = <String>{};
+    return PriceData(
+      basePrice: basePrice,
+      currentPrice: newPrice,
+      changePercent: percent,
+    );
+  }
+
+  PriceData reset(double newPrice) {
+    return PriceData(
+      basePrice: newPrice,
+      currentPrice: newPrice,
+      changePercent: 0.0,
+    );
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 🧠 Core Logic: SurgeTransformer (완전한 순수 함수형 + 최적화)
+// ══════════════════════════════════════════════════════════════════════════════
+
+/// 완전히 순수한 함수형 변환기 + 최적화된 메모리 관리
+class SurgeTransformer extends StreamTransformerBase<Trade, SurgeEvent> {
+  final TimeFrame timeFrame;
+  final SurgeProcessingConfig config;
+  final Function(TimeFrame, DateTime)? onResetTimeUpdate; // 🔥 동기 콜백 유지
+  
+  // 최적화된 메모리 관리
+  LinkedHashSet<String> _seenIds = LinkedHashSet<String>();
+  final Map<String, PriceData> _priceData = <String, PriceData>{};
+  
+  DateTime _lastResetTime = DateTime.now();
+  
+  // 배치 처리를 위한 버퍼와 타이머
+  final List<Trade> _batchBuffer = [];
+  Timer? _batchTimer;
+
+  SurgeTransformer(
+    this.timeFrame, {
+    this.config = const SurgeProcessingConfig(),
+    this.onResetTimeUpdate,
+  });
+
+  @override
+  Stream<SurgeEvent> bind(Stream<Trade> stream) {
+    late StreamController<SurgeEvent> controller;
+    StreamSubscription<Trade>? subscription;
+    Timer? resetTimer;
     
-    // SignalBus로부터 Trade 이벤트 구독
-    final subscription = _signalBus.eventsOfType(SignalEventType.trade).listen((trade) {
-      try {
-        final market = trade['code'] as String? ?? trade['market'] as String?;
-        if (market == null) return;
-        
-        final priceRaw = trade['trade_price'] ?? trade['price'];
-        final price = priceRaw is num 
-          ? priceRaw.toDouble() 
-          : double.tryParse(priceRaw.toString()) ?? 0.0;
-        
-        if (price <= 0) return;
-        
-        final now = DateTime.now();
-        
-        // 이전 가격 데이터가 없으면 초기화
-        if (!priceHistory.containsKey(market)) {
-          priceHistory[market] = [];
-        }
-        
-        // 새 가격 추가
-        priceHistory[market]!.add(_PricePoint(price, now));
-        
-        // window 시간 외 데이터 제거
-        final cutoff = now.subtract(window);
-        priceHistory[market]!.removeWhere((p) => p.timestamp.isBefore(cutoff));
-        
-        // 가격 기록이 충분하지 않으면 건너뜀
-        if (priceHistory[market]!.length < 2) return;
-        
-        // 첫 가격과 현재 가격 비교
-        final basePrice = priceHistory[market]!.first.price;
-        final changePercent = ((price - basePrice) / basePrice) * 100;
-        
-        // 임계값 이상 변동이고, 아직 보고되지 않은 급등이면
-        final surgeKey = '$market-${now.minute}';
-        if (changePercent.abs() >= percentThreshold && !detectedSurges.contains(surgeKey)) {
-          detectedSurges.add(surgeKey);
-          
-          // SurgeItem 생성하여 스트림에 추가
-          final surgeItem = SurgeItem(
-            market: market,
-            currentPrice: price,
-            basePrice: basePrice,
-            changePercent: changePercent,
-            detectedAt: now,
-          );
-          
-          controller.add(surgeItem);
-          
-          // 오래된 감지 레코드 정리 (1시간 이상 된 것)
-          _cleanupDetectedSurges(detectedSurges, now);
-        }
-      } catch (e) {
-        // 오류 무시하고 계속 진행
+    // 🔥 배치 플러시 - 최적화된 처리
+    void flushBatch() {
+      if (_batchBuffer.isEmpty || controller.isClosed) return;
+      
+      // 버퍼에 쌓인 모든 거래를 한 번에 처리
+      for (final trade in _batchBuffer) {
+        _processTrade(trade);
       }
-    });
+      _batchBuffer.clear();
+
+      // 모든 처리 후, 최종 결과물 이벤트를 한 번만 발생
+      final surges = _calculateSurges();
+      if (!controller.isClosed) {
+        controller.add(SurgeEvent.data(
+          surges: surges,
+          timeFrame: timeFrame,
+        ));
+      }
+    }
+
+    // 🔥 적응형 배치 타이머 리셋
+    void resetBatchTimer() {
+      _batchTimer?.cancel();
+      final interval = config.calculateBatchInterval(_batchBuffer.length);
+      _batchTimer = Timer(interval, () {
+        flushBatch();
+        resetBatchTimer();
+      });
+    }
     
-    // 컨트롤러 닫힐 때 구독 취소
-    controller.onCancel = () {
-      subscription.cancel();
-      priceHistory.clear();
-      detectedSurges.clear();
-    };
+    // 🔥 동기 콜백 기반 리셋 스케줄링 (안정성 보장)
+    void scheduleNextReset(VoidCallback onReset) {
+      final now = DateTime.now();
+      final nextReset = _lastResetTime.add(timeFrame.duration);
+      final delay = nextReset.difference(now);
+      
+      if (delay.isNegative) {
+        onReset();
+        _lastResetTime = now;
+        // 🔥 동기 콜백으로 즉시 UI 업데이트
+        onResetTimeUpdate?.call(timeFrame, _lastResetTime);
+        scheduleNextReset(onReset);
+      } else {
+        resetTimer = Timer(delay, () {
+          onReset();
+          _lastResetTime = DateTime.now();
+          // 🔥 동기 콜백으로 즉시 UI 업데이트
+          onResetTimeUpdate?.call(timeFrame, _lastResetTime);
+          scheduleNextReset(onReset);
+        });
+      }
+    }
+    
+    controller = StreamController<SurgeEvent>(
+      onListen: () {
+        // 🔥 초기 리셋 시간 설정
+        onResetTimeUpdate?.call(timeFrame, _lastResetTime);
+        
+        // 1. 시간대 리셋 타이머 설정
+        scheduleNextReset(() {
+          _resetData();
+          if (!controller.isClosed) {
+            controller.add(SurgeEvent.reset(
+              timeFrame: timeFrame,
+              resetTime: _lastResetTime,
+            ));
+          }
+        });
+        
+        // 2. 배치 타이머 시작
+        resetBatchTimer();
+
+        // 3. 거래 데이터 구독
+        subscription = stream.listen(
+          (trade) {
+            // 즉시 처리하지 않고 버퍼에 추가만
+            _batchBuffer.add(trade);
+          },
+          onError: controller.addError,
+          onDone: () {
+            // 🔥 타이머 누수 방지
+            resetTimer?.cancel();
+            _batchTimer?.cancel();
+            flushBatch(); // 마지막 배치 처리
+            controller.close();
+          },
+        );
+      },
+      onCancel: () {
+        // 모든 타이머와 구독 취소
+        resetTimer?.cancel();
+        _batchTimer?.cancel();
+        subscription?.cancel();
+      },
+    );
     
     return controller.stream;
   }
-  
-  // 오래된 감지 기록 정리
-  void _cleanupDetectedSurges(Set<String> detectedSurges, DateTime now) {
-    final hour = now.hour;
-    final toRemove = <String>[];
+
+  bool _processTrade(Trade trade) {
+    // 🔥 최적화된 중복 필터링 (LinkedHashSet + skip)
+    final key = '${trade.market}/${trade.sequentialId}';
+    if (_seenIds.contains(key)) return false;
     
-    for (final key in detectedSurges) {
-      final parts = key.split('-');
-      if (parts.length > 1) {
-        final minuteStr = parts.last;
-        final minute = int.tryParse(minuteStr);
-        if (minute != null && (minute + 60) % 60 == now.minute) {
-          toRemove.add(key);
-        }
-      }
+    if (_seenIds.length >= config.maxCacheSize) {
+      // 🔥 GC 최적화: skip() 사용으로 임시 리스트 생성 제거
+      final removeCount = _seenIds.length ~/ 4;
+      _seenIds = LinkedHashSet<String>.from(_seenIds.skip(removeCount));
     }
-    
-    for (final key in toRemove) {
-      detectedSurges.remove(key);
+    _seenIds.add(key);
+
+    // 가격 데이터 업데이트
+    final existing = _priceData[trade.market];
+    if (existing != null) {
+      _priceData[trade.market] = existing.updatePrice(trade.price);
+    } else {
+      _priceData[trade.market] = PriceData.initial(trade.price);
+    }
+
+    // 메모리 관리
+    if (_priceData.length > config.maxMarketsPerTimeFrame) {
+      final sorted = _priceData.entries.toList()
+        ..sort((a, b) => b.value.changePercent.abs().compareTo(a.value.changePercent.abs()));
+      
+      _priceData.clear();
+      _priceData.addAll(Map.fromEntries(sorted.take(config.maxMarketsPerTimeFrame)));
+    }
+
+    return true;
+  }
+
+  void _resetData() {
+    for (final entry in _priceData.entries) {
+      _priceData[entry.key] = entry.value.reset(entry.value.currentPrice);
     }
   }
-}
 
-// 내부용 가격 데이터 클래스
-class _PricePoint {
-  final double price;
-  final DateTime timestamp;
-  
-  _PricePoint(this.price, this.timestamp);
-}\n\n// ====== lib/features/surge/domain/entities/surge_item.dart ======\n
-import 'package:equatable/equatable.dart';
+  List<Surge> _calculateSurges() {
+    final now = DateTime.now();
+    final surges = _priceData.entries
+        .map((e) => Surge(
+              market: e.key,
+              changePercent: e.value.changePercent,
+              basePrice: e.value.basePrice,
+              currentPrice: e.value.currentPrice,
+              lastUpdatedMs: now.millisecondsSinceEpoch,
+              timeFrame: timeFrame.key,
+              timeFrameStartMs: _lastResetTime.millisecondsSinceEpoch,
+            ))
+        .where((surge) => surge.hasChange)
+        .toList();
 
-class SurgeItem extends Equatable {
-  final String market;
-  final double currentPrice;
-  final double basePrice;
-  final double changePercent;
-  final DateTime detectedAt;
-  
-  // 거래방향 (급등/급락)
-  bool get isRising => changePercent > 0;
-  
-  const SurgeItem({
-    required this.market,
-    required this.currentPrice,
-    required this.basePrice,
-    required this.changePercent,
-    required this.detectedAt,
-  });
-  
-  @override
-  List<Object?> get props => [
-    market, 
-    currentPrice, 
-    basePrice, 
-    changePercent, 
-    detectedAt
-  ];
-  
-  // 복사 메서드
-  SurgeItem copyWith({
-    String? market,
-    double? currentPrice,
-    double? basePrice,
-    double? changePercent,
-    DateTime? detectedAt,
-  }) {
-    return SurgeItem(
-      market: market ?? this.market,
-      currentPrice: currentPrice ?? this.currentPrice,
-      basePrice: basePrice ?? this.basePrice,
-      changePercent: changePercent ?? this.changePercent,
-      detectedAt: detectedAt ?? this.detectedAt,
-    );
-  }
-}\n\n// ====== lib/features/surge/presentation/providers/surge_provider.dart ======\n
-import 'dart:async';
-import 'package:flutter_riverpod/flutter_riverpod.dart';
-import '../../../../core/bridge/signal_bus.dart';
-import '../../../../core/config/app_config.dart';
-import '../../domain/entities/surge_item.dart';
-import '../../domain/usecases/watch_surge.dart';
-
-// 급등 감지 임계값을 위한 Provider
-final surgeThresholdProvider = StateProvider<double>((ref) => 
-    AppConfig.surgeThresholdPercent);
-
-// SurgeUseCase Provider
-final surgeUseCaseProvider = Provider<WatchSurgeUseCase>((ref) {
-  final signalBus = SignalBus();
-  return WatchSurgeUseCase(
-    signalBus,
-    percentThreshold: ref.watch(surgeThresholdProvider),
-  );
-});
-
-// 급등 항목 상태 관리 Notifier
-class SurgeNotifier extends AutoDisposeAsyncNotifier<List<SurgeItem>> {
-  StreamSubscription<SurgeItem>? _subscription;
-  
-  @override
-  FutureOr<List<SurgeItem>> build() async {
-    ref.onDispose(() {
-      _subscription?.cancel();
+    // 완전한 정렬 로직: + 먼저, - 나중에 (절댓값 기준)
+    surges.sort((a, b) {
+      if (a.isRising && b.isFalling) return -1;
+      if (a.isFalling && b.isRising) return 1;
+      if (a.isRising && b.isRising) return b.changePercent.compareTo(a.changePercent);
+      if (a.isFalling && b.isFalling) return b.changePercent.compareTo(a.changePercent);
+      return 0;
     });
     
-    final useCase = ref.watch(surgeUseCaseProvider);
-    final items = <SurgeItem>[];
-    
-    _subscription = useCase.execute().listen(
-      (surgeItem) {
-        items.insert(0, surgeItem);
-        
-        // 최대 100개로 제한
-        if (items.length > 100) {
-          items.removeLast();
-        }
-        
-        state = AsyncData(List.unmodifiable(items));
-      },
-      onError: (error, stackTrace) {
-        state = AsyncError(error, stackTrace);
-      }
-    );
-    
-    return items;
-  }
-  
-  // 특정 코인의 급등 항목만 필터링
-  List<SurgeItem> getByMarket(String market) {
-    if (state.value == null) return [];
-    return state.value!.where((item) => item.market == market).toList();
-  }
-  
-  // 급등 임계값 변경
-  void setThreshold(double newThreshold) {
-    ref.read(surgeThresholdProvider.notifier).state = newThreshold;
-    
-    // 임계값 변경 시 UseCase 다시 빌드 (Provider 의존성에 의해 자동으로 처리됨)
-  }
-  
-  // 모든 데이터 지우기
-  void clear() {
-    state = const AsyncData([]);
+    return surges;
   }
 }
 
-// 급등 Provider
-final surgeProvider = 
-    AutoDisposeAsyncNotifierProvider<SurgeNotifier, List<SurgeItem>>(
-        SurgeNotifier.new);
+// ══════════════════════════════════════════════════════════════════════════════
+// 🎯 Providers (완전한 타입 안전성 + 최적화된 아키텍처)
+// ══════════════════════════════════════════════════════════════════════════════
 
-// 상승만 필터링한 Provider
-final risingProvider = Provider<List<SurgeItem>>((ref) {
-  final surgeAsync = ref.watch(surgeProvider);
-  return surgeAsync.maybeWhen(
-    data: (items) => items.where((item) => item.isRising).toList(),
-    orElse: () => [],
+/// 선택된 시간대
+final selectedTimeFrameProvider = StateProvider<TimeFrame>((ref) => TimeFrame.min1);
+
+/// 🔥 완전한 타입 안전성: TimeFrame enum 키 사용
+final timeFrameResetTimesProvider = StateProvider<Map<TimeFrame, DateTime>>((ref) {
+  final now = DateTime.now();
+  final initialTimes = <TimeFrame, DateTime>{};
+  
+  // 모든 시간대 초기화
+  for (final timeFrame in TimeFrame.fromAppConfig()) {
+    initialTimes[timeFrame] = now;
+  }
+  
+  return initialTimes;
+});
+
+/// 처리 설정 Provider (외부 주입 가능)
+final surgeProcessingConfigProvider = Provider<SurgeProcessingConfig>((ref) {
+  return const SurgeProcessingConfig(
+    // 프로덕션 최적화 설정
+    maxCacheSize: 1000,
+    maxMarketsPerTimeFrame: 200,
+    minBatchInterval: Duration(milliseconds: 50),
+    maxBatchInterval: Duration(milliseconds: 200),
+    defaultBatchInterval: Duration(milliseconds: 100),
+    highLoadThreshold: 50,
+    lowLoadThreshold: 10,
   );
 });
 
-// 하락만 필터링한 Provider
-final fallingProvider = Provider<List<SurgeItem>>((ref) {
-  final surgeAsync = ref.watch(surgeProvider);
-  return surgeAsync.maybeWhen(
-    data: (items) => items.where((item) => !item.isRising).toList(),
-    orElse: () => [],
+/// 시간대별 StreamController 관리 (멀티스트림)
+final timeFrameControllersProvider = Provider<Map<TimeFrame, StreamController<SurgeEvent>>>((ref) {
+  final controllers = <TimeFrame, StreamController<SurgeEvent>>{};
+  final availableTimeFrames = TimeFrame.fromAppConfig();
+  
+  for (final timeFrame in availableTimeFrames) {
+    controllers[timeFrame] = StreamController<SurgeEvent>.broadcast();
+  }
+
+  ref.onDispose(() {
+    for (final controller in controllers.values) {
+      if (!controller.isClosed) {
+        controller.close();
+      }
+    }
+    controllers.clear();
+    
+    if (AppConfig.enableTradeLog) {
+      log.i('🛑 TimeFrame controllers disposed');
+    }
+  });
+
+  return controllers;
+});
+
+/// 🔥 최적화된 원시 거래 스트림 (단일 WS + 브로드캐스트)
+final tradeStreamProvider = StreamProvider<Trade>((ref) async* {
+  final markets = await ref.watch(marketsProvider.future);
+  final repo = ref.read(repoProvider);
+  
+  if (AppConfig.enableTradeLog) {
+    log.i('🔥 Single WS Trade stream started: ${markets.length} markets');
+  }
+  
+  // 🔥 핵심 최적화: 단일 WS 스트림 + share()로 브로드캐스트
+  yield* repo.watchTrades(markets).share();
+});
+
+/// 🔥 시간대별 스트림 연결 (최적화된 팬-아웃 방식)
+final surgeStreamBinderProvider = Provider((ref) async {
+  // ✅ 비동기로 마켓 데이터 대기
+  final markets = await ref.read(marketsProvider.future);
+  final repo = ref.read(repoProvider);
+  final controllers = ref.read(timeFrameControllersProvider);
+  final availableTimeFrames = TimeFrame.fromAppConfig();
+  final config = ref.read(surgeProcessingConfigProvider);
+  
+  // ✅ 마스터 스트림을 binder에서 직접 생성 (WS 1개 유지)
+  final masterStream = repo.watchTrades(markets).share();
+  
+  // 🔥 동기 콜백 기반 리셋 시간 업데이트 (타이밍 이슈 제거)
+  void updateResetTime(TimeFrame timeFrame, DateTime resetTime) {
+    final currentTimes = ref.read(timeFrameResetTimesProvider);
+    ref.read(timeFrameResetTimesProvider.notifier).state = {
+      ...currentTimes,
+      timeFrame: resetTime,
+    };
+  }
+  
+  // 🔥 각 시간대별로 마스터 스트림을 팬-아웃
+  for (final timeFrame in availableTimeFrames) {
+    final controller = controllers[timeFrame];
+    if (controller != null) {
+      // 🔥 마스터 스트림 → 시간대별 독립 변환 → 각 컨트롤러로 전송
+      masterStream
+          .transform(SurgeTransformer(
+            timeFrame,
+            config: config,
+            onResetTimeUpdate: updateResetTime, // 🔥 동기 콜백으로 안정성 보장
+          ))
+          .listen(
+            controller.add,
+            onError: controller.addError,
+          );
+    }
+  }
+
+  if (AppConfig.enableTradeLog) {
+    log.i('🔥 Fan-out stream binding completed: ${availableTimeFrames.length} timeframes');
+  }
+  
+  return controllers;
+});
+
+/// 메인 급등/급락 데이터 스트림
+final surgeDataProvider = StreamProvider<SurgeEvent>((ref) async* {
+  ref.keepAlive();
+  
+  final selectedTimeFrame = ref.watch(selectedTimeFrameProvider);
+  final controllers = ref.read(timeFrameControllersProvider);
+  
+  // 스트림 바인더 활성화
+  await ref.read(surgeStreamBinderProvider);
+  
+  final controller = controllers[selectedTimeFrame];
+  if (controller == null) {
+    log.e('💥 Controller not found for $selectedTimeFrame');
+    return;
+  }
+
+  if (AppConfig.enableTradeLog) {
+    log.i('🔥 Surge stream started: $selectedTimeFrame');
+  }
+
+  yield* controller.stream;
+});
+
+/// 현재 시간대의 Surge 리스트 (UI용)
+final currentSurgeListProvider = Provider<List<Surge>>((ref) {
+  final surgeEvent = ref.watch(surgeDataProvider).valueOrNull;
+  return surgeEvent?.surges ?? [];
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 🎛️ TimeFrame Controller (완전한 타입 안전성)
+// ══════════════════════════════════════════════════════════════════════════════
+
+final timeFrameControllerProvider = Provider((ref) => TimeFrameController(ref));
+
+class TimeFrameController {
+  final Ref _ref;
+  
+  TimeFrameController(this._ref);
+
+  /// 시간대 변경 (TimeFrame enum 기반)
+  void setTimeFrame(TimeFrame timeFrame) {
+    _ref.read(selectedTimeFrameProvider.notifier).state = timeFrame;
+    
+    if (AppConfig.enableTradeLog) {
+      log.i('🔄 TimeFrame changed: ${timeFrame.displayName}');
+    }
+  }
+
+  /// 현재 시간대 수동 리셋
+  void resetCurrentTimeFrame() {
+    final currentTimeFrame = _ref.read(selectedTimeFrameProvider);
+    final controllers = _ref.read(timeFrameControllersProvider);
+    final controller = controllers[currentTimeFrame];
+    
+    if (controller != null && !controller.isClosed) {
+      final now = DateTime.now();
+      
+      // 리셋 이벤트 발생
+      controller.add(SurgeEvent.reset(
+        timeFrame: currentTimeFrame,
+        resetTime: now,
+      ));
+      
+      // 🔥 완전한 타입 안전성: TimeFrame enum 키 사용
+      final currentTimes = _ref.read(timeFrameResetTimesProvider);
+      _ref.read(timeFrameResetTimesProvider.notifier).state = {
+        ...currentTimes,
+        currentTimeFrame: now,
+      };
+      
+      if (AppConfig.enableTradeLog) {
+        log.i('🔄 Manual reset: ${currentTimeFrame.displayName}');
+      }
+    }
+  }
+
+  /// 모든 시간대 리셋
+  void resetAllTimeFrames() {
+    final controllers = _ref.read(timeFrameControllersProvider);
+    final availableTimeFrames = TimeFrame.fromAppConfig();
+    final now = DateTime.now();
+    
+    for (final timeFrame in availableTimeFrames) {
+      final controller = controllers[timeFrame];
+      if (controller != null && !controller.isClosed) {
+        controller.add(SurgeEvent.reset(
+          timeFrame: timeFrame,
+          resetTime: now,
+        ));
+      }
+    }
+    
+    // 🔥 완전한 타입 안전성: TimeFrame enum 키 사용
+    final resetTimes = <TimeFrame, DateTime>{};
+    for (final timeFrame in availableTimeFrames) {
+      resetTimes[timeFrame] = now;
+    }
+    _ref.read(timeFrameResetTimesProvider.notifier).state = resetTimes;
+    
+    if (AppConfig.enableTradeLog) {
+      log.i('🔄 Manual reset: all timeframes');
+    }
+  }
+
+  /// 🔥 완전한 타입 안전성으로 다음 리셋 시간 계산
+  DateTime? getNextResetTime() {
+    final currentTimeFrame = _ref.read(selectedTimeFrameProvider);
+    final resetTimes = _ref.read(timeFrameResetTimesProvider);
+    final lastResetTime = resetTimes[currentTimeFrame];
+    
+    if (lastResetTime == null) return null;
+    
+    return lastResetTime.add(currentTimeFrame.duration);
+  }
+
+  /// Getters
+  TimeFrame get currentTimeFrame => _ref.read(selectedTimeFrameProvider);
+  
+  int get currentIndex {
+    final availableTimeFrames = TimeFrame.fromAppConfig();
+    return availableTimeFrames.indexOf(currentTimeFrame);
+  }
+  
+  List<TimeFrame> get availableTimeFrames => TimeFrame.fromAppConfig();
+  
+  String get currentTimeFrameName => currentTimeFrame.displayName;
+  
+  String getTimeFrameName(TimeFrame timeFrame) => timeFrame.displayName;
+}\n\n// ====== lib/data/repositories/surge_repository_impl.dart ======\n
+// lib/data/repositories/surge_repository_impl.dart
+
+import 'dart:async';
+import 'package:flutter/foundation.dart';
+import '../../core/config/app_config.dart';
+import '../../domain/entities/trade.dart';
+import '../../domain/entities/surge.dart';
+import '../../domain/repositories/surge_repository.dart';
+import '../../domain/repositories/trade_repository.dart';
+
+/// 🚀 급등/급락 데이터 클래스
+class SurgeData {
+  double? basePrice;      // 시간대 시작 가격
+  double currentPrice = 0; // 현재 가격 (계속 업데이트)
+  double changePercent = 0; // 변동률 (계속 재계산)
+
+  SurgeData({this.basePrice, this.currentPrice = 0, this.changePercent = 0});
+
+  void updatePrice(double price) {
+    basePrice ??= price;
+    currentPrice = price;
+    changePercent = basePrice != null && basePrice! > 0 
+        ? ((currentPrice - basePrice!) / basePrice!) * 100 
+        : 0.0;
+  }
+
+  void reset(double price) {
+    basePrice = price;
+    currentPrice = price;
+    changePercent = 0.0;
+  }
+}
+
+/// 🏗️ SurgeRepositoryImpl - 데이터 처리 담당
+class SurgeRepositoryImpl implements SurgeRepository {
+  final TradeRepository _tradeRepository;
+
+  // 📊 급등/급락 상태 관리
+  final Map<String, Map<String, SurgeData>> _surgeByTimeFrame = {};
+  final Set<String> _seenIds = {};
+  
+  // 🎯 급등/급락 스트림 컨트롤러들 (시간대별) - Surge 리스트 방출
+  final Map<String, StreamController<List<Surge>>> _surgeControllers = {};
+  
+  // 🕐 시간대별 리셋 시간 추적
+  final Map<String, DateTime> _timeFrameStartTimes = {};
+  
+  // 🎯 스트림 관리
+  StreamSubscription<Trade>? _masterSubscription;
+  Timer? _batchUpdateTimer;
+  bool _disposed = false;
+  
+  // 성능 최적화 상수
+  static const int _maxMarketsPerTimeFrame = 200;
+  static const int _maxCacheSize = 1000;
+  static const Duration _batchUpdateInterval = Duration(milliseconds: 100);
+
+  SurgeRepositoryImpl(this._tradeRepository) {
+    _initializeSurgeTracking();
+  }
+
+  /// 급등/급락 추적 초기화
+  void _initializeSurgeTracking() {
+    for (final timeFrameMinutes in AppConfig.timeFrames) {
+      final timeFrameStr = '${timeFrameMinutes}m';
+      
+      // 빈 급등/급락 맵 초기화
+      _surgeByTimeFrame[timeFrameStr] = <String, SurgeData>{};
+      
+      // 스트림 컨트롤러 생성 - List<Surge> 타입
+      _surgeControllers[timeFrameStr] = StreamController<List<Surge>>.broadcast();
+      
+      // 시작 시간 설정
+      _timeFrameStartTimes[timeFrameStr] = DateTime.now();
+      
+      // 정확한 리셋 타이밍 스케줄링
+      _scheduleNextReset(timeFrameStr, timeFrameMinutes);
+    }
+    
+    if (kDebugMode) {
+      debugPrint('SurgeRepository: Surge tracking initialized for ${AppConfig.timeFrames.length} timeframes');
+    }
+  }
+
+  /// 정확한 리셋 타이밍 스케줄링
+  void _scheduleNextReset(String timeFrame, int minutes) {
+    final now = DateTime.now();
+    final startTime = _timeFrameStartTimes[timeFrame]!;
+    final nextReset = startTime.add(Duration(minutes: minutes));
+    final delay = nextReset.difference(now);
+    
+    if (delay.isNegative) {
+      _resetTimeFrameData(timeFrame);
+      _timeFrameStartTimes[timeFrame] = now;
+      _scheduleNextReset(timeFrame, minutes);
+    } else {
+      Timer(delay, () {
+        _resetTimeFrameData(timeFrame);
+        _timeFrameStartTimes[timeFrame] = DateTime.now();
+        _scheduleNextReset(timeFrame, minutes);
+      });
+    }
+  }
+
+  /// 메인 스트림 초기화 및 데이터 처리
+  void _initializeProcessing(List<String> markets) {
+    if (_masterSubscription != null) return;
+    
+    debugPrint('SurgeRepository: initializing processing for ${markets.length} markets');
+    
+    // TradeRepository의 순수 데이터 스트림 구독
+    _masterSubscription = _tradeRepository.watchTrades(markets).listen(
+      _processRawTradeData,
+      onError: (error, stackTrace) {
+        debugPrint('SurgeRepository processing error: $error');
+        // 에러를 모든 컨트롤러에 전달
+        for (final controller in _surgeControllers.values) {
+          if (!controller.isClosed) {
+            controller.addError(error, stackTrace);
+          }
+        }
+      },
+      onDone: () {
+        debugPrint('SurgeRepository processing done');
+      },
+    );
+  }
+
+  @override
+  Stream<List<Surge>> watchSurgeByTimeFrame(String timeFrame, List<String> markets) {
+    if (_disposed) {
+      throw StateError('Repository has been disposed');
+    }
+
+    // 처리 초기화
+    _initializeProcessing(markets);
+    
+    // 해당 시간대의 급등/급락 스트림 직접 반환
+    return _surgeControllers[timeFrame]?.stream ?? const Stream.empty();
+  }
+
+  /// 원시 거래 데이터 처리
+  void _processRawTradeData(Trade trade) {
+    try {
+      final key = '${trade.market}/${trade.sequentialId}';
+
+      // 중복 처리 방지
+      if (!_seenIds.add(key)) return;
+
+      // 메모리 관리
+      if (_seenIds.length > _maxCacheSize) {
+        final removeCount = (_seenIds.length / 4).ceil();
+        final toRemove = _seenIds.take(removeCount).toList();
+        _seenIds.removeAll(toRemove);
+      }
+
+      // 데이터 저장 후 배치 업데이트 예약
+      _storeDataAndScheduleUpdate(trade);
+      
+    } catch (e, stackTrace) {
+      debugPrint('_processRawTradeData error: $e');
+      debugPrint('StackTrace: $stackTrace');
+      // 에러를 모든 컨트롤러에 전달
+      for (final controller in _surgeControllers.values) {
+        if (!controller.isClosed) {
+          controller.addError(e, stackTrace);
+        }
+      }
+    }
+  }
+
+  /// 거래 데이터 저장 후 배치 업데이트 예약
+  void _storeDataAndScheduleUpdate(Trade trade) {
+    final market = trade.market;
+    final currentPrice = trade.price;
+    
+    for (final timeFrameStr in _surgeByTimeFrame.keys) {
+      final surgeMap = _surgeByTimeFrame[timeFrameStr]!;
+      
+      // 크기 제한 (상위 200개만 유지)
+      if (surgeMap.length > _maxMarketsPerTimeFrame) {
+        final sorted = surgeMap.entries.toList()
+          ..sort((a, b) => b.value.changePercent.abs().compareTo(a.value.changePercent.abs()));
+        surgeMap.clear();
+        surgeMap.addAll(Map.fromEntries(sorted.take(_maxMarketsPerTimeFrame)));
+      }
+      
+      final surgeData = surgeMap[market] ??= SurgeData();
+      surgeData.updatePrice(currentPrice);
+    }
+    
+    // 배치 업데이트 예약
+    _scheduleBatchUpdate();
+  }
+
+  /// 배치 업데이트 스케줄링
+  void _scheduleBatchUpdate() {
+    if (_disposed) return;
+    
+    _batchUpdateTimer?.cancel();
+    _batchUpdateTimer = Timer(_batchUpdateInterval, () {
+      _performBatchUpdate();
+    });
+  }
+
+  /// 모든 시간대의 급등/급락 스트림 배치 업데이트
+  void _performBatchUpdate() {
+    if (_disposed) return;
+    
+    try {
+      for (final entry in _surgeByTimeFrame.entries) {
+        final timeFrameStr = entry.key;
+        final surgeMap = entry.value;
+        
+        // Surge 리스트 생성
+        final surgeList = _createSurgeList(surgeMap, timeFrameStr);
+        
+        // 해당 시간대 스트림에 Surge 리스트 전송
+        final controller = _surgeControllers[timeFrameStr];
+        if (controller != null && !controller.isClosed) {
+          controller.add(surgeList);
+        }
+      }
+      
+      if (kDebugMode) {
+        final totalMarkets = _surgeByTimeFrame.values.isNotEmpty 
+            ? _surgeByTimeFrame.values.first.length 
+            : 0;
+        if (totalMarkets > 0) {
+          debugPrint('SurgeRepository: Surge streams updated (batch): $totalMarkets markets');
+        }
+      }
+    } catch (e, stackTrace) {
+      debugPrint('_performBatchUpdate error: $e');
+      debugPrint('StackTrace: $stackTrace');
+      // 에러를 모든 컨트롤러에 전달
+      for (final controller in _surgeControllers.values) {
+        if (!controller.isClosed) {
+          controller.addError(e, stackTrace);
+        }
+      }
+    }
+  }
+
+  /// Surge 리스트 생성
+  List<Surge> _createSurgeList(Map<String, SurgeData> surgeMap, String timeFrame) {
+    final now = DateTime.now();
+    final startTime = _timeFrameStartTimes[timeFrame] ?? now;
+    
+    final surgeList = surgeMap.entries
+        .where((entry) => entry.value.basePrice != null && entry.value.changePercent != 0)
+        .map((entry) => Surge(
+              market: entry.key,
+              changePercent: entry.value.changePercent,
+              basePrice: entry.value.basePrice!,
+              currentPrice: entry.value.currentPrice,
+              lastUpdatedMs: now.millisecondsSinceEpoch,
+              timeFrame: timeFrame,
+              timeFrameStartMs: startTime.millisecondsSinceEpoch,
+            ))
+        .toList();
+
+    // 변동률 실제값 기준으로 정렬 (급등이 위에, 급락이 아래에)
+    surgeList.sort((a, b) => b.changePercent.compareTo(a.changePercent));
+    
+    return surgeList;
+  }
+
+  /// 특정 시간대 데이터 리셋
+  void _resetTimeFrameData(String timeFrameStr) {
+    // 변동률 리셋: 현재 가격을 새로운 basePrice로 설정
+    final surgeMap = _surgeByTimeFrame[timeFrameStr];
+    if (surgeMap != null) {
+      for (final surgeData in surgeMap.values) {
+        surgeData.reset(surgeData.currentPrice);
+      }
+    }
+    
+    // 리셋 후 Surge 리스트 전송
+    final surgeList = _createSurgeList(surgeMap ?? {}, timeFrameStr);
+    final controller = _surgeControllers[timeFrameStr];
+    if (controller != null && !controller.isClosed) {
+      controller.add(surgeList);
+    }
+    
+    if (kDebugMode) {
+      debugPrint('SurgeRepository: Reset completed for $timeFrameStr with ${surgeList.length} items');
+    }
+  }
+
+  @override
+  void resetTimeFrame(String timeFrame) {
+    debugPrint('SurgeRepository: Manual reset timeFrame: $timeFrame');
+    _resetTimeFrameData(timeFrame);
+  }
+
+  @override
+  void resetAllTimeFrames() {
+    debugPrint('SurgeRepository: Manual reset all timeFrames');
+    for (final timeFrameStr in _surgeByTimeFrame.keys) {
+      _resetTimeFrameData(timeFrameStr);
+    }
+  }
+
+  @override
+  DateTime? getNextResetTime(String timeFrame) {
+    final startTime = _timeFrameStartTimes[timeFrame];
+    if (startTime == null) return null;
+    
+    final timeFrameMinutes = int.tryParse(timeFrame.replaceAll('m', ''));
+    if (timeFrameMinutes == null) return null;
+    
+    return startTime.add(Duration(minutes: timeFrameMinutes));
+  }
+
+  @override
+  List<String> getActiveTimeFrames() {
+    return AppConfig.timeFrames.map((tf) => '${tf}m').toList();
+  }
+
+  @override
+  bool isTimeFrameActive(String timeFrame) {
+    final activeFrames = AppConfig.timeFrames.map((tf) => '${tf}m').toList();
+    return activeFrames.contains(timeFrame);
+  }
+
+  @override
+  Future<void> dispose() async {
+    if (_disposed) return;
+    
+    debugPrint('SurgeRepository: dispose() called');
+    _disposed = true;
+    
+    // 타이머 정리
+    _batchUpdateTimer?.cancel();
+    
+    // 스트림 구독 정리
+    await _masterSubscription?.cancel();
+    
+    // 컨트롤러들 정리
+    for (final controller in _surgeControllers.values) {
+      await controller.close();
+    }
+    
+    // 데이터 정리
+    _surgeByTimeFrame.clear();
+    _seenIds.clear();
+    _timeFrameStartTimes.clear();
+    
+    debugPrint('SurgeRepository: dispose completed');
+  }
+}\n\n// ====== lib/domain/repositories/surge_repository.dart ======\n
+// lib/domain/repositories/surge_repository.dart
+import '../entities/surge.dart';
+
+/// 급등/급락 데이터의 시간대별 변동률 추적 및 리셋을 관리하는 Repository
+abstract class SurgeRepository {
+  /// 시간대별 변동률 스트림 제공 (Surge 엔티티 리스트)
+  /// [timeFrame]: 시간대 (예: "1m", "5m", "15m")
+  /// [markets]: 모니터링할 마켓 코드 리스트
+  /// Returns: Surge 엔티티 리스트 (변동률 절댓값 순 정렬)
+  Stream<List<Surge>> watchSurgeByTimeFrame(String timeFrame, List<String> markets);
+  
+  /// 특정 시간대 수동 리셋
+  /// [timeFrame]: 리셋할 시간대
+  void resetTimeFrame(String timeFrame);
+  
+  /// 모든 시간대 수동 리셋
+  void resetAllTimeFrames();
+  
+  /// 다음 리셋 예정 시간 조회
+  /// [timeFrame]: 시간대
+  /// Returns: 다음 리셋 시간 (null이면 리셋 정보 없음)
+  DateTime? getNextResetTime(String timeFrame);
+  
+  /// 활성화된 시간대 목록 조회
+  /// Returns: 사용 가능한 시간대 리스트 (예: ["1m", "5m", "15m"])
+  List<String> getActiveTimeFrames();
+  
+  /// 특정 시간대가 활성화되어 있는지 확인
+  /// [timeFrame]: 확인할 시간대
+  /// Returns: 활성화 여부
+  bool isTimeFrameActive(String timeFrame);
+  
+  /// 리소스 해제
+  Future<void> dispose();
+}\n\n// ====== lib/domain/usecases/surge_usecase.dart ======\n
+import 'package:flutter/foundation.dart';
+import '../../core/config/app_config.dart';
+import '../entities/surge.dart';
+
+/// 🔥 A+급 SurgeUsecase - 완전한 타입 안전성 + 함수형 설계
+/// - 모든 dynamic 제거로 컴파일타임 안전성 보장
+/// - 순수 함수 + 불변성 철저히 적용
+/// - 비즈니스 규칙을 enum/config로 추상화
+/// - 성능 최적화된 알고리즘 적용
+class SurgeUsecase {
+  // 🔥 Repository는 향후 확장을 위해 보관 (현재는 순수 함수만 사용)
+
+  // 🎯 성능 최적화 상수 (설정으로 외부화)
+  static const int maxSurges = 200;
+  static const int maxCacheSize = 1000;
+
+  // 🎯 생성자에서 repository 제거 (순수 함수형 유틸리티로 사용)
+  const SurgeUsecase();
+
+  /// 🔥 완전한 타입 안전성: PriceData 인터페이스 정의
+  /// dynamic 완전 제거!
+  List<Surge> calculateSurgeList(
+    Map<String, PriceData> surgeMap, // 🎯 dynamic → PriceData
+    String timeFrame,
+    DateTime startTime,
+  ) {
+    if (!isValidTimeFrame(timeFrame)) return <Surge>[];
+
+    final now = DateTime.now();
+    
+    // 🔥 함수형 체이닝으로 깔끔하게
+    return surgeMap.entries
+        .where(_hasValidPriceData)
+        .map((entry) => _createSurge(entry, timeFrame, now, startTime))
+        .where(_isValidSurge)
+        .toList()
+      ..sort(_compareByChangePercent)
+      ..take(maxSurges);
+  }
+
+  /// 🎯 순수 함수: 유효한 가격 데이터 체크
+  bool _hasValidPriceData(MapEntry<String, PriceData> entry) {
+    final data = entry.value;
+    return data.basePrice > 0 && data.changePercent != 0;
+  }
+
+  /// 🎯 순수 함수: Surge 객체 생성
+  Surge _createSurge(
+    MapEntry<String, PriceData> entry,
+    String timeFrame,
+    DateTime now,
+    DateTime startTime,
+  ) {
+    final data = entry.value;
+    return Surge(
+      market: entry.key,
+      changePercent: data.changePercent,
+      basePrice: data.basePrice,
+      currentPrice: data.currentPrice,
+      lastUpdatedMs: now.millisecondsSinceEpoch,
+      timeFrame: timeFrame,
+      timeFrameStartMs: startTime.millisecondsSinceEpoch,
+    );
+  }
+
+  /// 🎯 순수 함수: 변동률 비교 (내림차순)
+  int _compareByChangePercent(Surge a, Surge b) => 
+      b.changePercent.compareTo(a.changePercent);
+
+  /// 🔥 비즈니스 규칙 enum화 - 타입 안전성 극대화
+  bool isValidTimeFrame(String timeFrame) => 
+      SurgeTimeFrame.isValid(timeFrame);
+
+  /// 🎯 함수형 체이닝: 필터링 메서드들
+  List<Surge> filterByMinimumPercent(List<Surge> surges, double threshold) =>
+      surges.where((s) => s.changePercent.abs() >= threshold).toList();
+
+  List<Surge> filterRisingOnly(List<Surge> surges) =>
+      surges.where((s) => s.isRising).toList(); // 🔥 entity 메서드 활용
+
+  List<Surge> filterFallingOnly(List<Surge> surges) =>
+      surges.where((s) => s.isFalling).toList(); // 🔥 entity 메서드 활용
+
+  /// 🔥 고성능 정렬: 기본값으로 최적화
+  List<Surge> sortByChangePercent(List<Surge> surges, {bool descending = true}) {
+    return List<Surge>.from(surges)
+      ..sort(descending ? _compareByChangePercent : _compareByChangePercentAsc);
+  }
+
+  int _compareByChangePercentAsc(Surge a, Surge b) => 
+      a.changePercent.compareTo(b.changePercent);
+
+  /// 🎯 함수형: 크기 제한
+  List<Surge> limitCount(List<Surge> surges, [int? maxCount]) =>
+      surges.take(maxCount ?? maxSurges).toList();
+
+  /// 🔥 entity 검증 메서드 활용으로 중복 제거
+  bool _isValidSurge(Surge surge) => surge.hasChange; // entity 메서드 활용
+
+  /// 🎯 고성능 집계: fold 사용
+  double calculateTotalChangePercent(Map<String, PriceData> surgeMap) =>
+      surgeMap.values.fold(0.0, (sum, data) => sum + data.changePercent);
+
+  int getActiveSurgeCount(Map<String, PriceData> surgeMap) =>
+      surgeMap.values.where((data) => data.changePercent != 0).length;
+
+  /// 🔥 비즈니스 규칙 함수화
+  bool isSurgeAboveThreshold(double changePercent, double threshold) =>
+      changePercent.abs() > threshold;
+
+  bool isKrwMarket(String market) => market.startsWith('KRW-');
+
+  /// 🎯 설정 기반 메서드들
+  List<String> getActiveTimeFrames() => SurgeTimeFrame.allActive();
+  
+  String getTimeFrameDisplayName(String timeFrame) => 
+      SurgeTimeFrame.getDisplayName(timeFrame);
+
+  /// 🔥 시간 계산 메서드들 - null 안전성 보장
+  int? parseTimeFrameMinutes(String timeFrame) => 
+      SurgeTimeFrame.parseMinutes(timeFrame);
+
+  DateTime? calculateNextResetTime(String timeFrame, DateTime startTime) {
+    final minutes = parseTimeFrameMinutes(timeFrame);
+    return minutes != null ? startTime.add(Duration(minutes: minutes)) : null;
+  }
+
+  Duration? getTimeUntilReset(String timeFrame, DateTime startTime) {
+    final nextReset = calculateNextResetTime(timeFrame, startTime);
+    if (nextReset == null) return null;
+    
+    final remaining = nextReset.difference(DateTime.now());
+    return remaining.isNegative ? Duration.zero : remaining;
+  }
+
+  /// 🎯 유틸리티 함수들 - 함수형 스타일
+  String formatChangePercent(double changePercent) {
+    final sign = changePercent >= 0 ? '+' : '';
+    return '$sign${changePercent.toStringAsFixed(2)}%';
+  }
+
+  String formatPrice(double price) {
+    return price >= 1000000 ? '${(price / 1000000).toStringAsFixed(1)}M'
+         : price >= 1000 ? '${(price / 1000).toStringAsFixed(1)}K'
+         : price.toStringAsFixed(0);
+  }
+
+  /// 🔥 고성능 순위 계산: Map.fromIterables 사용
+  Map<String, int> calculateSurgeRanks(List<Surge> surges) {
+    final markets = surges.map((s) => s.market);
+    final ranks = Iterable.generate(surges.length, (i) => i + 1);
+    return Map.fromIterables(markets, ranks);
+  }
+
+  /// 🎯 진행률 계산 - clamp으로 안전성 보장
+  double calculateTimeFrameProgress(String timeFrame, DateTime startTime) {
+    final minutes = parseTimeFrameMinutes(timeFrame);
+    if (minutes == null) return 0.0;
+    
+    final elapsed = DateTime.now().difference(startTime);
+    final progress = elapsed.inMilliseconds / Duration(minutes: minutes).inMilliseconds;
+    return progress.clamp(0.0, 1.0);
+  }
+
+  /// 🔥 완전한 함수형: 통계 계산 최적화
+  SurgeStatistics calculateSurgeStatistics(List<Surge> surges) {
+    if (surges.isEmpty) return SurgeStatistics.empty();
+
+    final changes = surges.map((s) => s.changePercent).toList();
+    final risingCount = surges.where((s) => s.isRising).length;
+    final fallingCount = surges.where((s) => s.isFalling).length;
+    
+    return SurgeStatistics(
+      totalCount: surges.length,
+      risingCount: risingCount,
+      fallingCount: fallingCount,
+      averageChange: changes.reduce((a, b) => a + b) / changes.length,
+      maxRise: changes.reduce((a, b) => a > b ? a : b),
+      maxFall: changes.reduce((a, b) => a < b ? a : b),
+    );
+  }
+
+  /// 🔥 enum 기반 분류: 타입 안전성 + 성능 최적화
+  Map<SurgeRangeType, List<Surge>> classifySurgesByRange(List<Surge> surges) {
+    final classification = <SurgeRangeType, List<Surge>>{};
+    
+    // 모든 범위 타입 초기화
+    for (final type in SurgeRangeType.values) {
+      classification[type] = <Surge>[];
+    }
+    
+    // 한 번의 순회로 모든 분류 완료
+    for (final surge in surges) {
+      final rangeType = SurgeRangeType.fromPercent(surge.changePercent);
+      classification[rangeType]!.add(surge);
+    }
+    
+    return classification;
+  }
+}
+
+/// 🔥 타입 안전성: PriceData 인터페이스 정의
+/// dynamic 완전 제거를 위한 추상화
+abstract class PriceData {
+  double get basePrice;
+  double get currentPrice;
+  double get changePercent;
+}
+
+/// 🔥 비즈니스 규칙 enum화: TimeFrame 관리
+enum SurgeTimeFrame {
+  min1(1, '1분'),
+  min5(5, '5분'),
+  min15(15, '15분'),
+  min30(30, '30분'),
+  min60(60, '1시간'),
+  hour2(120, '2시간'),
+  hour4(240, '4시간'),
+  hour8(480, '8시간'),
+  hour12(720, '12시간'),
+  day1(1440, '1일');
+
+  const SurgeTimeFrame(this.minutes, this.displayName);
+  final int minutes;
+  final String displayName;
+  
+  String get key => '${minutes}m';
+  
+  static bool isValid(String timeFrame) => 
+      values.any((tf) => tf.key == timeFrame);
+  
+  static List<String> allActive() => 
+      AppConfig.timeFrames.map((tf) => '${tf}m').toList();
+  
+  static String getDisplayName(String timeFrame) {
+    final tf = values.where((tf) => tf.key == timeFrame).firstOrNull;
+    return tf?.displayName ?? timeFrame;
+  }
+  
+  static int? parseMinutes(String timeFrame) => 
+      int.tryParse(timeFrame.replaceAll('m', ''));
+}
+
+/// 🔥 변동률 범위 enum: 타입 안전성 + 성능 최적화
+enum SurgeRangeType {
+  extremeRise(10, double.infinity, 'extreme_rise'),
+  strongRise(5, 10, 'strong_rise'),
+  moderateRise(2, 5, 'moderate_rise'),
+  slightRise(0, 2, 'slight_rise'),
+  slightFall(-2, 0, 'slight_fall'),
+  moderateFall(-5, -2, 'moderate_fall'),
+  strongFall(-10, -5, 'strong_fall'),
+  extremeFall(double.negativeInfinity, -10, 'extreme_fall');
+
+  const SurgeRangeType(this.minPercent, this.maxPercent, this.key);
+  final double minPercent;
+  final double maxPercent;
+  final String key;
+  
+  static SurgeRangeType fromPercent(double percent) {
+    return values.firstWhere(
+      (type) => percent >= type.minPercent && percent < type.maxPercent,
+      orElse: () => percent >= 0 ? slightRise : slightFall,
+    );
+  }
+}
+
+/// 🔥 통계 데이터 불변 클래스: 타입 안전성
+@immutable
+class SurgeStatistics {
+  final int totalCount;
+  final int risingCount;
+  final int fallingCount;
+  final double averageChange;
+  final double maxRise;
+  final double maxFall;
+
+  const SurgeStatistics({
+    required this.totalCount,
+    required this.risingCount,
+    required this.fallingCount,
+    required this.averageChange,
+    required this.maxRise,
+    required this.maxFall,
+  });
+
+  factory SurgeStatistics.empty() => const SurgeStatistics(
+    totalCount: 0,
+    risingCount: 0,
+    fallingCount: 0,
+    averageChange: 0.0,
+    maxRise: 0.0,
+    maxFall: 0.0,
   );
-});\n\n// ====== lib/features/surge/presentation/pages/surge_page.dart ======\n
+}\n\n// ====== lib/domain/entities/surge.dart ======\n
+// lib/domain/entities/surge.dart
+import 'package:equatable/equatable.dart';
+import '../../core/config/app_config.dart';
+
+/// 순수 도메인 모델: 급등/급락 데이터 비즈니스 로직
+class Surge extends Equatable {
+  /// 시장 코드 (예: "KRW-BTC")
+  final String market;
+  
+  /// 해당 시간대 변동률 (퍼센트 기준)
+  final double changePercent;
+  
+  /// 시간대 시작 가격
+  final double basePrice;
+  
+  /// 현재 가격
+  final double currentPrice;
+  
+  /// 마지막 업데이트 시간 (UTC 밀리초)
+  final int lastUpdatedMs;
+  
+  /// 시간대 (예: "1m", "5m", "15m")
+  final String timeFrame;
+  
+  /// 해당 시간대 시작 시간 (UTC 밀리초)
+  final int timeFrameStartMs;
+
+  const Surge({
+    required this.market,
+    required this.changePercent,
+    required this.basePrice,
+    required this.currentPrice,
+    required this.lastUpdatedMs,
+    required this.timeFrame,
+    required this.timeFrameStartMs,
+  });
+
+  @override
+  List<Object?> get props => [
+    market,
+    changePercent,
+    basePrice,
+    currentPrice,
+    lastUpdatedMs,
+    timeFrame,
+    timeFrameStartMs,
+  ];
+
+  /// 마지막 업데이트 DateTime 변환
+  DateTime get lastUpdated => DateTime.fromMillisecondsSinceEpoch(lastUpdatedMs);
+  
+  /// 시간대 시작 DateTime 변환
+  DateTime get timeFrameStart => DateTime.fromMillisecondsSinceEpoch(timeFrameStartMs);
+  
+  /// 시간대 종료 예정 시간
+  DateTime get timeFrameEnd {
+    final duration = _getTimeFrameDuration();
+    return timeFrameStart.add(duration);
+  }
+  
+  /// 현재 시간대 남은 시간 (초)
+  int get remainingSeconds {
+    final now = DateTime.now();
+    final remaining = timeFrameEnd.difference(now).inSeconds;
+    return remaining > 0 ? remaining : 0;
+  }
+  
+  /// 현재 시간대 남은 시간 포맷 (예: "3:42", "12:18")
+  String get remainingTimeFormatted {
+    final remaining = remainingSeconds;
+    if (remaining <= 0) return "00:00";
+    
+    final hours = remaining ~/ 3600;
+    final minutes = (remaining % 3600) ~/ 60;
+    final seconds = remaining % 60;
+    
+    if (hours > 0) {
+      return "${hours.toString().padLeft(2, '0')}:${minutes.toString().padLeft(2, '0')}:${seconds.toString().padLeft(2, '0')}";
+    } else {
+      return "${minutes.toString().padLeft(2, '0')}:${seconds.toString().padLeft(2, '0')}";
+    }
+  }
+  
+  /// 시간대별 Duration 계산 (AppConfig.timeFrames 활용)
+  Duration _getTimeFrameDuration() {
+    // timeFrame에서 분 단위 추출 ("15m" → 15)
+    final minutes = int.tryParse(timeFrame.replaceAll('m', ''));
+    if (minutes != null && AppConfig.timeFrames.contains(minutes)) {
+      return Duration(minutes: minutes);
+    }
+    return const Duration(minutes: 15); // 기본값
+  }
+  
+  /// 변동이 유의미한지 체크 (0이 아님)
+  bool get hasChange => changePercent != 0;
+  
+  /// 급등인지 체크 (양수)
+  bool get isRising => changePercent > 0;
+  
+  /// 급락인지 체크 (음수)
+  bool get isFalling => changePercent < 0;
+  
+  /// 변동률 절댓값
+  double get absChangePercent => changePercent.abs();
+  
+  /// 코인 티커만 추출 (KRW- 제거)
+  String get ticker => market.replaceFirst('KRW-', '');
+  
+  /// 변동률 포맷팅 (예: "+12.34%", "-5.67%")
+  String get formattedChangePercent {
+    final sign = changePercent >= 0 ? '+' : '';
+    return '$sign${changePercent.toStringAsFixed(2)}%';
+  }
+  
+  /// 복사본 생성 (불변성 유지)
+  Surge copyWith({
+    String? market,
+    double? changePercent,
+    double? basePrice,
+    double? currentPrice,
+    int? lastUpdatedMs,
+    String? timeFrame,
+    int? timeFrameStartMs,
+  }) {
+    return Surge(
+      market: market ?? this.market,
+      changePercent: changePercent ?? this.changePercent,
+      basePrice: basePrice ?? this.basePrice,
+      currentPrice: currentPrice ?? this.currentPrice,
+      lastUpdatedMs: lastUpdatedMs ?? this.lastUpdatedMs,
+      timeFrame: timeFrame ?? this.timeFrame,
+      timeFrameStartMs: timeFrameStartMs ?? this.timeFrameStartMs,
+    );
+  }
+}\n\n// ====== lib/presentation/controllers/surge_controller.dart ======\n
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../core/di/surge_provider.dart';
+import '../../domain/entities/surge.dart';
+import '../../shared/utils/rank_tracker.dart';
+import '../../shared/utils/rank_hot_mixin.dart';
+
+/// 🎯 완전 수정된 SurgeController - TimeFrame enum 기반 + 타이머 동기화
+class SurgeController extends StateNotifier<SurgeControllerState> with RankHotMixin {
+  final Ref _ref;
+  
+  // ✅ 순위 추적기 (블링크용)
+  final RankTracker _rankTracker = RankTracker();
+  
+  // ✅ 시간대별 블링크 상태 관리 (TimeFrame enum 기반)
+  final Map<TimeFrame, Map<String, bool>> _blinkStatesByTimeFrame = {};
+  
+  // ✅ Provider 구독 관리
+  final List<ProviderSubscription> _subscriptions = [];
+
+  SurgeController(this._ref) : super(const SurgeControllerState()) {
+    _initializeAllStates();
+    _initializeDataSubscription();
+  }
+
+  /// ✅ 모든 상태 초기화
+  void _initializeAllStates() {
+    clearAllHot();
+    _rankTracker.clearAll();
+    _blinkStatesByTimeFrame.clear();
+  }
+
+  /// 🔥 통합 데이터 구독 초기화
+  void _initializeDataSubscription() {
+    final subscription = _ref.listen(
+      surgeDataProvider,
+      (previous, next) {
+        next.when(
+          data: (event) {
+            // 🚀 데이터 처리 (이중 정렬 제거)
+            _processSurgeData(event.surges);
+            
+            // 🔥 리셋 정보 처리 (새로운 SurgeEvent 구조)
+            if (event.isReset) {
+              clearTimeFrameHot(event.timeFrame.key);
+              _clearTimeFrameBlinkStates(event.timeFrame);
+            }
+          },
+          loading: () => state = state.copyWith(isLoading: true),
+          error: (error, _) => state = state.copyWith(
+            errorMessage: error.toString(),
+            isLoading: false,
+          ),
+        );
+      },
+    );
+    _subscriptions.add(subscription);
+  }
+
+  /// ✅ 급등/급락 데이터 처리 - 이중 정렬 제거
+  void _processSurgeData(List<Surge> surges) {
+    // ✅ Provider에서 이미 정렬된 데이터를 필터링 + 제한만 적용
+    final processedSurges = _applyFilterAndLimit(surges);
+    
+    // ✅ 모든 상태 미리 계산
+    _calculateAllStates(processedSurges);
+    
+    // ✅ 상태 업데이트
+    state = state.copyWith(
+      surges: processedSurges,
+      isLoading: false,
+      errorMessage: null,
+    );
+  }
+
+  /// ✅ 필터링 + 제한만 적용 (정렬은 Provider에서 완료)
+  List<Surge> _applyFilterAndLimit(List<Surge> surges) {
+    // 1) 필터 타입에 따른 필터링만
+    List<Surge> filteredData = _applyFilter(surges, state.filterType);
+    
+    // 2) 필터 타입에 따른 재정렬 (Provider 정렬과 다른 경우만)
+    if (state.filterType == SurgeFilterType.fallingOnly) {
+      // 하락만: 하락 큰 순서 (오름차순) - Provider와 다름
+      filteredData.sort((a, b) => a.changePercent.compareTo(b.changePercent));
+    }
+    // 전체/상승: Provider에서 이미 내림차순 정렬되어 있음
+    
+    // 3) 제한만 적용
+    final int limit = state.isTop100 ? 100 : 50;
+    return filteredData.take(limit).toList();
+  }
+
+  /// ✅ 필터 타입 적용 (Provider에서 받은 원본 데이터 기준)
+  List<Surge> _applyFilter(List<Surge> surgeData, SurgeFilterType filterType) {
+    switch (filterType) {
+      case SurgeFilterType.all:
+        return surgeData.where((s) => s.hasChange).toList();
+      case SurgeFilterType.risingOnly:
+        return surgeData.where((s) => s.isRising).toList();
+      case SurgeFilterType.fallingOnly:
+        return surgeData.where((s) => s.isFalling).toList();
+    }
+  }
+
+  /// ✅ 모든 아이템의 상태 미리 계산 - TimeFrame enum 기반
+  void _calculateAllStates(List<Surge> processedSurges) {
+    final currentTimeFrame = this.currentTimeFrame;
+    final currentTimeFrameKey = currentTimeFrame.key; // TimeFrame → String
+    
+    // ✅ 시간대 초기화 (String key 사용 - Mixin 호환)
+    initializeTimeFrame(currentTimeFrameKey);
+    _rankTracker.initializeTimeFrame(currentTimeFrameKey);
+    
+    // ✅ 현재 시간대 블링크 상태 초기화 (TimeFrame enum 사용)
+    _initializeTimeFrameBlinkStates(currentTimeFrame);
+    
+    for (int i = 0; i < processedSurges.length; i++) {
+      final surge = processedSurges[i];
+      final market = surge.market;
+      final currentRank = i + 1;
+      
+      // ✅ HOT 상태는 Mixin에서 직접 관리 (String key 사용)
+      checkIfHot(
+        key: market,
+        currentRank: currentRank,
+        timeFrame: currentTimeFrameKey,
+        menuType: 'surge',
+      );
+      
+      // ✅ 블링크 상태 계산 (Surge 전용 메서드 사용)
+      final blinkStates = _blinkStatesByTimeFrame[currentTimeFrame]!;
+      
+      // 급등 체크 (순위 상승 + 실제 수치 개선)
+      final isRankUp = _rankTracker.checkRankChangeWithValue(
+        key: market,
+        currentRank: currentRank,
+        currentValue: surge.changePercent,
+        timeFrame: currentTimeFrameKey,
+      );
+      
+      // 급락 체크 (순위 하락 + 실제 수치 악화)  
+      final isRankDown = _rankTracker.checkRankDropWithValue(
+        key: market,
+        currentRank: currentRank,
+        currentValue: surge.changePercent,
+        timeFrame: currentTimeFrameKey,
+      );
+      
+      // 의미있는 변화가 있을 때만 블링크
+      blinkStates[market] = isRankUp || isRankDown;
+    }
+  }
+
+  /// ✅ 시간대별 블링크 상태 초기화 (TimeFrame enum)
+  void _initializeTimeFrameBlinkStates(TimeFrame timeFrame) {
+    if (!_blinkStatesByTimeFrame.containsKey(timeFrame)) {
+      _blinkStatesByTimeFrame[timeFrame] = <String, bool>{};
+    }
+  }
+
+  /// ✅ 특정 시간대 블링크 상태 초기화 (TimeFrame enum)
+  void _clearTimeFrameBlinkStates(TimeFrame timeFrame) {
+    _blinkStatesByTimeFrame[timeFrame]?.clear();
+  }
+
+  /// ✅ Top 50/100 토글 - Provider 구독 이슈 해결
+  void toggleTopLimit() {
+    state = state.copyWith(isTop100: !state.isTop100);
+    
+    // ✅ 현재 데이터로 재처리 (read + whenData 문제 해결)
+    if (state.surges.isNotEmpty) {
+      final currentState = _ref.read(surgeDataProvider).value;
+      if (currentState != null) {
+        _processSurgeData(currentState.surges);
+      }
+    }
+  }
+
+  /// ✅ 필터 타입 변경 - Provider 구독 이슈 해결
+  void setFilterType(SurgeFilterType filterType) {
+    state = state.copyWith(filterType: filterType);
+    
+    // ✅ 현재 데이터로 재처리
+    if (state.surges.isNotEmpty) {
+      final currentState = _ref.read(surgeDataProvider).value;
+      if (currentState != null) {
+        _processSurgeData(currentState.surges);
+      }
+    }
+  }
+
+  /// 🔥 시간대 변경 - timeFrameControllerProvider로 수정
+  void setTimeFrame(TimeFrame timeFrame) {
+    _ref.read(timeFrameControllerProvider).setTimeFrame(timeFrame);
+    // 🎯 상태 초기화 제거 - 각 시간대가 독립적으로 유지됨
+  }
+
+  /// 🔥 시간대 변경 (인덱스 기반) - 호환성 유지
+  void setTimeFrameByIndex(int index) {
+    final availableTimeFrames = TimeFrame.fromAppConfig();
+    if (index >= 0 && index < availableTimeFrames.length) {
+      setTimeFrame(availableTimeFrames[index]);
+    }
+  }
+
+  /// ✅ 현재 표시 개수
+  int get currentLimit => state.isTop100 ? 100 : 50;
+  
+  /// ✅ 현재 표시 모드 이름
+  String get currentLimitName => state.isTop100 ? 'Top 100' : 'Top 50';
+
+  /// ✅ 현재 필터 타입 이름
+  String get currentFilterName {
+    switch (state.filterType) {
+      case SurgeFilterType.all:
+        return '전체';
+      case SurgeFilterType.risingOnly:
+        return '상승';
+      case SurgeFilterType.fallingOnly:
+        return '하락';
+    }
+  }
+
+  /// ✅ HOT 상태 조회 (String key 사용 - Mixin 호환)
+  bool isHot(String market) {
+    final hotItems = getHotItems(currentTimeFrame.key);
+    return hotItems.contains(market);
+  }
+
+  /// ✅ 블링크 상태 조회 - TimeFrame enum 기반
+  bool shouldBlink(String market) {
+    final currentTimeFrame = this.currentTimeFrame;
+    final blinkStates = _blinkStatesByTimeFrame[currentTimeFrame];
+    return blinkStates?[market] ?? false;
+  }
+
+  /// ✅ 블링크 상태 초기화 - 강제 notify 문제 해결
+  void clearBlinkState(String market) {
+    final currentTimeFrame = this.currentTimeFrame;
+    final blinkStates = _blinkStatesByTimeFrame[currentTimeFrame];
+    if (blinkStates != null) {
+      blinkStates[market] = false;
+      // ✅ 실제 변화가 있을 때만 notify (불필요한 copyWith 제거)
+    }
+  }
+
+  /// ✅ 급등/급락 카운트 계산
+  Map<String, int> getSurgeCount() {
+    final risingCount = state.surges.where((s) => s.isRising).length;
+    final fallingCount = state.surges.where((s) => s.isFalling).length;
+    
+    return {
+      'rising': risingCount,
+      'falling': fallingCount,
+    };
+  }
+
+  /// ✅ TimeFrame 관련 메서드들 - timeFrameControllerProvider로 수정
+  TimeFrame get currentTimeFrame => _ref.read(timeFrameControllerProvider).currentTimeFrame;
+  
+  int get currentIndex => _ref.read(timeFrameControllerProvider).currentIndex;
+  
+  List<TimeFrame> get availableTimeFrames => _ref.read(timeFrameControllerProvider).availableTimeFrames;
+
+  String getTimeFrameName(TimeFrame timeFrame) {
+    return _ref.read(timeFrameControllerProvider).getTimeFrameName(timeFrame);
+  }
+
+  void resetCurrentTimeFrame() {
+    _ref.read(timeFrameControllerProvider).resetCurrentTimeFrame();
+  }
+
+  void resetAllTimeFrames() {
+    _ref.read(timeFrameControllerProvider).resetAllTimeFrames();
+  }
+
+  /// 🔥 완벽한 타이머 동기화 - timeFrameControllerProvider 사용
+  DateTime? getNextResetTime() {
+    return _ref.read(timeFrameControllerProvider).getNextResetTime();
+  }
+
+  /// ✅ 디버깅용 메서드들
+  Map<String, int> getBlinkDebugInfo() {
+    return _rankTracker.getDebugInfo();
+  }
+
+  /// ✅ 메모리 정리
+  void cleanupExpiredStates() {
+    cleanupExpiredHotStates();
+    _cleanupOldBlinkStates();
+  }
+
+  /// ✅ 오래된 블링크 상태 정리 (TimeFrame enum 기반)
+  void _cleanupOldBlinkStates() {
+    final currentTimeFrame = this.currentTimeFrame;
+    final availableTimeFrames = this.availableTimeFrames.toSet();
+    
+    _blinkStatesByTimeFrame.removeWhere((timeFrame, _) => 
+      timeFrame != currentTimeFrame && !availableTimeFrames.contains(timeFrame)
+    );
+  }
+
+  /// ✅ 리소스 정리
+  @override
+  void dispose() {
+    // Provider 구독 해제
+    for (final subscription in _subscriptions) {
+      subscription.close();
+    }
+    _subscriptions.clear();
+    
+    // ✅ 모든 리소스 정리
+    disposeHot();
+    _rankTracker.dispose();
+    _blinkStatesByTimeFrame.clear();
+    
+    super.dispose();
+  }
+}
+
+/// ✅ 상태 클래스 (변경 없음)
+class SurgeControllerState {
+  final List<Surge> surges;           // 정렬/필터링된 급등/급락 데이터
+  final bool isTop100;               // Top 50/100 모드
+  final SurgeFilterType filterType;  // 필터 타입
+  final bool isLoading;              // 로딩 상태
+  final String? errorMessage;        // 에러 메시지
+
+  const SurgeControllerState({
+    this.surges = const [],
+    this.isTop100 = false,
+    this.filterType = SurgeFilterType.all,
+    this.isLoading = false,
+    this.errorMessage,
+  });
+
+  SurgeControllerState copyWith({
+    List<Surge>? surges,
+    bool? isTop100,
+    SurgeFilterType? filterType,
+    bool? isLoading,
+    String? errorMessage,
+  }) {
+    return SurgeControllerState(
+      surges: surges ?? this.surges,
+      isTop100: isTop100 ?? this.isTop100,
+      filterType: filterType ?? this.filterType,
+      isLoading: isLoading ?? this.isLoading,
+      errorMessage: errorMessage ?? this.errorMessage,
+    );
+  }
+}
+
+/// Surge 필터 타입 enum
+enum SurgeFilterType {
+  all,        // 전체
+  risingOnly, // 상승만
+  fallingOnly // 하락만
+}
+
+/// Provider 선언 - UI용 SurgeController
+final surgeControllerProvider = StateNotifierProvider<SurgeController, SurgeControllerState>(
+  (ref) => SurgeController(ref),
+);\n\n// ====== lib/presentation/pages/surge_page.dart ======\n
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import '../../../../shared/widgets/common_app_bar.dart';
-import '../providers/surge_provider.dart';
+import '../../core/config/app_config.dart';
+import '../../core/di/app_providers.dart';
+import '../../core/di/surge_provider.dart';
+import '../../shared/widgets/slider_widget.dart';
+import '../controllers/surge_controller.dart';
 import '../widgets/surge_tile.dart';
 
 class SurgePage extends ConsumerWidget {
-  const SurgePage({super.key});
+  final ScrollController scrollController;
+
+  const SurgePage({
+    Key? key,
+    required this.scrollController,
+  }) : super(key: key);
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final surgeAsync = ref.watch(surgeProvider);
-
-    return Scaffold(
-      appBar: const CommonAppBar(title: '급등락 포착'),
-      body: surgeAsync.when(
-        data: (items) {
-          if (items.isEmpty) {
-            return const Center(
-              child: Text(
-                '포착된 급등락이 없습니다.',
-                style: TextStyle(color: Colors.grey),
-              ),
-            );
-          }
-
-          return ListView.builder(
-            itemCount: items.length,
-            padding: const EdgeInsets.all(16.0),
-            itemBuilder: (context, index) => SurgeTile(
-              item: items[index],
-              key: ValueKey(items[index].market + items[index].detectedAt.toString()),
-            ),
-          );
-        },
-        loading: () => const Center(child: CircularProgressIndicator()),
-        error: (error, stack) => Center(
-          child: Padding(
-            padding: const EdgeInsets.all(16.0),
-            child: Text(
-              '오류가 발생했습니다: $error',
-              style: const TextStyle(color: Colors.red),
-              textAlign: TextAlign.center,
+    // ✅ Controller state watch (데이터 + UI 상태)
+    final state = ref.watch(surgeControllerProvider);
+    final controller = ref.read(surgeControllerProvider.notifier);
+    
+    // ✅ TimeFrame 관련 - 직접 watch로 반응성 확보
+    final currentTimeFrame = ref.watch(selectedTimeFrameProvider);
+    final availableTimeFrames = TimeFrame.fromAppConfig();
+    final currentIndex = availableTimeFrames.indexOf(currentTimeFrame);
+    final timeFrameController = ref.read(timeFrameControllerProvider);
+    
+    // ✅ UI 설정
+    final sliderPosition = ref.watch(appSettingsProvider).sliderPosition;
+    
+    // ✅ 공통 슬라이더 위젯 - Surge 고유의 복잡한 5분할 구조
+    final sliderWidget = CommonSliderWidget(
+      leftText: '시간대: ${currentTimeFrame.displayName}',
+      sliderValue: currentIndex.toDouble(),
+      sliderMin: 0.0,
+      sliderMax: (availableTimeFrames.length - 1).toDouble(),
+      sliderDivisions: availableTimeFrames.length - 1,
+      sliderLabel: currentTimeFrame.displayName,
+      onSliderChanged: (value) {
+        final newIndex = value.round();
+        if (newIndex >= 0 && newIndex < availableTimeFrames.length) {
+          controller.setTimeFrame(availableTimeFrames[newIndex]); // ✅ 직접 호출로 즉시 반응
+        }
+      },
+      // 🔥 Surge 고유: 복잡한 5분할 레이아웃 (12-6-10-10-11)
+      extraWidgets: [
+        // 필터 토글 버튼 (6/49)
+        Expanded(
+          flex: 6,
+          child: Center(
+            child: CommonToggleButton(
+              text: controller.currentFilterName,
+              isActive: state.filterType != SurgeFilterType.all,
+              onTap: () {
+                // 필터 순환: 전체 → 급등만 → 급락만 → 전체
+                SurgeFilterType nextFilter;
+                switch (state.filterType) {
+                  case SurgeFilterType.all:
+                    nextFilter = SurgeFilterType.risingOnly;
+                    break;
+                  case SurgeFilterType.risingOnly:
+                    nextFilter = SurgeFilterType.fallingOnly;
+                    break;
+                  case SurgeFilterType.fallingOnly:
+                    nextFilter = SurgeFilterType.all;
+                    break;
+                }
+                controller.setFilterType(nextFilter);
+              },
+              activeColor: Colors.blue,
+              borderColor: Colors.blue,
+              fontSize: 10,
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
             ),
           ),
         ),
+        
+        // Top 50/100 토글 버튼 (10/49)
+        Expanded(
+          flex: 10,
+          child: Center(
+            child: CommonToggleButton(
+              text: controller.currentLimitName,
+              isActive: state.isTop100,
+              onTap: () => controller.toggleTopLimit(),
+              fontSize: 10,
+              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 6),
+            ),
+          ),
+        ),
+        
+        // 급등/급락 카운터 (10/49)
+        Expanded(
+          flex: 10,
+          child: Center(
+            child: _buildSurgeCounter(controller, state),
+          ),
+        ),
+      ],
+      rightWidget: CommonCountdownWidget(
+        nextResetTime: timeFrameController.getNextResetTime(), // 🔥 완벽한 타이머 동기화
       ),
-      floatingActionButton: FloatingActionButton(
-        onPressed: () {
-          // 임계값 설정 다이얼로그 표시
-          _showThresholdDialog(context, ref);
-        },
-        child: const Icon(Icons.tune),
-        tooltip: '급등락 기준 설정',
+    );
+
+    return PrimaryScrollController(
+      controller: scrollController,
+      child: Column(
+        children: [
+          if (sliderPosition == SliderPosition.top) sliderWidget,
+          Expanded(child: _buildSurgeList(state, controller, currentTimeFrame, context)),
+          if (sliderPosition == SliderPosition.bottom) sliderWidget,
+        ],
       ),
     );
   }
-  
-  // 임계값 설정 다이얼로그
-  Future<void> _showThresholdDialog(BuildContext context, WidgetRef ref) async {
-    final currentThreshold = ref.read(surgeThresholdProvider);
-    double newThreshold = currentThreshold;
+
+  /// ✅ 급등/급락 카운터 위젯
+  Widget _buildSurgeCounter(SurgeController controller, SurgeControllerState state) {
+    if (state.surges.isEmpty) {
+      return Container(
+        height: 29,
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(12),
+          color: Colors.grey.withValues(alpha: 0.1),
+        ),
+        child: const Center(
+          child: Text(
+            '로딩중',
+            style: TextStyle(fontSize: 8, color: Colors.grey),
+          ),
+        ),
+      );
+    }
+
+    final count = controller.getSurgeCount();
+    final risingCount = count['rising'] ?? 0;
+    final fallingCount = count['falling'] ?? 0;
     
-    return showDialog(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('급등락 감지 기준 설정'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Text('급등락 감지를 위한 변동률(%) 기준을 설정하세요.'),
-            const SizedBox(height: 16),
-            StatefulBuilder(
-              builder: (context, setState) => Column(
-                children: [
-                  Text('현재 값: ${newThreshold.toStringAsFixed(1)}%'),
-                  Slider(
-                    value: newThreshold,
-                    min: 0.5,
-                    max: 5.0,
-                    divisions: 45,
-                    label: '${newThreshold.toStringAsFixed(1)}%',
-                    onChanged: (value) {
-                      setState(() {
-                        newThreshold = value;
-                      });
-                    },
+    return Container(
+      height: 29,
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: Colors.grey.withValues(alpha: 0.3), width: 1),
+      ),
+      child: Row(
+        children: [
+          // 좌측: 급등 카운터 (초록 배경)
+          Expanded(
+            child: Container(
+              decoration: const BoxDecoration(
+                color: Colors.green,
+                borderRadius: BorderRadius.only(
+                  topLeft: Radius.circular(11),
+                  bottomLeft: Radius.circular(11),
+                ),
+              ),
+              child: Center(
+                child: Text(
+                  '$risingCount',
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 10,
+                    fontWeight: FontWeight.bold,
                   ),
-                ],
+                ),
               ),
             ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(),
-            child: const Text('취소'),
           ),
-          ElevatedButton(
-            onPressed: () {
-              ref.read(surgeProvider.notifier).setThreshold(newThreshold);
-              Navigator.of(context).pop();
-            },
-            child: const Text('설정'),
+          // 우측: 급락 카운터 (빨간 배경)
+          Expanded(
+            child: Container(
+              decoration: const BoxDecoration(
+                color: Colors.red,
+                borderRadius: BorderRadius.only(
+                  topRight: Radius.circular(11),
+                  bottomRight: Radius.circular(11),
+                ),
+              ),
+              child: Center(
+                child: Text(
+                  '$fallingCount',
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 10,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+            ),
           ),
         ],
       ),
     );
   }
-}\n\n// ====== lib/features/surge/presentation/widgets/surge_tile.dart ======\n
-import 'package:flutter/material.dart';
-import 'package:intl/intl.dart';
-import '../../domain/entities/surge_item.dart';
 
-class SurgeTile extends StatelessWidget {
-  final SurgeItem item;
+  /// ✅ 급등/급락 리스트 (Controller state 기반)
+  Widget _buildSurgeList(
+    SurgeControllerState state,
+    SurgeController controller,
+    TimeFrame currentTimeFrame,
+    BuildContext context,
+  ) {
+    // ✅ 로딩 상태
+    if (state.isLoading) {
+      return const Center(child: CircularProgressIndicator());
+    }
+
+    // ✅ 에러 상태
+    if (state.errorMessage != null) {
+      return Center(child: Text('급등/급락 로드 중 오류: ${state.errorMessage}'));
+    }
+
+    // ✅ 빈 데이터
+    if (state.surges.isEmpty) {
+      return Center(
+        child: Text(
+          '급등/급락 데이터가 없습니다.\n(시간대: ${currentTimeFrame.displayName})',
+          textAlign: TextAlign.center,
+          style: TextStyle(color: Theme.of(context).hintColor, fontSize: 16),
+        ),
+      );
+    }
+
+    // ✅ 급등/급락 리스트 (이미 정렬/필터된 데이터 사용)
+    return CommonScrollableList(
+      scrollController: scrollController,
+      itemCount: state.surges.length,
+      itemBuilder: (_, i) {
+        final surge = state.surges[i];
+        final rank = i + 1;
+        
+        return SurgeTile(
+          market: surge.market,
+          changePercent: surge.changePercent,
+          basePrice: surge.basePrice,
+          currentPrice: surge.currentPrice,
+          rank: rank,
+          // ✅ 안전한 상태 조회
+          isHot: controller.isHot(surge.market),
+          shouldBlink: controller.shouldBlink(surge.market),
+        );
+      },
+    );
+  }
+}\n\n// ====== lib/presentation/widgets/surge_tile.dart ======\n
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../core/di/app_providers.dart';
+import '../../shared/widgets/coin_logo_provider.dart';
+import '../../shared/utils/tile_common.dart';
+import '../../shared/utils/blink_animation_mixin.dart';
+import '../../shared/utils/amount_formatter.dart';
+import '../controllers/surge_controller.dart';
+
+class SurgeTile extends ConsumerStatefulWidget {
+  final String market;
+  final double changePercent;
+  final double basePrice;
+  final double currentPrice;
+  final int rank;
+  final bool isHot;        // ✅ Controller에서 계산된 값
+  final bool shouldBlink;  // ✅ Controller에서 계산된 값
   
   const SurgeTile({
-    Key? key,
-    required this.item,
+    Key? key, 
+    required this.market,
+    required this.changePercent,
+    required this.basePrice,
+    required this.currentPrice,
+    required this.rank,
+    required this.isHot,
+    required this.shouldBlink,
   }) : super(key: key);
+
+  @override
+  ConsumerState<SurgeTile> createState() => _SurgeTileState();
+}
+
+class _SurgeTileState extends ConsumerState<SurgeTile> 
+    with SingleTickerProviderStateMixin {
+
+  late AnimationController _blinkController;
+  late Animation<double> _blinkAnimation;
+  bool _isBlinking = false;
+
+  @override
+  void initState() {
+    super.initState();
+    // ✅ 애니메이션 초기화
+    _blinkController = AnimationController(
+      duration: const Duration(milliseconds: 600),
+      vsync: this,
+    );
+    _blinkAnimation = Tween<double>(begin: 1.0, end: 0.3).animate(
+      CurvedAnimation(parent: _blinkController, curve: Curves.easeInOut),
+    );
+  }
+
+  @override
+  void didUpdateWidget(SurgeTile oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    
+    // ✅ shouldBlink props 변화 감지해서 애니메이션 시작
+    if (widget.shouldBlink && !oldWidget.shouldBlink && !_isBlinking) {
+      _startBlink();
+    }
+  }
+
+  @override
+  void dispose() {
+    _blinkController.dispose();
+    super.dispose();
+  }
+
+  /// ✅ 블링크 시작 (설정 체크 + Controller 상태 초기화)
+  void _startBlink() {
+    final blinkEnabled = ref.read(appSettingsProvider).blinkEnabled;
+    if (!mounted || !blinkEnabled) return;
+    
+    _isBlinking = true;
+    _blinkController.forward().then((_) {
+      if (mounted) {
+        _blinkController.reverse().then((_) {
+          if (mounted) {
+            setState(() {
+              _isBlinking = false;
+            });
+            
+            // ✅ 애니메이션 완료 후 Controller에 상태 초기화 요청
+            ref.read(surgeControllerProvider.notifier).clearBlinkState(widget.market);
+          }
+        });
+      }
+    });
+  }
+
+  // ✅ 변동률 포맷팅
+  String _formatChangePercent(double changePercent) {
+    final sign = changePercent >= 0 ? '+' : '';
+    return '$sign${changePercent.toStringAsFixed(2)}%';
+  }
+
+  // ✅ 변동률 텍스트 색상
+  Color _getChangeColor() {
+    if (widget.changePercent > 0) {
+      return Colors.green; 
+    } else if (widget.changePercent < 0) {
+      return Colors.red; 
+    } else {
+      return Colors.grey; 
+    }
+  }
+
+  // ✅ 블링크 색상 (상승=초록, 하락=빨강)
+  Color _getBlinkColor() {
+    if (widget.changePercent > 0) {
+      return Colors.green; // 🟢 상승 = 초록 블링크
+    } else {
+      return Colors.red;   // 🔴 하락 = 빨강 블링크
+    }
+  }
   
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    final numberFormat = NumberFormat('#,###');
+    final onSurface = theme.colorScheme.onSurface;
+    final changeColor = _getChangeColor();
     
-    // 변동률에 따른 색상 결정
-    final changeColor = item.changePercent >= 0 ? Colors.green : Colors.red;
-    final changeIcon = item.changePercent >= 0 
-        ? const Icon(Icons.arrow_upward, size: 16, color: Colors.green)
-        : const Icon(Icons.arrow_downward, size: 16, color: Colors.red);
-    
-    return Card(
-      elevation: 2,
-      margin: const EdgeInsets.symmetric(vertical: 4, horizontal: 0),
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(12),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            // 상단: 코인명 + 시간
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Text(
-                  item.market,
-                  style: TextStyle(
-                    fontWeight: FontWeight.bold,
-                    fontSize: 16,
-                    color: theme.colorScheme.primary,
-                  ),
-                ),
-                Text(
-                  DateFormat('HH:mm:ss').format(item.detectedAt),
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: theme.colorScheme.onSurface.withOpacity(0.6),
-                  ),
-                ),
-              ],
+    // ✅ 표준 카드 위젯 생성
+    Widget cardWidget = TileCommon.buildStandardCard(
+      child: TileCommon.buildFlexRow(
+        children: [
+          // 🏆 순위 부분
+          FlexChild.fixed(
+            TileCommon.buildRankWidget(context, widget.rank),
+          ),
+          
+          const FlexChild.fixed(SizedBox(width: 12)),
+          
+          // 🎨 코인 로고 부분
+          FlexChild.fixed(
+            CoinLogoProvider.buildCoinLogo(
+              ticker: widget.market.replaceFirst('KRW-', ''),
+              radius: 16,
             ),
-            
-            const SizedBox(height: 8),
-            
-            // 하단: 가격 정보 + 변동률
-            Row(
+          ),
+          
+          const FlexChild.fixed(SizedBox(width: 12)),
+          
+          // 📱 코인명 부분
+          FlexChild.expanded(
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                // 기준가
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text(
-                      '기준가',
-                      style: TextStyle(
-                        fontSize: 12,
-                        fontWeight: FontWeight.w500,
-                      ),
-                    ),
-                    Text(
-                      numberFormat.format(item.basePrice),
-                      style: const TextStyle(
-                        fontSize: 14,
-                      ),
-                    ),
-                  ],
-                ),
-                
-                const SizedBox(width: 12),
-                
-                // 현재가
-                Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    const Text(
-                      '현재가',
-                      style: TextStyle(
-                        fontSize: 12,
-                        fontWeight: FontWeight.w500,
-                      ),
-                    ),
-                    Text(
-                      numberFormat.format(item.currentPrice),
-                      style: const TextStyle(
-                        fontSize: 14,
-                      ),
-                    ),
-                  ],
-                ),
-                
-                const Spacer(),
-                
-                // 변동률
                 Row(
                   children: [
-                    changeIcon,
-                    const SizedBox(width: 4),
-                    Text(
-                      '${item.changePercent.abs().toStringAsFixed(2)}%',
-                      style: TextStyle(
-                        fontSize: 16,
-                        fontWeight: FontWeight.bold,
-                        color: changeColor,
+                    Flexible(
+                      child: Text(
+                        TileCommon.getDisplayName(ref, widget.market),
+                        style: TextStyle(
+                          fontWeight: FontWeight.bold,
+                          color: theme.colorScheme.primary,
+                          fontSize: 16,
+                        ),
+                        overflow: TextOverflow.ellipsis,
+                        maxLines: 1,
                       ),
+                    ),
+                    const SizedBox(width: 4),
+                    // 🔥 HOT 아이콘
+                    Consumer(
+                      builder: (context, ref, child) {
+                        final hotEnabled = ref.watch(appSettingsProvider).hotEnabled;
+                        if (hotEnabled && widget.isHot) {
+                          return TileCommon.buildHotIcon(true) ?? const SizedBox.shrink();
+                        }
+                        return const SizedBox.shrink();
+                      },
                     ),
                   ],
                 ),
+                const SizedBox(height: 2),
+                Text(
+                  widget.market.replaceFirst('KRW-', ''),
+                  style: TextStyle(
+                    color: onSurface.withValues(alpha: 0.7),
+                    fontSize: 12,
+                  ),
+                ),
               ],
             ),
-          ],
-        ),
+            flex: 25,
+          ),
+          
+          // 🚀 변동률 부분
+          FlexChild.expanded(
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: [
+                Text(
+                  _formatChangePercent(widget.changePercent),
+                  style: TextStyle(
+                    color: changeColor,
+                    fontSize: 15,
+                    fontWeight: FontWeight.w600,
+                  ),
+                  overflow: TextOverflow.ellipsis,
+                  maxLines: 1,
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  '${AmountFormatter.formatPrice(widget.currentPrice)}원',
+                  style: TextStyle(
+                    color: onSurface.withValues(alpha: 0.7),
+                    fontSize: 11,
+                    fontWeight: FontWeight.w500,
+                  ),
+                  overflow: TextOverflow.ellipsis,
+                  maxLines: 1,
+                ),
+              ],
+            ),
+            flex: 30,
+          ),
+        ],
       ),
     );
+
+    // ✅ 블링크 애니메이션 적용
+    final blinkEnabled = ref.watch(appSettingsProvider).blinkEnabled;
+    
+    if (blinkEnabled && (_isBlinking || widget.shouldBlink)) {
+      return BlinkAnimationHelper.wrapWithBlinkEffect(
+        child: cardWidget,
+        shouldBlink: _isBlinking,
+        blinkAnimation: _blinkAnimation,
+        blinkColor: _getBlinkColor(), // ✅ 상승=초록, 하락=빨강
+      );
+    }
+    
+    return cardWidget;
   }
 }

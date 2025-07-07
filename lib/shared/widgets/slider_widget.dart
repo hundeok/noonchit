@@ -1,5 +1,3 @@
-// lib/shared/widgets/slider_widget.dart
-
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter/services.dart';
@@ -7,7 +5,7 @@ import '../../core/di/settings_provider.dart';
 
 /// 🔄 공통 슬라이더 위젯 - 4개 페이지 모든 패턴 지원
 /// Trade: 좌측 텍스트 + 우측 토글
-/// Volume: 좌측 텍스트 + 중앙 토글 + 우측 카운트다운  
+/// Volume: 좌측 텍스트 + 중앙 토글 + 우측 카운트다운
 /// Sector: 좌측 텍스트 + 중앙 토글 + 우측 카운트다운
 /// Surge: 좌측 텍스트 + 토글1 + 토글2 + 카운터 + 우측 카운트다운
 class CommonSliderWidget extends ConsumerWidget {
@@ -19,14 +17,14 @@ class CommonSliderWidget extends ConsumerWidget {
   final int? sliderDivisions;              // 슬라이더 구간 수
   final String? sliderLabel;               // 슬라이더 라벨
   final ValueChanged<double> onSliderChanged; // 슬라이더 변경 콜백
-  
+
   // 선택적 컴포넌트들
   final Widget? centerWidget;              // 중앙 위젯 (토글, 카운터 등)
   final Widget? rightWidget;               // 우측 위젯 (토글, 카운트다운 등)
   final List<Widget>? extraWidgets;        // 추가 위젯들 (Surge용)
   final EdgeInsets? padding;               // 커스텀 패딩
   final TextStyle? leftTextStyle;          // 좌측 텍스트 스타일
-  
+
   const CommonSliderWidget({
     Key? key,
     required this.leftText,
@@ -147,7 +145,7 @@ class CommonSliderWidget extends ConsumerWidget {
       onChanged: (value) {
         // 햅틱 피드백
         if (ref.read(appSettingsProvider).isHapticEnabled) {
-          HapticFeedback.lightImpact();
+          HapticFeedback.selectionClick();
         }
         onSliderChanged(value);
       },
@@ -188,7 +186,7 @@ class CommonToggleButton extends ConsumerWidget {
     return GestureDetector(
       onTap: () {
         if (ref.read(appSettingsProvider).isHapticEnabled) {
-          HapticFeedback.lightImpact();
+          HapticFeedback.selectionClick();
         }
         onTap();
       },

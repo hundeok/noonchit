@@ -2,7 +2,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/di/app_providers.dart';
-import '../../core/di/trade_provider.dart';
 import '../../shared/widgets/slider_widget.dart';
 import '../controllers/trade_controller.dart';
 import '../widgets/trade_tile.dart';

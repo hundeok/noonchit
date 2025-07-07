@@ -1,10 +1,12 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/di/surge_provider.dart';
+import '../../core/common/time_frame_manager.dart'; // 🔥 공통 TimeFrame 시스템 추가
+import '../../core/common/time_frame_types.dart';   // 🔥 공통 타입 추가
 import '../../domain/entities/surge.dart';
 import '../../shared/utils/rank_tracker.dart';
 import '../../shared/utils/rank_hot_mixin.dart';
 
-/// 🎯 완전 수정된 SurgeController - TimeFrame enum 기반 + 타이머 동기화
+/// 🎯 완전 수정된 SurgeController - 공통 TimeFrame 시스템 연동
 class SurgeController extends StateNotifier<SurgeControllerState> with RankHotMixin {
   final Ref _ref;
   
@@ -188,9 +190,9 @@ class SurgeController extends StateNotifier<SurgeControllerState> with RankHotMi
     }
   }
 
-  /// 🔥 시간대 변경 - timeFrameControllerProvider로 수정
+  /// 🔥 시간대 변경 - 공통 globalTimeFrameControllerProvider 사용
   void setTimeFrame(TimeFrame timeFrame) {
-    _ref.read(timeFrameControllerProvider).setTimeFrame(timeFrame);
+    _ref.read(globalTimeFrameControllerProvider).setSurgeTimeFrame(timeFrame);
     // 🎯 상태 초기화 제거 - 각 시간대가 독립적으로 유지됨
   }
 
@@ -254,28 +256,38 @@ class SurgeController extends StateNotifier<SurgeControllerState> with RankHotMi
     };
   }
 
-  /// ✅ TimeFrame 관련 메서드들 - timeFrameControllerProvider로 수정
-  TimeFrame get currentTimeFrame => _ref.read(timeFrameControllerProvider).currentTimeFrame;
+  /// 🔥 TimeFrame 관련 메서드들 - 공통 Provider 사용
+  TimeFrame get currentTimeFrame => _ref.read(surgeSelectedTimeFrameProvider);
   
-  int get currentIndex => _ref.read(timeFrameControllerProvider).currentIndex;
+  int get currentIndex {
+    final controller = _ref.read(globalTimeFrameControllerProvider);
+    return controller.getSurgeTimeFrameIndex();
+  }
   
-  List<TimeFrame> get availableTimeFrames => _ref.read(timeFrameControllerProvider).availableTimeFrames;
-
-  String getTimeFrameName(TimeFrame timeFrame) {
-    return _ref.read(timeFrameControllerProvider).getTimeFrameName(timeFrame);
+  List<TimeFrame> get availableTimeFrames {
+    final controller = _ref.read(globalTimeFrameControllerProvider);
+    return controller.availableTimeFrames;
   }
 
+  String getTimeFrameName(TimeFrame timeFrame) {
+    final controller = _ref.read(globalTimeFrameControllerProvider);
+    return controller.getTimeFrameName(timeFrame);
+  }
+
+  /// 🔥 리셋 메서드들 - 공통 GlobalTimeFrameController 사용
   void resetCurrentTimeFrame() {
-    _ref.read(timeFrameControllerProvider).resetCurrentTimeFrame();
+    final currentTimeFrame = this.currentTimeFrame;
+    _ref.read(globalTimeFrameControllerProvider).resetTimeFrame(currentTimeFrame);
   }
 
   void resetAllTimeFrames() {
-    _ref.read(timeFrameControllerProvider).resetAllTimeFrames();
+    _ref.read(globalTimeFrameControllerProvider).resetAllTimeFrames();
   }
 
-  /// 🔥 완벽한 타이머 동기화 - timeFrameControllerProvider 사용
+  /// 🔥 완벽한 타이머 동기화 - 공통 GlobalTimeFrameController 사용
   DateTime? getNextResetTime() {
-    return _ref.read(timeFrameControllerProvider).getNextResetTime();
+    final currentTimeFrame = this.currentTimeFrame;
+    return _ref.read(globalTimeFrameControllerProvider).getNextResetTime(currentTimeFrame);
   }
 
   /// ✅ 디버깅용 메서드들
@@ -357,7 +369,7 @@ enum SurgeFilterType {
   fallingOnly // 하락만
 }
 
-/// Provider 선언 - UI용 SurgeController
+/// Provider 선언 - UI용 SurgeController (변경 없음)
 final surgeControllerProvider = StateNotifierProvider<SurgeController, SurgeControllerState>(
   (ref) => SurgeController(ref),
 );

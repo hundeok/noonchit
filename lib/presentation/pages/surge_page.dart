@@ -1,8 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import '../../core/config/app_config.dart';
 import '../../core/di/app_providers.dart';
-import '../../core/di/surge_provider.dart';
 import '../../shared/widgets/slider_widget.dart';
 import '../controllers/surge_controller.dart';
 import '../widgets/surge_tile.dart';
@@ -21,11 +19,11 @@ class SurgePage extends ConsumerWidget {
     final state = ref.watch(surgeControllerProvider);
     final controller = ref.read(surgeControllerProvider.notifier);
     
-    // ✅ TimeFrame 관련 - 직접 watch로 반응성 확보
-    final currentTimeFrame = ref.watch(selectedTimeFrameProvider);
+    // 🔥 TimeFrame 관련 - 공통 Provider 사용
+    final currentTimeFrame = ref.watch(surgeSelectedTimeFrameProvider);
     final availableTimeFrames = TimeFrame.fromAppConfig();
     final currentIndex = availableTimeFrames.indexOf(currentTimeFrame);
-    final timeFrameController = ref.read(timeFrameControllerProvider);
+    final globalController = ref.read(globalTimeFrameControllerProvider);
     
     // ✅ UI 설정
     final sliderPosition = ref.watch(appSettingsProvider).sliderPosition;
@@ -41,7 +39,8 @@ class SurgePage extends ConsumerWidget {
       onSliderChanged: (value) {
         final newIndex = value.round();
         if (newIndex >= 0 && newIndex < availableTimeFrames.length) {
-          controller.setTimeFrame(availableTimeFrames[newIndex]); // ✅ 직접 호출로 즉시 반응
+          // 🔥 공통 GlobalTimeFrameController 사용
+          globalController.setSurgeTimeFrame(availableTimeFrames[newIndex]);
         }
       },
       // 🔥 Surge 고유: 복잡한 5분할 레이아웃 (12-6-10-10-11)
@@ -76,7 +75,6 @@ class SurgePage extends ConsumerWidget {
             ),
           ),
         ),
-        
         // Top 50/100 토글 버튼 (10/49)
         Expanded(
           flex: 10,
@@ -90,7 +88,6 @@ class SurgePage extends ConsumerWidget {
             ),
           ),
         ),
-        
         // 급등/급락 카운터 (10/49)
         Expanded(
           flex: 10,
@@ -100,7 +97,8 @@ class SurgePage extends ConsumerWidget {
         ),
       ],
       rightWidget: CommonCountdownWidget(
-        nextResetTime: timeFrameController.getNextResetTime(), // 🔥 완벽한 타이머 동기화
+        // 🔥 공통 GlobalTimeFrameController로 완벽한 타이머 동기화
+        nextResetTime: globalController.getNextResetTime(currentTimeFrame),
       ),
     );
 
@@ -116,7 +114,7 @@ class SurgePage extends ConsumerWidget {
     );
   }
 
-  /// ✅ 급등/급락 카운터 위젯
+  /// ✅ 급등/급락 카운터 위젯 (기존 유지)
   Widget _buildSurgeCounter(SurgeController controller, SurgeControllerState state) {
     if (state.surges.isEmpty) {
       return Container(
@@ -137,7 +135,7 @@ class SurgePage extends ConsumerWidget {
     final count = controller.getSurgeCount();
     final risingCount = count['rising'] ?? 0;
     final fallingCount = count['falling'] ?? 0;
-    
+
     return Container(
       height: 29,
       decoration: BoxDecoration(
@@ -195,11 +193,11 @@ class SurgePage extends ConsumerWidget {
     );
   }
 
-  /// ✅ 급등/급락 리스트 (Controller state 기반)
+  /// ✅ 급등/급락 리스트 (Controller state 기반) - 기존 유지
   Widget _buildSurgeList(
     SurgeControllerState state,
     SurgeController controller,
-    TimeFrame currentTimeFrame,
+    TimeFrame currentTimeFrame, // 🔥 TimeFrame enum 사용
     BuildContext context,
   ) {
     // ✅ 로딩 상태
@@ -216,7 +214,7 @@ class SurgePage extends ConsumerWidget {
     if (state.surges.isEmpty) {
       return Center(
         child: Text(
-          '급등/급락 데이터가 없습니다.\n(시간대: ${currentTimeFrame.displayName})',
+          '급등/급락 데이터가 없습니다.\n(시간대: ${currentTimeFrame.displayName})', // 🔥 enum 직접 사용
           textAlign: TextAlign.center,
           style: TextStyle(color: Theme.of(context).hintColor, fontSize: 16),
         ),

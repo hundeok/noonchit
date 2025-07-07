@@ -1,6 +1,5 @@
 // lib/domain/usecases/trade_usecase.dart
-
-import '../../core/config/app_config.dart';
+import '../../core/common/time_frame_types.dart'; // 🔥 공통 타입 시스템 사용
 import '../entities/trade.dart';
 import '../repositories/trade_repository.dart';
 
@@ -10,7 +9,7 @@ import '../repositories/trade_repository.dart';
 /// - 상태 관리는 모두 Provider로 이전됨
 class TradeUsecase {
   final TradeRepository _repository;
-
+  
   // 성능 최적화 상수
   static const int maxTrades = 200;
   static const int maxCacheSize = 1000;
@@ -18,13 +17,12 @@ class TradeUsecase {
   TradeUsecase(this._repository);
 
   /// 🎯 필터링된 거래 목록 계산 (순수 함수)
-  /// Provider에서 호출: usecase.calculateFilteredTrades(cache, threshold, false)
   List<Trade> calculateFilteredTrades(
-    Map<double, List<Trade>> filterCache,
-    double threshold,
+    Map<TradeFilter, List<Trade>> filterCache,
+    TradeFilter filterThreshold,
     bool isRangeMode,
   ) {
-    if (!isValidThreshold(threshold)) {
+    if (!isValidThreshold(filterThreshold)) {
       return <Trade>[];
     }
 
@@ -33,24 +31,24 @@ class TradeUsecase {
 
     if (isRangeMode) {
       // 구간 모드: threshold ~ nextThreshold 사이의 거래만
-      final nextThreshold = getNextThreshold(threshold);
-      for (final filter in AppConfig.tradeFilters.where((f) => f >= threshold)) {
+      final nextThreshold = getNextThreshold(filterThreshold);
+      for (final filter in TradeFilter.available.where((f) => f.value >= filterThreshold.value)) {
         final trades = filterCache[filter] ?? <Trade>[];
         for (final trade in trades) {
           final id = '${trade.sequentialId}-${trade.timestampMs}';
           final total = trade.total;
-          if (total >= threshold && total < nextThreshold && seen.add(id)) {
+          if (total >= filterThreshold.value && total < nextThreshold && seen.add(id)) {
             merged.add(trade);
           }
         }
       }
     } else {
       // 누적 모드: threshold 이상의 모든 거래
-      for (final filter in AppConfig.tradeFilters.where((f) => f >= threshold)) {
+      for (final filter in TradeFilter.available.where((f) => f.value >= filterThreshold.value)) {
         final trades = filterCache[filter] ?? <Trade>[];
         for (final trade in trades) {
           final id = '${trade.sequentialId}-${trade.timestampMs}';
-          if (trade.total >= threshold && seen.add(id)) {
+          if (trade.total >= filterThreshold.value && seen.add(id)) {
             merged.add(trade);
           }
         }
@@ -63,33 +61,23 @@ class TradeUsecase {
   }
 
   /// 🎯 임계값 유효성 검증 (비즈니스 규칙)
-  bool isValidThreshold(double threshold) {
-    // 비즈니스 규칙: 임계값은 1만원 이상 100억원 이하
-    const minThreshold = 10000.0; // 1만원
-    const maxThreshold = 10000000000.0; // 100억원
-    return threshold >= minThreshold && threshold <= maxThreshold;
+  bool isValidThreshold(TradeFilter threshold) {
+    return TradeFilter.available.contains(threshold);
   }
 
   /// 🎯 다음 임계값 찾기 (비즈니스 규칙)
-  double getNextThreshold(double currentThreshold) {
-    final sortedFilters = AppConfig.tradeFilters.toList()..sort();
+  double getNextThreshold(TradeFilter currentThreshold) {
+    final sortedFilters = TradeFilter.available.toList()
+      ..sort((a, b) => a.value.compareTo(b.value));
     
     // 현재 임계값과 정확히 일치하는 필터 찾기
     for (int i = 0; i < sortedFilters.length; i++) {
       if (sortedFilters[i] == currentThreshold) {
-        return i + 1 < sortedFilters.length 
-            ? sortedFilters[i + 1] 
+        return i + 1 < sortedFilters.length
+            ? sortedFilters[i + 1].value
             : double.infinity;
       }
     }
-    
-    // 정확히 일치하지 않으면 다음으로 큰 필터 찾기
-    for (final filter in sortedFilters) {
-      if (filter > currentThreshold) {
-        return filter;
-      }
-    }
-    
     return double.infinity;
   }
 
@@ -115,10 +103,10 @@ class TradeUsecase {
   /// 🎯 유효한 거래인지 확인 (비즈니스 규칙)
   bool isValidTrade(Trade trade) {
     return trade.market.isNotEmpty &&
-           trade.price > 0 &&
-           trade.volume > 0 &&
-           trade.timestampMs > 0 &&
-           trade.sequentialId.isNotEmpty;
+        trade.price > 0 &&
+        trade.volume > 0 &&
+        trade.timestampMs > 0 &&
+        trade.sequentialId.isNotEmpty;
   }
 
   /// 🎯 거래 총액 계산 (비즈니스 규칙)
@@ -132,8 +120,8 @@ class TradeUsecase {
   }
 
   /// 🎯 디버그 로그용 임계값 포맷팅 (유틸리티)
-  String formatThreshold(double threshold) {
-    return threshold.toStringAsFixed(0);
+  String formatThreshold(TradeFilter threshold) {
+    return threshold.value.toStringAsFixed(0);
   }
 
   /// 🎯 모드 이름 가져오기 (유틸리티)

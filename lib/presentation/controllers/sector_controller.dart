@@ -1,18 +1,19 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/di/sector_provider.dart';
+import '../../core/common/time_frame_types.dart'; // 🔥 공통 타입 추가
 import '../../domain/entities/volume.dart';
 import '../../shared/utils/rank_tracker.dart';
 import '../../shared/utils/rank_hot_mixin.dart';
 
-/// 🚀 수정된 SectorController - Volume Controller와 동일한 개선 적용
+/// 🎯 완전 수정된 SectorController - 공통 TimeFrame 시스템 연동
 class SectorController extends StateNotifier<SectorControllerState> with RankHotMixin {
   final Ref _ref;
   
   // ✅ 순위 추적기 (블링크용)
   final RankTracker _rankTracker = RankTracker();
   
-  // ✅ 시간대별 블링크 상태 관리 (독립성 확보)
-  final Map<String, Map<String, bool>> _blinkStatesByTimeFrame = {};
+  // ✅ 시간대별 블링크 상태 관리 (TimeFrame enum 기반)
+  final Map<TimeFrame, Map<String, bool>> _blinkStatesByTimeFrame = {};
   
   // ✅ Provider 구독 관리
   final List<ProviderSubscription> _subscriptions = [];
@@ -29,20 +30,20 @@ class SectorController extends StateNotifier<SectorControllerState> with RankHot
     _blinkStatesByTimeFrame.clear();
   }
 
-  /// 🚀 통합 데이터 구독 초기화
+  /// 🔥 통합 데이터 구독 초기화
   void _initializeDataSubscription() {
     final subscription = _ref.listen(
       sectorVolumeDataProvider,
       (previous, next) {
         next.when(
           data: (event) {
-            // 🚀 데이터 처리 (이중 정렬 제거)
+            // 🚀 데이터 처리
             _processSectorData(event.volumes);
             
-            // 🔥 리셋 정보 처리
-            if (event.resetTimeFrame != null) {
-              clearTimeFrameHot(event.resetTimeFrame!);
-              _clearTimeFrameBlinkStates(event.resetTimeFrame!);
+            // 🔥 리셋 정보 처리 (새로운 SectorVolumeEvent 구조)
+            if (event.isReset) {
+              clearTimeFrameHot(event.timeFrame.key);
+              _clearTimeFrameBlinkStates(event.timeFrame);
             }
           },
           loading: () => state = state.copyWith(isLoading: true),
@@ -56,28 +57,32 @@ class SectorController extends StateNotifier<SectorControllerState> with RankHot
     _subscriptions.add(subscription);
   }
 
-  /// ✅ 섹터 데이터 처리 - 이중 정렬 제거
+  /// ✅ 섹터 데이터 처리
   void _processSectorData(List<Volume> volumes) {
-    // ✅ 이미 정렬된 데이터 그대로 사용 (Provider에서 정렬 완료)
-    _calculateAllStates(volumes);
+    // ✅ Provider에서 이미 정렬된 데이터 그대로 사용
+    final processedVolumes = volumes;
+    
+    // ✅ 모든 상태 미리 계산
+    _calculateAllStates(processedVolumes);
     
     // ✅ 상태 업데이트
     state = state.copyWith(
-      sectorVolumes: volumes,
+      sectorVolumes: processedVolumes,
       isLoading: false,
       errorMessage: null,
     );
   }
 
-  /// ✅ 모든 아이템의 상태 미리 계산 - 시간대별 독립
+  /// ✅ 모든 아이템의 상태 미리 계산 - TimeFrame enum 기반
   void _calculateAllStates(List<Volume> volumes) {
     final currentTimeFrame = this.currentTimeFrame;
+    final currentTimeFrameKey = currentTimeFrame.key; // TimeFrame → String
     
-    // ✅ 시간대 초기화
-    initializeTimeFrame(currentTimeFrame);
-    _rankTracker.initializeTimeFrame(currentTimeFrame);
+    // ✅ 시간대 초기화 (String key 사용 - Mixin 호환)
+    initializeTimeFrame(currentTimeFrameKey);
+    _rankTracker.initializeTimeFrame(currentTimeFrameKey);
     
-    // ✅ 현재 시간대 블링크 상태 초기화
+    // ✅ 현재 시간대 블링크 상태 초기화 (TimeFrame enum 사용)
     _initializeTimeFrameBlinkStates(currentTimeFrame);
     
     for (int i = 0; i < volumes.length; i++) {
@@ -85,40 +90,54 @@ class SectorController extends StateNotifier<SectorControllerState> with RankHot
       final sectorName = volume.market.replaceFirst('SECTOR-', '');
       final currentRank = i + 1;
       
-      // ✅ HOT 상태는 Mixin에서 직접 관리
+      // ✅ HOT 상태는 Mixin에서 직접 관리 (String key 사용)
       checkIfHot(
         key: sectorName,
         currentRank: currentRank,
-        timeFrame: currentTimeFrame,
+        timeFrame: currentTimeFrameKey,
         menuType: 'sector',
       );
       
-      // ✅ 블링크 상태 계산 (시간대별 관리)
+      // ✅ 블링크 상태 계산 (Sector 전용 메서드 사용)
       final blinkStates = _blinkStatesByTimeFrame[currentTimeFrame]!;
-      blinkStates[sectorName] = _rankTracker.checkRankChange(
+      
+      // 섹터 순위 변화 체크 (순위 + 실제 볼륨 값 기준)
+      final isRankChange = _rankTracker.checkRankChangeWithValue(
         key: sectorName,
         currentRank: currentRank,
-        timeFrame: currentTimeFrame,
+        currentValue: volume.totalVolume,
+        timeFrame: currentTimeFrameKey,
       );
+      
+      // 의미있는 변화가 있을 때만 블링크
+      blinkStates[sectorName] = isRankChange;
     }
   }
 
-  /// ✅ 시간대별 블링크 상태 초기화
-  void _initializeTimeFrameBlinkStates(String timeFrame) {
+  /// ✅ 시간대별 블링크 상태 초기화 (TimeFrame enum)
+  void _initializeTimeFrameBlinkStates(TimeFrame timeFrame) {
     if (!_blinkStatesByTimeFrame.containsKey(timeFrame)) {
       _blinkStatesByTimeFrame[timeFrame] = <String, bool>{};
     }
   }
 
-  /// ✅ 특정 시간대 블링크 상태 초기화
-  void _clearTimeFrameBlinkStates(String timeFrame) {
+  /// ✅ 특정 시간대 블링크 상태 초기화 (TimeFrame enum)
+  void _clearTimeFrameBlinkStates(TimeFrame timeFrame) {
     _blinkStatesByTimeFrame[timeFrame]?.clear();
   }
 
-  /// 🚀 시간대 변경 - Provider로 위임
-  void setTimeFrame(String timeFrame, int index) {
-    _ref.read(sectorTimeFrameController).updateTimeFrame(timeFrame, index);
+  /// 🔥 시간대 변경 - sectorTimeFrameController 사용 (기존 유지)
+  void setTimeFrame(TimeFrame timeFrame) {
+    _ref.read(sectorTimeFrameController).setTimeFrame(timeFrame);
     // 🎯 상태 초기화 제거 - 각 시간대가 독립적으로 유지됨
+  }
+
+  /// 🔥 시간대 변경 (인덱스 기반) - 호환성 유지
+  void setTimeFrameByIndex(int index) {
+    final availableTimeFrames = TimeFrame.fromAppConfig();
+    if (index >= 0 && index < availableTimeFrames.length) {
+      setTimeFrame(availableTimeFrames[index]);
+    }
   }
 
   /// 🚀 섹터 분류 토글 - 섹터만의 고유 기능
@@ -126,13 +145,13 @@ class SectorController extends StateNotifier<SectorControllerState> with RankHot
     _ref.read(sectorTimeFrameController).toggleSectorClassification();
   }
 
-  /// ✅ HOT 상태 조회
+  /// ✅ HOT 상태 조회 (String key 사용 - Mixin 호환)
   bool isHot(String sectorName) {
-    final hotItems = getHotItems(currentTimeFrame);
+    final hotItems = getHotItems(currentTimeFrame.key);
     return hotItems.contains(sectorName);
   }
 
-  /// ✅ 블링크 상태 조회 - 시간대별 관리
+  /// ✅ 블링크 상태 조회 - TimeFrame enum 기반
   bool shouldBlink(String sectorName) {
     final currentTimeFrame = this.currentTimeFrame;
     final blinkStates = _blinkStatesByTimeFrame[currentTimeFrame];
@@ -149,12 +168,14 @@ class SectorController extends StateNotifier<SectorControllerState> with RankHot
     }
   }
 
-  /// ✅ TimeFrame 관련 메서드들 - Provider로 위임
-  String get currentTimeFrame => _ref.read(sectorTimeFrameController).currentTimeFrame;
+  /// ✅ TimeFrame 관련 메서드들 - sectorTimeFrameController 사용 (기존 유지)
+  TimeFrame get currentTimeFrame => _ref.read(sectorTimeFrameController).currentTimeFrame;
+  
   int get currentIndex => _ref.read(sectorTimeFrameController).currentIndex;
-  List<String> get availableTimeFrames => _ref.read(sectorTimeFrameController).availableTimeFrames;
+  
+  List<TimeFrame> get availableTimeFrames => _ref.read(sectorTimeFrameController).availableTimeFrames;
 
-  String getTimeFrameName(String timeFrame) {
+  String getTimeFrameName(TimeFrame timeFrame) {
     return _ref.read(sectorTimeFrameController).getTimeFrameName(timeFrame);
   }
 
@@ -166,11 +187,12 @@ class SectorController extends StateNotifier<SectorControllerState> with RankHot
     _ref.read(sectorTimeFrameController).resetAllTimeFrames();
   }
 
+  /// 🔥 완벽한 타이머 동기화 - sectorTimeFrameController 사용 (기존 유지)
   DateTime? getNextResetTime() {
     return _ref.read(sectorTimeFrameController).getNextResetTime();
   }
 
-  /// 🚀 섹터 고유 기능들
+  /// 🚀 섹터 고유 기능들 (기존 유지)
   String get currentSectorClassificationName {
     return _ref.read(sectorTimeFrameController).currentSectorClassificationName;
   }
@@ -208,7 +230,7 @@ class SectorController extends StateNotifier<SectorControllerState> with RankHot
     _cleanupOldBlinkStates();
   }
 
-  /// ✅ 오래된 블링크 상태 정리
+  /// ✅ 오래된 블링크 상태 정리 (TimeFrame enum 기반)
   void _cleanupOldBlinkStates() {
     final currentTimeFrame = this.currentTimeFrame;
     final availableTimeFrames = this.availableTimeFrames.toSet();
@@ -261,7 +283,7 @@ class SectorControllerState {
   }
 }
 
-/// Provider 선언
+/// Provider 선언 - UI용 SectorController
 final sectorControllerProvider = StateNotifierProvider<SectorController, SectorControllerState>(
   (ref) => SectorController(ref),
 );

@@ -1,52 +1,50 @@
-// lib/presentation/controllers/volume_controller.dart
-
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/di/volume_provider.dart';
+import '../../core/common/time_frame_manager.dart'; // 🔥 공통 TimeFrame 시스템 추가
+import '../../core/common/time_frame_types.dart';   // 🔥 공통 타입 추가
 import '../../domain/entities/volume.dart';
-import '../../domain/usecases/volume_usecase.dart';
 import '../../shared/utils/rank_tracker.dart';
 import '../../shared/utils/rank_hot_mixin.dart';
 
-/// 🎯 깔끔하게 리팩토링된 VolumeController (Provider 연동)
+/// 🎯 완전 수정된 VolumeController - 공통 TimeFrame 시스템 연동
 class VolumeController extends StateNotifier<VolumeControllerState> with RankHotMixin {
   final Ref _ref;
-  final VolumeUsecase _usecase;
   
   // ✅ 순위 추적기 (블링크용)
   final RankTracker _rankTracker = RankTracker();
   
-  // ✅ 미리 계산된 상태 저장 (블링크만, HOT은 Mixin에서 관리)
-  final Map<String, bool> _blinkStates = {};
+  // ✅ 시간대별 블링크 상태 관리 (TimeFrame enum 기반)
+  final Map<TimeFrame, Map<String, bool>> _blinkStatesByTimeFrame = {};
   
   // ✅ Provider 구독 관리
   final List<ProviderSubscription> _subscriptions = [];
 
-  VolumeController(this._usecase, this._ref) : super(const VolumeControllerState()) {
-    // ✅ 모든 상태 초기화
+  VolumeController(this._ref) : super(const VolumeControllerState()) {
     _initializeAllStates();
     _initializeDataSubscription();
   }
 
-  /// ✅ 모든 상태 초기화 (HOT은 Mixin에서 관리하므로 제외)
+  /// ✅ 모든 상태 초기화
   void _initializeAllStates() {
     clearAllHot();
     _rankTracker.clearAll();
-    _blinkStates.clear();
+    _blinkStatesByTimeFrame.clear();
   }
 
-  /// 🔥 통합 데이터 구독 초기화 (VolumeEvent 처리)
+  /// 🔥 통합 데이터 구독 초기화
   void _initializeDataSubscription() {
     final subscription = _ref.listen(
       volumeDataProvider,
       (previous, next) {
         next.when(
           data: (event) {
-            // 🚀 데이터 처리 (기존 로직 그대로)
+            // 🚀 데이터 처리
             _processVolumeData(event.volumes);
             
-            // 🔥 리셋 정보 처리 (새로 추가)
-            if (event.resetTimeFrame != null) {
-              clearTimeFrameHot(event.resetTimeFrame!);
+            // 🔥 리셋 정보 처리 (새로운 VolumeEvent 구조)
+            if (event.isReset) {
+              clearTimeFrameHot(event.timeFrame.key);
+              _clearTimeFrameBlinkStates(event.timeFrame);
             }
           },
           loading: () => state = state.copyWith(isLoading: true),
@@ -60,148 +58,169 @@ class VolumeController extends StateNotifier<VolumeControllerState> with RankHot
     _subscriptions.add(subscription);
   }
 
-  /// ✅ 볼륨 데이터 처리 - 모든 상태 미리 계산
+  /// ✅ 볼륨 데이터 처리
   void _processVolumeData(List<Volume> volumes) {
-    // 1. 데이터 정렬
-    final sortedVolumes = _applySorting(volumes);
+    // ✅ Provider에서 이미 정렬된 데이터를 제한만 적용
+    final processedVolumes = _applyLimit(volumes);
     
-    // 2. 모든 상태 미리 계산 (build 밖에서!)
-    _calculateAllStates(sortedVolumes);
+    // ✅ 모든 상태 미리 계산
+    _calculateAllStates(processedVolumes);
     
-    // 3. 상태 업데이트
+    // ✅ 상태 업데이트
     state = state.copyWith(
-      volumes: sortedVolumes,
+      volumes: processedVolumes,
       isLoading: false,
       errorMessage: null,
     );
   }
 
-  /// ✅ 모든 아이템의 상태 미리 계산 - 시간대별 독립
-  void _calculateAllStates(List<Volume> sortedVolumes) {
+  /// ✅ 제한만 적용 (정렬은 Provider에서 완료)
+  List<Volume> _applyLimit(List<Volume> volumes) {
+    final int limit = state.isTop100 ? 100 : 50;
+    return volumes.take(limit).toList();
+  }
+
+  /// ✅ 모든 아이템의 상태 미리 계산 - TimeFrame enum 기반
+  void _calculateAllStates(List<Volume> processedVolumes) {
     final currentTimeFrame = this.currentTimeFrame;
+    final currentTimeFrameKey = currentTimeFrame.key; // TimeFrame → String
     
-    // ✅ 시간대 초기화
-    initializeTimeFrame(currentTimeFrame);
-    _rankTracker.initializeTimeFrame(currentTimeFrame);
+    // ✅ 시간대 초기화 (String key 사용 - Mixin 호환)
+    initializeTimeFrame(currentTimeFrameKey);
+    _rankTracker.initializeTimeFrame(currentTimeFrameKey);
     
-    // ✅ 블링크 상태만 초기화 (HOT은 Mixin이 관리)
-    _blinkStates.clear();
+    // ✅ 현재 시간대 블링크 상태 초기화 (TimeFrame enum 사용)
+    _initializeTimeFrameBlinkStates(currentTimeFrame);
     
-    for (int i = 0; i < sortedVolumes.length; i++) {
-      final volume = sortedVolumes[i];
+    for (int i = 0; i < processedVolumes.length; i++) {
+      final volume = processedVolumes[i];
       final market = volume.market;
       final currentRank = i + 1;
       
-      // ✅ HOT 상태는 Mixin에서 직접 관리 (Controller는 개입 안함)
+      // ✅ HOT 상태는 Mixin에서 직접 관리 (String key 사용)
       checkIfHot(
         key: market,
         currentRank: currentRank,
-        timeFrame: currentTimeFrame,
-        menuType: 'volume', 
+        timeFrame: currentTimeFrameKey,
+        menuType: 'volume',
       );
       
-      // ✅ 블링크 상태 계산 (RankTracker 사용)
-      _blinkStates[market] = _rankTracker.checkRankChange(
+      // ✅ 블링크 상태 계산 (Volume 전용 메서드 사용)
+      final blinkStates = _blinkStatesByTimeFrame[currentTimeFrame]!;
+      
+      // 볼륨 순위 변화 체크 (순위 + 실제 볼륨 값 기준)
+      final isRankChange = _rankTracker.checkRankChangeWithValue(
         key: market,
         currentRank: currentRank,
-        timeFrame: currentTimeFrame,
+        currentValue: volume.totalVolume,
+        timeFrame: currentTimeFrameKey,
       );
+      
+      // 의미있는 변화가 있을 때만 블링크
+      blinkStates[market] = isRankChange;
     }
   }
 
-  /// ✅ 데이터 정렬 (순수 함수)
-  List<Volume> _applySorting(List<Volume> volumeData) {
-    // UseCase의 순수 함수 사용
-    final filteredData = _usecase.filterVolumesByMinimum(volumeData, 0);
-    final sortedData = _usecase.sortVolumesByAmount(filteredData, descending: true);
-    
-    // 현재 설정에 따라 50개 또는 100개로 제한
-    final int limit = state.isTop100 ? 100 : 50;
-    return _usecase.limitVolumeCount(sortedData, limit);
+  /// ✅ 시간대별 블링크 상태 초기화 (TimeFrame enum)
+  void _initializeTimeFrameBlinkStates(TimeFrame timeFrame) {
+    if (!_blinkStatesByTimeFrame.containsKey(timeFrame)) {
+      _blinkStatesByTimeFrame[timeFrame] = <String, bool>{};
+    }
   }
 
-  /// ✅ Top 50/100 토글
+  /// ✅ 특정 시간대 블링크 상태 초기화 (TimeFrame enum)
+  void _clearTimeFrameBlinkStates(TimeFrame timeFrame) {
+    _blinkStatesByTimeFrame[timeFrame]?.clear();
+  }
+
+  /// ✅ Top 50/100 토글 - Provider 구독 이슈 해결
   void toggleTopLimit() {
     state = state.copyWith(isTop100: !state.isTop100);
     
-    // 기존 데이터로 재처리
+    // ✅ 현재 데이터로 재처리 (read + whenData 문제 해결)
     if (state.volumes.isNotEmpty) {
-      final volumesAsync = _ref.read(volumeDataProvider);
-      volumesAsync.whenData((event) => _processVolumeData(event.volumes));
+      final currentState = _ref.read(volumeDataProvider).value;
+      if (currentState != null) {
+        _processVolumeData(currentState.volumes);
+      }
     }
   }
 
-  /// 🔥 시간대 변경 - Provider로 위임
-  void setTimeFrame(String timeFrame, int index) {
-    // ✅ Provider로 위임 (UseCase 직접 호출 제거)
-    _ref.read(volumeTimeFrameController).updateTimeFrame(timeFrame, index);
+  /// 🔥 시간대 변경 - 공통 globalTimeFrameControllerProvider 사용
+  void setTimeFrame(TimeFrame timeFrame) {
+    _ref.read(globalTimeFrameControllerProvider).setVolumeTimeFrame(timeFrame);
     // 🎯 상태 초기화 제거 - 각 시간대가 독립적으로 유지됨
+  }
+
+  /// 🔥 시간대 변경 (인덱스 기반) - 호환성 유지
+  void setTimeFrameByIndex(int index) {
+    final availableTimeFrames = TimeFrame.fromAppConfig();
+    if (index >= 0 && index < availableTimeFrames.length) {
+      setTimeFrame(availableTimeFrames[index]);
+    }
   }
 
   /// ✅ 현재 표시 개수
   int get currentLimit => state.isTop100 ? 100 : 50;
-  
+
   /// ✅ 현재 표시 모드 이름
   String get currentLimitName => state.isTop100 ? 'Top 100' : 'Top 50';
 
-  /// ✅ HOT 상태 조회 (Mixin의 현재 HOT 아이템 목록에서 확인)
+  /// ✅ HOT 상태 조회 (String key 사용 - Mixin 호환)
   bool isHot(String market) {
-    final hotItems = getHotItems(currentTimeFrame);
+    final hotItems = getHotItems(currentTimeFrame.key);
     return hotItems.contains(market);
   }
 
-  /// ✅ 블링크 상태 조회 (build에서 안전하게 호출 가능)
+  /// ✅ 블링크 상태 조회 - TimeFrame enum 기준
   bool shouldBlink(String market) {
-    return _blinkStates[market] ?? false;
+    final currentTimeFrame = this.currentTimeFrame;
+    final blinkStates = _blinkStatesByTimeFrame[currentTimeFrame];
+    return blinkStates?[market] ?? false;
   }
 
-  /// ✅ 블링크 상태 초기화 (애니메이션 완료 후 호출)
+  /// ✅ 블링크 상태 초기화 - 강제 notify 문제 해결
   void clearBlinkState(String market) {
-    _blinkStates[market] = false;
-    // 상태 업데이트를 위한 notify
-    state = state.copyWith();
+    final currentTimeFrame = this.currentTimeFrame;
+    final blinkStates = _blinkStatesByTimeFrame[currentTimeFrame];
+    if (blinkStates != null) {
+      blinkStates[market] = false;
+      // ✅ 실제 변화가 있을 때만 notify (불필요한 copyWith 제거)
+    }
   }
 
-  /// ✅ TimeFrame 관련 메서드들 - Provider로 위임
-  String get currentTimeFrame => _ref.read(volumeTimeFrameController).currentTimeFrame;
-  int get currentIndex => _ref.read(volumeTimeFrameController).currentIndex;
-  List<String> get availableTimeFrames => _ref.read(volumeTimeFrameController).availableTimeFrames;
-
-  String getTimeFrameName(String timeFrame) {
-    return _ref.read(volumeTimeFrameController).getTimeFrameName(timeFrame);
+  /// 🔥 TimeFrame 관련 메서드들 - 공통 Provider 사용
+  TimeFrame get currentTimeFrame => _ref.read(volumeSelectedTimeFrameProvider);
+  
+  int get currentIndex {
+    final controller = _ref.read(globalTimeFrameControllerProvider);
+    return controller.getVolumeTimeFrameIndex();
+  }
+  
+  List<TimeFrame> get availableTimeFrames {
+    final controller = _ref.read(globalTimeFrameControllerProvider);
+    return controller.availableTimeFrames;
+  }
+  
+  String getTimeFrameName(TimeFrame timeFrame) {
+    final controller = _ref.read(globalTimeFrameControllerProvider);
+    return controller.getTimeFrameName(timeFrame);
   }
 
+  /// 🔥 리셋 메서드들 - 공통 GlobalTimeFrameController 사용
   void resetCurrentTimeFrame() {
-    _ref.read(volumeTimeFrameController).resetCurrentTimeFrame();
+    final currentTimeFrame = this.currentTimeFrame;
+    _ref.read(globalTimeFrameControllerProvider).resetTimeFrame(currentTimeFrame);
   }
 
   void resetAllTimeFrames() {
-    _ref.read(volumeTimeFrameController).resetAllTimeFrames();
+    _ref.read(globalTimeFrameControllerProvider).resetAllTimeFrames();
   }
 
+  /// 🔥 완벽한 타이머 동기화 - 공통 GlobalTimeFrameController 사용
   DateTime? getNextResetTime() {
-    return _ref.read(volumeTimeFrameController).getNextResetTime();
-  }
-
-  /// ✅ 볼륨 포맷팅 (UseCase 활용)
-  String formatVolume(double volume) {
-    return _usecase.formatVolume(volume);
-  }
-
-  /// ✅ 시간대 진행률 계산 (UseCase 활용)
-  double getTimeFrameProgress() {
-    final timeFrame = currentTimeFrame;
-    final now = DateTime.now();
-    
-    return _usecase.calculateTimeFrameProgress(timeFrame, now);
-  }
-
-  /// ✅ 리셋까지 남은 시간 (UseCase 활용)
-  Duration? getTimeUntilReset() {
-    final timeFrame = currentTimeFrame;
-    final now = DateTime.now();
-    
-    return _usecase.getTimeUntilReset(timeFrame, now);
+    final currentTimeFrame = this.currentTimeFrame;
+    return _ref.read(globalTimeFrameControllerProvider).getNextResetTime(currentTimeFrame);
   }
 
   /// ✅ 디버깅용 메서드들
@@ -209,9 +228,20 @@ class VolumeController extends StateNotifier<VolumeControllerState> with RankHot
     return _rankTracker.getDebugInfo();
   }
 
-  /// ✅ 메모리 정리 (주기적으로 호출 권장)
+  /// ✅ 메모리 정리
   void cleanupExpiredStates() {
     cleanupExpiredHotStates();
+    _cleanupOldBlinkStates();
+  }
+
+  /// ✅ 오래된 블링크 상태 정리 (TimeFrame enum 기반)
+  void _cleanupOldBlinkStates() {
+    final currentTimeFrame = this.currentTimeFrame;
+    final availableTimeFrames = this.availableTimeFrames.toSet();
+    
+    _blinkStatesByTimeFrame.removeWhere((timeFrame, _) =>
+        timeFrame != currentTimeFrame && !availableTimeFrames.contains(timeFrame)
+    );
   }
 
   /// ✅ 리소스 정리
@@ -222,11 +252,11 @@ class VolumeController extends StateNotifier<VolumeControllerState> with RankHot
       subscription.close();
     }
     _subscriptions.clear();
-    
-    // ✅ 모든 리소스 정리 (HOT은 Mixin이 관리)
+
+    // ✅ 모든 리소스 정리
     disposeHot();
     _rankTracker.dispose();
-    _blinkStates.clear();
+    _blinkStatesByTimeFrame.clear();
     
     super.dispose();
   }
@@ -234,10 +264,10 @@ class VolumeController extends StateNotifier<VolumeControllerState> with RankHot
 
 /// ✅ 상태 클래스 (변경 없음)
 class VolumeControllerState {
-  final List<Volume> volumes;      // 정렬된 볼륨 데이터
-  final bool isTop100;            // Top 50/100 모드
-  final bool isLoading;           // 로딩 상태
-  final String? errorMessage;     // 에러 메시지
+  final List<Volume> volumes; // 정렬된 볼륨 데이터
+  final bool isTop100; // Top 50/100 모드
+  final bool isLoading; // 로딩 상태
+  final String? errorMessage; // 에러 메시지
 
   const VolumeControllerState({
     this.volumes = const [],
@@ -261,10 +291,7 @@ class VolumeControllerState {
   }
 }
 
-/// Provider 선언
+/// Provider 선언 - UI용 VolumeController (변경 없음)
 final volumeControllerProvider = StateNotifierProvider<VolumeController, VolumeControllerState>(
-  (ref) {
-    final usecase = ref.read(volumeUsecaseProvider);  // ✅ 기존 Provider 이름 사용
-    return VolumeController(usecase, ref);
-  },
+  (ref) => VolumeController(ref),
 );
