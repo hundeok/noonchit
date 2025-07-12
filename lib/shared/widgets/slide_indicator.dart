@@ -5,7 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/di/app_providers.dart';
 import '../../presentation/pages/main_page.dart';
 
-/// 🎨 슬라이드 인디케이터 - iOS 스타일의 페이지 인디케이터
+/// 🎨 슬라이드 인디케이터 - iOS 스타일의 페이지 인디케이터 (롤링 윈도우)
 class SlideIndicator extends ConsumerStatefulWidget {
  final List<PageInfo> pages;
  final PageController pageController;
@@ -28,10 +28,12 @@ class _SlideIndicatorState extends ConsumerState<SlideIndicator>
  late List<AnimationController> _iconControllers;
  late List<Animation<double>> _scaleAnimations;
  late List<Animation<Color?>> _colorAnimations;
+ late ScrollController _scrollController; // 🔥 롤링 윈도우용 스크롤 컨트롤러
 
  @override
  void initState() {
    super.initState();
+   _scrollController = ScrollController(); // 🔥 스크롤 컨트롤러 초기화
    _setupAnimations();
  }
 
@@ -73,6 +75,7 @@ class _SlideIndicatorState extends ConsumerState<SlideIndicator>
 
  @override
  void dispose() {
+   _scrollController.dispose(); // 🔥 스크롤 컨트롤러 해제
    for (final controller in _iconControllers) {
      controller.dispose();
    }
@@ -85,19 +88,60 @@ class _SlideIndicatorState extends ConsumerState<SlideIndicator>
    
    // 페이지 변경 시 애니메이션 업데이트
    _updateAnimations(currentIndex);
+   
+   // 🔥 롤링 윈도우 스크롤 업데이트
+   _scrollToWindow(currentIndex);
 
-   return SizedBox( // ✅ Container → SizedBox 변경
+   return SizedBox(
      height: 40,
-     child: Row(
-       mainAxisSize: MainAxisSize.min,
-       children: widget.pages.asMap().entries.map((entry) {
-         final index = entry.key;
-         final page = entry.value;
-         
-         return _buildAnimatedIcon(index, page, currentIndex);
-       }).toList(),
+     child: SingleChildScrollView( // 🔥 Row → SingleChildScrollView로 변경
+       controller: _scrollController,
+       scrollDirection: Axis.horizontal,
+       physics: const NeverScrollableScrollPhysics(), // 사용자 스크롤 금지
+       child: Row(
+         mainAxisSize: MainAxisSize.min,
+         children: widget.pages.asMap().entries.map((entry) {
+           final index = entry.key;
+           final page = entry.value;
+           
+           return _buildAnimatedIcon(index, page, currentIndex);
+         }).toList(),
+       ),
      ),
    );
+ }
+
+ /// 🔥 현재 인덱스를 기준으로 4개씩 윈도우 슬라이딩
+ void _scrollToWindow(int currentIndex) {
+   const windowSize = 4;
+   final total = widget.pages.length;
+   
+   // 5개 미만이면 롤링 불필요
+   if (total <= windowSize) return;
+   
+   // 윈도우 시작 인덱스 계산 (단방향)
+   int startIndex;
+   if (currentIndex <= 2) {
+     // 0,1,2,3 페이지일 때는 [0,1,2,3] 윈도우
+     startIndex = 0;
+   } else {
+     // 4 페이지일 때는 [1,2,3,4] 윈도우
+     startIndex = 1;
+   }
+   
+   // 아이콘 하나의 너비 계산 (margin + padding + 아이콘 영역)
+   // margin: 1.8*2, padding: 8*2, width: 32 = 51.6
+   const itemWidth = 32.0 + 16.0 + 3.6;
+   final targetOffset = startIndex * itemWidth;
+   
+   // 부드럽게 스크롤 이동
+   if (_scrollController.hasClients) {
+     _scrollController.animateTo(
+       targetOffset,
+       duration: const Duration(milliseconds: 300),
+       curve: Curves.easeInOut,
+     );
+   }
  }
 
  /// 애니메이션 업데이트
@@ -174,8 +218,8 @@ class _SlideIndicatorState extends ConsumerState<SlideIndicator>
  }
 }
 
-/// 🎨 간단 버전 슬라이드 인디케이터 (애니메이션 없음)
-class SimpleSlideIndicator extends ConsumerWidget {
+/// 🎨 간단 버전 슬라이드 인디케이터 (애니메이션 없음, 롤링 윈도우)
+class SimpleSlideIndicator extends ConsumerStatefulWidget {
  final List<PageInfo> pages;
  final PageController pageController;
 
@@ -186,56 +230,116 @@ class SimpleSlideIndicator extends ConsumerWidget {
  }) : super(key: key);
 
  @override
- Widget build(BuildContext context, WidgetRef ref) {
-   final currentIndex = ref.watch(selectedTabProvider);
+ ConsumerState<SimpleSlideIndicator> createState() => _SimpleSlideIndicatorState();
+}
 
-   return SizedBox( // ✅ Container → SizedBox 변경
+class _SimpleSlideIndicatorState extends ConsumerState<SimpleSlideIndicator> {
+ late ScrollController _scrollController;
+
+ @override
+ void initState() {
+   super.initState();
+   _scrollController = ScrollController();
+ }
+
+ @override
+ void dispose() {
+   _scrollController.dispose();
+   super.dispose();
+ }
+
+ @override
+ Widget build(BuildContext context) {
+   final currentIndex = ref.watch(selectedTabProvider);
+   
+   // 🔥 롤링 윈도우 스크롤 업데이트
+   _scrollToWindow(currentIndex);
+
+   return SizedBox(
      height: 40,
-     child: Row(
-       mainAxisSize: MainAxisSize.min,
-       children: pages.asMap().entries.map((entry) {
-         final index = entry.key;
-         final page = entry.value;
-         final isSelected = index == currentIndex;
-         
-         return GestureDetector(
-           onTap: () {
-             if (ref.read(appSettingsProvider).isHapticEnabled) {
-               HapticFeedback.lightImpact(); // 🎯 간단 버전에도 햅틱 추가!
-             }
-             
-             ref.read(selectedTabProvider.notifier).state = index;
-             pageController.animateToPage(
-               index,
-               duration: const Duration(milliseconds: 300),
-               curve: Curves.easeInOut,
-             );
-           },
-           child: Container(
-             margin: const EdgeInsets.symmetric(horizontal: 4),
-             padding: const EdgeInsets.all(8),
+     child: SingleChildScrollView( // 🔥 Row → SingleChildScrollView로 변경
+       controller: _scrollController,
+       scrollDirection: Axis.horizontal,
+       physics: const NeverScrollableScrollPhysics(), // 사용자 스크롤 금지
+       child: Row(
+         mainAxisSize: MainAxisSize.min,
+         children: widget.pages.asMap().entries.map((entry) {
+           final index = entry.key;
+           final page = entry.value;
+           final isSelected = index == currentIndex;
+           
+           return GestureDetector(
+             onTap: () {
+               if (ref.read(appSettingsProvider).isHapticEnabled) {
+                 HapticFeedback.lightImpact(); // 🎯 간단 버전에도 햅틱 추가!
+               }
+               
+               ref.read(selectedTabProvider.notifier).state = index;
+               widget.pageController.animateToPage(
+                 index,
+                 duration: const Duration(milliseconds: 300),
+                 curve: Curves.easeInOut,
+               );
+             },
              child: Container(
-               width: 32,
-               height: 32,
-               decoration: BoxDecoration(
-                 shape: BoxShape.circle,
-                 color: isSelected 
-                   ? Colors.orange.withValues(alpha: 0.1)
-                   : Colors.transparent,
-                 border: isSelected 
-                   ? Border.all(color: Colors.orange.withValues(alpha: 0.3), width: 1)
-                   : null,
-               ),
-               child: Icon(
-                 page.icon,
-                 size: isSelected ? 20 : 16,
-                 color: isSelected ? Colors.orange : Colors.grey.shade400,
+               margin: const EdgeInsets.symmetric(horizontal: 4),
+               padding: const EdgeInsets.all(8),
+               child: Container(
+                 width: 32,
+                 height: 32,
+                 decoration: BoxDecoration(
+                   shape: BoxShape.circle,
+                   color: isSelected 
+                     ? Colors.orange.withValues(alpha: 0.1)
+                     : Colors.transparent,
+                   border: isSelected 
+                     ? Border.all(color: Colors.orange.withValues(alpha: 0.3), width: 1)
+                     : null,
+                 ),
+                 child: Icon(
+                   page.icon,
+                   size: isSelected ? 20 : 16,
+                   color: isSelected ? Colors.orange : Colors.grey.shade400,
+                 ),
                ),
              ),
-           ),
-         );
-       }).toList(),
+           );
+         }).toList(),
+       ),
      ),
    );
+ }
+
+ /// 🔥 현재 인덱스를 기준으로 4개씩 윈도우 슬라이딩 (SimpleSlideIndicator용)
+ void _scrollToWindow(int currentIndex) {
+   const windowSize = 4;
+   final total = widget.pages.length;
+   
+   // 5개 미만이면 롤링 불필요
+   if (total <= windowSize) return;
+   
+   // 윈도우 시작 인덱스 계산 (단방향)
+   int startIndex;
+   if (currentIndex <= 2) {
+     // 0,1,2,3 페이지일 때는 [0,1,2,3] 윈도우
+     startIndex = 0;
+   } else {
+     // 4 페이지일 때는 [1,2,3,4] 윈도우
+     startIndex = 1;
+   }
+   
+   // 아이콘 하나의 너비 계산 (margin + padding + 아이콘 영역)
+   // margin: 4*2, padding: 8*2, width: 32 = 56
+   const itemWidth = 32.0 + 16.0 + 8.0;
+   final targetOffset = startIndex * itemWidth;
+   
+   // 부드럽게 스크롤 이동
+   if (_scrollController.hasClients) {
+     _scrollController.animateTo(
+       targetOffset,
+       duration: const Duration(milliseconds: 300),
+       curve: Curves.easeInOut,
+     );
+   }
  }
 }

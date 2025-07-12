@@ -429,6 +429,9 @@ class CoinLogoProvider {
       'NEWT': 'newt-newton-protocol',
       'SAHARA': 'sahara-sahara-ai',
       'MOODENG': 'moodeng-moo-deng-moodengsbs',
+      'HYPER': 'hyper-hyperlane',
+      'BABY': 'baby-babylon',
+      'RESOLV': 'resolv-resolv',
     };
     
     return paprikaMappings[ticker.toUpperCase()];

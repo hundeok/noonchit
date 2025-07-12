@@ -186,7 +186,7 @@ class CommonToggleButton extends ConsumerWidget {
     return GestureDetector(
       onTap: () {
         if (ref.read(appSettingsProvider).isHapticEnabled) {
-          HapticFeedback.selectionClick();
+          HapticFeedback.lightImpact();
         }
         onTap();
       },

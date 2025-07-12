@@ -5,7 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../config/app_config.dart';
 import '../utils/logger.dart';
-import '../common/time_frame_manager.dart'; // 🔥 공통 TimeFrame 시스템 사용
+import '../common/time_frame_manager.dart'; // 🔥 간소화된 TimeFrame 시스템 사용
 import '../common/time_frame_types.dart';   // 🔥 공통 타입 사용
 import 'trade_provider.dart' show masterTradeStreamProvider, repoProvider;
 import '../../domain/entities/volume.dart';
@@ -98,10 +98,10 @@ class VolumeData {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// 🧠 Core Logic: VolumeTransformer (공통 TimeFrame 리셋 연동)
+// 🧠 Core Logic: VolumeTransformer (간소화된 TimeFrame 연동)
 // ══════════════════════════════════════════════════════════════════════════════
 
-/// 완전히 순수한 함수형 변환기 + 글로벌 TimeFrame 연동
+/// 완전히 순수한 함수형 변환기 + 간소화된 TimeFrame 연동
 class VolumeTransformer extends StreamTransformerBase<Trade, VolumeEvent> {
   final TimeFrame timeFrame;
   final ProcessingConfig config; // 🔥 공통 ProcessingConfig 사용
@@ -174,7 +174,7 @@ class VolumeTransformer extends StreamTransformerBase<Trade, VolumeEvent> {
     
     controller = StreamController<VolumeEvent>(
       onListen: () {
-        // 🔥 글로벌 TimeFrame 리셋 이벤트 구독
+        // 🔥 간소화된 TimeFrame 리셋 이벤트 구독
         resetSubscription = GlobalTimeFrameManager()
             .getResetStream(timeFrame)
             .listen((resetEvent) {
@@ -279,17 +279,8 @@ class VolumeTransformer extends StreamTransformerBase<Trade, VolumeEvent> {
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// 🎯 Providers (공통 TimeFrame 시스템 연동)
+// 🎯 Providers (간소화된 구조)
 // ══════════════════════════════════════════════════════════════════════════════
-
-/// 🔥 개별 Provider 제거 - 공통 volumeSelectedTimeFrameProvider 사용
-// final selectedTimeFrameProvider = ... (제거)
-
-/// 🔥 개별 리셋 시간 관리 제거 - 공통 GlobalTimeFrameManager 사용  
-// final timeFrameResetTimesProvider = ... (제거)
-
-/// 🔥 개별 ProcessingConfig 제거 - 공통 commonProcessingConfigProvider 사용
-// final volumeProcessingConfigProvider = ... (제거)
 
 /// 시간대별 StreamController 관리 (멀티스트림)
 final volumeTimeFrameControllersProvider = Provider<Map<TimeFrame, StreamController<VolumeEvent>>>((ref) {
@@ -316,7 +307,7 @@ final volumeTimeFrameControllersProvider = Provider<Map<TimeFrame, StreamControl
   return controllers;
 });
 
-/// 🔥 Master Stream 기반 팬-아웃 (공통 TimeFrame 연동)
+/// 🔥 Master Stream 기반 팬-아웃 (간소화된 TimeFrame 연동)
 final volumeStreamBinderProvider = Provider((ref) async {
   // ✅ Master Trade Stream 사용 (Trade와 동일한 WS 연결 공유)
   final masterStream = await ref.read(masterTradeStreamProvider.future);
@@ -348,11 +339,11 @@ final volumeStreamBinderProvider = Provider((ref) async {
   return controllers;
 });
 
-/// 메인 볼륨 데이터 스트림 (공통 Provider 사용)
+/// 메인 볼륨 데이터 스트림 (간소화된 Provider 사용)
 final volumeDataProvider = StreamProvider<VolumeEvent>((ref) async* {
   ref.keepAlive();
   
-  final selectedTimeFrame = ref.watch(volumeSelectedTimeFrameProvider); // 🔥 공통 Provider 사용
+  final selectedTimeFrame = ref.watch(volumeSelectedTimeFrameProvider); // 🔥 간소화된 Provider 사용
   final controllers = ref.read(volumeTimeFrameControllersProvider);
   
   // 스트림 바인더 활성화
@@ -376,71 +367,6 @@ final currentVolumeListProvider = Provider<List<Volume>>((ref) {
   final volumeEvent = ref.watch(volumeDataProvider).valueOrNull;
   return volumeEvent?.volumes ?? [];
 });
-
-// ══════════════════════════════════════════════════════════════════════════════
-// 🎛️ Volume TimeFrame Controller (공통 시스템 연동)
-// ══════════════════════════════════════════════════════════════════════════════
-
-final volumeTimeFrameControllerProvider = Provider((ref) => VolumeTimeFrameController(ref));
-
-class VolumeTimeFrameController {
-  final Ref _ref;
-  
-  VolumeTimeFrameController(this._ref);
-
-  /// 시간대 변경 (공통 Provider 사용)
-  void setTimeFrame(TimeFrame timeFrame) {
-    _ref.read(volumeSelectedTimeFrameProvider.notifier).state = timeFrame;
-    
-    if (AppConfig.enableTradeLog) {
-      log.i('🔄 Volume TimeFrame changed: ${timeFrame.displayName}');
-    }
-  }
-
-  /// 현재 시간대 수동 리셋 (공통 GlobalTimeFrameManager 사용)
-  void resetCurrentTimeFrame() {
-    final currentTimeFrame = _ref.read(volumeSelectedTimeFrameProvider);
-    final globalController = _ref.read(globalTimeFrameControllerProvider);
-    
-    globalController.resetTimeFrame(currentTimeFrame);
-    
-    if (AppConfig.enableTradeLog) {
-      log.i('🔄 Volume Manual reset: ${currentTimeFrame.displayName}');
-    }
-  }
-
-  /// 모든 시간대 리셋 (공통 GlobalTimeFrameManager 사용)
-  void resetAllTimeFrames() {
-    final globalController = _ref.read(globalTimeFrameControllerProvider);
-    globalController.resetAllTimeFrames();
-    
-    if (AppConfig.enableTradeLog) {
-      log.i('🔄 Volume Manual reset: all timeframes');
-    }
-  }
-
-  /// 🔥 공통 시스템으로 다음 리셋 시간 계산
-  DateTime? getNextResetTime() {
-    final currentTimeFrame = _ref.read(volumeSelectedTimeFrameProvider);
-    final globalController = _ref.read(globalTimeFrameControllerProvider);
-    
-    return globalController.getNextResetTime(currentTimeFrame);
-  }
-
-  /// Getters (공통 Provider 사용)
-  TimeFrame get currentTimeFrame => _ref.read(volumeSelectedTimeFrameProvider);
-  
-  int get currentIndex {
-    final availableTimeFrames = TimeFrame.fromAppConfig();
-    return availableTimeFrames.indexOf(currentTimeFrame);
-  }
-  
-  List<TimeFrame> get availableTimeFrames => TimeFrame.fromAppConfig();
-  
-  String get currentTimeFrameName => currentTimeFrame.displayName;
-  
-  String getTimeFrameName(TimeFrame timeFrame) => timeFrame.displayName;
-}
 
 // ══════════════════════════════════════════════════════════════════════════════
 // 🏗️ UseCase Layer (기존 유지)

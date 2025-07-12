@@ -19,16 +19,15 @@ class SectorPage extends ConsumerWidget {
     final state = ref.watch(sectorControllerProvider);
     final controller = ref.read(sectorControllerProvider.notifier);
     
-    // ✅ TimeFrame 관련 - 섹터 독립적 TimeFrame 사용
+    // 🔥 핵심 수정: ref.watch로 실시간 상태 감지
     final currentTimeFrame = ref.watch(selectedSectorTimeFrameProvider);
-    final availableTimeFrames = TimeFrame.fromAppConfig();
+    final availableTimeFrames = controller.availableTimeFrames;
     final currentIndex = availableTimeFrames.indexOf(currentTimeFrame);
-    final timeFrameController = ref.read(sectorTimeFrameController);
     
     // ✅ UI 설정
     final sliderPosition = ref.watch(appSettingsProvider).sliderPosition;
     
-    // ✅ 공통 슬라이더 위젯 - 기존 구조 완전 유지
+    // ✅ 공통 슬라이더 위젯 - Controller 중심 설계
     final sliderWidget = CommonSliderWidget(
       leftText: '시간대: ${currentTimeFrame.displayName}',
       sliderValue: currentIndex.toDouble(),
@@ -39,7 +38,8 @@ class SectorPage extends ConsumerWidget {
       onSliderChanged: (value) {
         final newIndex = value.round();
         if (newIndex >= 0 && newIndex < availableTimeFrames.length) {
-          controller.setTimeFrame(availableTimeFrames[newIndex]); // ✅ 직접 호출로 즉시 반응
+          // 🔥 Surge/Volume과 동일하게 직접 setTimeFrame 호출
+          controller.setTimeFrame(availableTimeFrames[newIndex]);
         }
       },
       // 🚀 Sector 고유: 섹터 분류 토글 버튼
@@ -52,7 +52,8 @@ class SectorPage extends ConsumerWidget {
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
       ),
       rightWidget: CommonCountdownWidget(
-        nextResetTime: timeFrameController.getNextResetTime(), // 🔥 완벽한 타이머 동기화
+        // 🔥 Controller 중심 설계 - Controller 메서드 사용
+        nextResetTime: controller.getNextResetTime(),
       ),
     );
 
@@ -68,11 +69,11 @@ class SectorPage extends ConsumerWidget {
     );
   }
 
-  /// ✅ 섹터 리스트 (Controller state 기반) - 기존 패턴 유지
+  /// ✅ 섹터 리스트 (Controller state 기반) - Controller 중심 설계
   Widget _buildSectorList(
     SectorControllerState state,
     SectorController controller,
-    TimeFrame currentTimeFrame, // 🔥 TimeFrame enum 사용
+    TimeFrame currentTimeFrame, // 🔥 Controller에서 받은 TimeFrame
     BuildContext context,
   ) {
     // ✅ 로딩 상태

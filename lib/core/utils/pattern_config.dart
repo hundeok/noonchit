@@ -1,11 +1,13 @@
 import '../../domain/entities/signal.dart';
+import '../../core/config/app_config.dart';
+import '../../core/utils/logger.dart';
 
 /// 🎯 PatternConfig - 패턴별 설정값 관리
 /// 
 /// 개선사항:
 /// - 4,5번 패턴 완화된 설정값 적용
 /// - 패턴별 개별 쿨다운 시간 관리
-/// - 설정값 유효성 검사
+/// - 설정값 유효성 검사 (패턴별 분리)
 /// - 런타임 설정 변경 지원
 class PatternConfig {
   
@@ -86,9 +88,18 @@ class PatternConfig {
     return Map.from(_currentConfig[pattern] ?? <String, double>{});
   }
 
-  /// 특정 설정값 조회
+  /// 특정 설정값 조회 (기본값 fallback 포함)
   double getConfigValue(PatternType pattern, String key) {
-    return _currentConfig[pattern]?[key] ?? 0.0;
+    // 1. 현재 설정(_currentConfig)에서 값을 먼저 찾아봅니다.
+    final currentValue = _currentConfig[pattern]?[key];
+
+    // 2. 만약 값이 있다면 그 값을 반환합니다.
+    if (currentValue != null) {
+      return currentValue;
+    }
+
+    // 3. 현재 설정에 값이 없다면, 최후의 보루로 기본 설정(_defaultConfig)에서 값을 찾아 반환합니다.
+    return _defaultConfig[pattern]?[key] ?? 0.0;
   }
 
   /// 패턴별 쿨다운 시간 조회
@@ -99,14 +110,19 @@ class PatternConfig {
   /// 🛠️ 런타임 설정 변경
   
   /// 특정 패턴의 설정값 업데이트
-  void updatePatternConfig(PatternType pattern, String key, double value) {
-    if (_isValidConfigValue(pattern, key, value)) {
-      _currentConfig[pattern] ??= <String, double>{};
-      _currentConfig[pattern]![key] = value;
-    } else {
-      throw ArgumentError('Invalid config value: $key = $value for pattern ${pattern.name}');
+void updatePatternConfig(PatternType pattern, String key, double value) {
+  if (_isValidConfigValue(pattern, key, value)) {
+    _currentConfig[pattern] ??= <String, double>{};
+    _currentConfig[pattern]![key] = value;
+    
+    // 🆕 추가할 로그
+    if (AppConfig.enableTradeLog) {
+      log.i('🔧 PatternConfig 업데이트 완료: ${pattern.name}.$key = $value');
     }
+  } else {
+    throw ArgumentError('Invalid config value: $key = $value for pattern ${pattern.name}');
   }
+}
 
   /// 패턴의 전체 설정 업데이트
   void updateFullPatternConfig(PatternType pattern, Map<String, double> config) {
@@ -130,45 +146,136 @@ class PatternConfig {
     }
   }
 
-  /// 🔍 설정값 유효성 검사
+  /// 🔍 설정값 유효성 검사 (패턴별 분리)
   bool _isValidConfigValue(PatternType pattern, String key, double value) {
     // 음수 값 방지
     if (value < 0) return false;
     
-    // 패턴별 특수 검사
+    // 패턴별 검증 위임
     switch (pattern) {
       case PatternType.surge:
-        if (key == 'priceChangePercent' && (value < 0.1 || value > 10.0)) return false;
-        if (key == 'zScoreThreshold' && (value < 0.5 || value > 5.0)) return false;
-        break;
-        
+        return _validateSurgeConfig(key, value);
       case PatternType.flashFire:
-        if (key == 'buyRatioMin' && (value < 0.0 || value > 1.0)) return false;
-        if (key == 'volumeMultiplier' && (value < 1.0 || value > 10.0)) return false;
-        break;
-        
+        return _validateFlashFireConfig(key, value);
       case PatternType.stackUp:
-        if (key == 'consecutiveMin' && (value < 1 || value > 10)) return false;
-        if (key == 'rSquaredMin' && (value < 0.0 || value > 1.0)) return false;
-        break;
-        
+        return _validateStackUpConfig(key, value);
       case PatternType.stealthIn:
-        if (key == 'buyRatioMin' && (value < 0.0 || value > 1.0)) return false;
-        if (key == 'cvThreshold' && (value < 0.001 || value > 0.5)) return false;
-        break;
-        
+        return _validateStealthInConfig(key, value);
       case PatternType.blackHole:
-        if (key == 'buyRatioMin' && (value < 0.0 || value > 1.0)) return false;
-        if (key == 'buyRatioMax' && (value < 0.0 || value > 1.0)) return false;
-        if (key == 'cvThreshold' && (value < 0.001 || value > 0.5)) return false;
-        break;
-        
+        return _validateBlackHoleConfig(key, value);
       case PatternType.reboundShot:
-        if (key == 'priceRangeMin' && (value < 0.001 || value > 0.5)) return false;
-        break;
+        return _validateReboundShotConfig(key, value);
     }
-    
-    return true;
+  }
+
+  /// 🎯 패턴별 검증 로직
+
+  /// Surge 패턴 검증
+  bool _validateSurgeConfig(String key, double value) {
+    switch (key) {
+      case 'priceChangePercent':
+        return value >= 0.1 && value <= 10.0;
+      case 'zScoreThreshold':
+        return value >= 0.5 && value <= 5.0;
+      case 'minTradeAmount':
+        return value >= 100000; // 최소 10만원
+      case 'lvThreshold':
+        return value >= 0;
+      default:
+        return true;
+    }
+  }
+
+  /// FlashFire 패턴 검증
+  bool _validateFlashFireConfig(String key, double value) {
+    switch (key) {
+      case 'zScoreThreshold':
+        return value >= 0.5 && value <= 5.0;
+      case 'minTradeAmount':
+        return value >= 1000000; // 최소 100만원
+      case 'buyRatioMin':
+        return value >= 0.0 && value <= 1.0;
+      case 'volumeMultiplier':
+        return value >= 1.0 && value <= 10.0;
+      case 'mbrThreshold':
+        return value >= 0.0 && value <= 1.0;
+      case 'mrThreshold':
+        return value >= 0.0 && value <= 1.0;
+      default:
+        return true;
+    }
+  }
+
+  /// StackUp 패턴 검증
+  bool _validateStackUpConfig(String key, double value) {
+    switch (key) {
+      case 'consecutiveMin':
+        return value >= 1 && value <= 10;
+      case 'minVolume':
+        return value >= 100000; // 최소 10만원
+      case 'zScoreThreshold':
+        return value >= 0.5 && value <= 5.0;
+      case 'volumeMultiplier':
+        return value >= 1.0 && value <= 10.0;
+      case 'rSquaredMin':
+        return value >= 0.0 && value <= 1.0;
+      default:
+        return true;
+    }
+  }
+
+  /// StealthIn 패턴 검증
+  bool _validateStealthInConfig(String key, double value) {
+    switch (key) {
+      case 'minTradeAmount':
+        return value >= 1000000; // 최소 100만원
+      case 'intervalVarianceMax':
+        return value >= 0;
+      case 'buyRatioMin':
+        return value >= 0.0 && value <= 1.0;
+      case 'avgTradeSizeRatio':
+        return value >= 0.0 && value <= 1.0;
+      case 'minTradeCount':
+        return value >= 1;
+      case 'cvThreshold':
+        return value >= 0.001 && value <= 0.5;
+      default:
+        return true;
+    }
+  }
+
+  /// BlackHole 패턴 검증
+  bool _validateBlackHoleConfig(String key, double value) {
+    switch (key) {
+      case 'minTradeAmount':
+        return value >= 1000000; // 최소 100만원
+      case 'cvThreshold':
+        return value >= 0.001 && value <= 0.5;
+      case 'buyRatioMin':
+        return value >= 0.0 && value <= 1.0;
+      case 'buyRatioMax':
+        return value >= 0.0 && value <= 1.0;
+      case 'priceZScoreMax':
+        return value >= 0.0 && value <= 10.0;
+      case 'stdDevRatio':
+        return value >= 0.0 && value <= 1.0;
+      default:
+        return true;
+    }
+  }
+
+  /// ReboundShot 패턴 검증
+  bool _validateReboundShotConfig(String key, double value) {
+    switch (key) {
+      case 'minVolume':
+        return value >= 100000; // 최소 10만원
+      case 'priceRangeMin':
+        return value >= 0.001 && value <= 0.5;
+      case 'jumpThreshold':
+        return value >= 0;
+      default:
+        return true;
+    }
   }
 
   /// 설정 깊은 복사

@@ -1,4 +1,3 @@
-// lib/shared/widgets/sector_names.dart
 // 🆕 실제 섹터 분류에 맞춘 네이밍 매핑
 
 import '../../domain/entities/app_settings.dart';
@@ -165,7 +164,7 @@ class SectorNames {
     },
   };
 
-  // 🎯 기본 분류 (18개 섹터) 네이밍 매핑 - 🆕 신규상장 4개 섹터 추가
+  // 🎯 기본 분류 (18개 섹터) 네이밍 매핑 - 🆕 신규상장 5개 섹터 추가
   static const Map<String, Map<String, String>> basicSectorNaming = {
     '메이저 코인': {
       'ticker': 'MAJOR',
@@ -238,7 +237,7 @@ class SectorNames {
       'english': 'AI/Tech Tokens',
     },
 
-    // 🆕 신규상장 섹터 4개 추가
+    // 🆕 신규상장 섹터
     '2023년 신규상장': {
       'ticker': 'NEW-23',
       'korean': '2023년 신규상장',
@@ -258,6 +257,11 @@ class SectorNames {
       'ticker': 'NEW-25H1',
       'korean': '2025년 상반기 신규상장',
       'english': '2025 H1 New Listings',
+    },
+    '2025년 하반기 신규상장': {
+      'ticker': 'NEW-25H2',
+      'korean': '2025년 하반기 신규상장',
+      'english': '2025 H2 New Listings',
     },
   };
 

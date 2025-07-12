@@ -11,7 +11,7 @@
 
 /// Signal 패턴 타입 정의 (V4.1 확장)
 enum PatternType {
-  surge,       // 1. 급등 (1분 전 대비 0.4% 상승)
+  surge,       // 1. 급등🚀 (1분 전 대비 0.4% 상승)
   flashFire,   // 2. 불티🔥 (3분 거래대금 급증)
   stackUp,     // 3. 스택업💰 (1분씩 연속 증가)
   stealthIn,   // 4. 침투자👣 (소량 지속 유입) - 완화됨
@@ -23,7 +23,7 @@ extension PatternTypeExtension on PatternType {
   String get displayName {
     switch (this) {
       case PatternType.surge:
-        return '급등';
+        return '급등🚀';
       case PatternType.flashFire:
         return '불티🔥';
       case PatternType.stackUp:
@@ -38,21 +38,22 @@ extension PatternTypeExtension on PatternType {
   }
 
   String get description {
-    switch (this) {
-      case PatternType.surge:
-        return '1분 전 대비 0.4% 이상 상승 (V4.1)';
-      case PatternType.flashFire:
-        return '3분 거래대금 급증 + RSI 확인';
-      case PatternType.stackUp:
-        return '연속 매집 + MACD 모멘텀';
-      case PatternType.stealthIn:
-        return '은밀한 유입 (완화된 기준)';
-      case PatternType.blackHole:
-        return '이상 체결 (완화된 기준)';
-      case PatternType.reboundShot:
-        return '과매도 반등 + 온라인 지표';
-    }
+  switch (this) {
+    case PatternType.surge:
+      return '가격 급등 + 체결량 폭발 + MACD·RSI·유동성 지표 충족';
+    case PatternType.flashFire:
+      return '거래대금 급증 + 매수 강도 + 머신급 체결 가속';
+    case PatternType.stackUp:
+      return '연속 매집 + MACD 상승 + 거래량 추세 정렬';
+    case PatternType.stealthIn:
+      return '저변동 속 유입 지속 + 분산 체결 + 누적 매수 감지';
+    case PatternType.blackHole:
+      return '가격 정체 + 매수·매도 균형 + 체결 왜곡 패턴';
+    case PatternType.reboundShot:
+      return '과매도 후 반등 + RSI·MACD 반응 + 점프 스코어 확인';
   }
+}
+
 
   /// V4.1 패턴별 기본 임계값 (완화됨)
   double get defaultThreshold {

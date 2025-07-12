@@ -8,10 +8,12 @@ import '../utils/logger.dart';
 import 'time_frame_types.dart';
 
 // ══════════════════════════════════════════════════════════════════════════════
-// 🕐 Global TimeFrame Manager (단일 타이머 시스템)
+// 🕐 Simplified Global TimeFrame Manager (타이머 전용)
 // ══════════════════════════════════════════════════════════════════════════════
 
-/// 글로벌 시간대 관리자 (싱글톤 패턴)
+/// 글로벌 시간대 타이머 관리자 (싱글톤 패턴)
+/// 🎯 역할: 시간대별 자동 리셋 타이머만 담당
+/// ❌ UI 상태 관리는 각 모듈 Controller에서 처리
 class GlobalTimeFrameManager {
   static final GlobalTimeFrameManager _instance = GlobalTimeFrameManager._internal();
   factory GlobalTimeFrameManager() => _instance;
@@ -22,7 +24,8 @@ class GlobalTimeFrameManager {
   final Map<TimeFrame, StreamController<TimeFrameResetEvent>> _controllers = {};
   final Map<TimeFrame, DateTime> _lastResetTimes = {};
 
-  /// 특정 TimeFrame의 리셋 이벤트 스트림 구독
+  /// 🎯 특정 TimeFrame의 리셋 이벤트 스트림 구독
+  /// 각 모듈의 Transformer에서 호출
   Stream<TimeFrameResetEvent> getResetStream(TimeFrame timeFrame) {
     // 이미 존재하면 기존 스트림 반환
     if (_controllers.containsKey(timeFrame)) {
@@ -41,18 +44,18 @@ class GlobalTimeFrameManager {
     _startTimer(timeFrame);
 
     if (AppConfig.enableTradeLog) {
-      log.i('🕐 Global timer started for ${timeFrame.displayName}');
+      log.i('🕐 Timer started for ${timeFrame.displayName}');
     }
 
     return controller.stream;
   }
 
-  /// TimeFrame용 타이머 시작 (기존 Volume/Surge 로직 사용)
+  /// 🎯 TimeFrame용 타이머 시작
   void _startTimer(TimeFrame timeFrame) {
     _scheduleNextReset(timeFrame);
   }
 
-  /// 다음 리셋 스케줄링 (상대시간 기반)
+  /// 🎯 다음 리셋 스케줄링 (상대시간 기반)
   void _scheduleNextReset(TimeFrame timeFrame) {
     final now = DateTime.now();
     final lastReset = _lastResetTimes[timeFrame] ?? now;
@@ -72,7 +75,7 @@ class GlobalTimeFrameManager {
     }
   }
 
-  /// 리셋 이벤트 발생
+  /// 🎯 리셋 이벤트 발생
   void _triggerReset(TimeFrame timeFrame) {
     final now = DateTime.now();
     _lastResetTimes[timeFrame] = now;
@@ -82,17 +85,18 @@ class GlobalTimeFrameManager {
       final resetEvent = TimeFrameResetEvent(
         timeFrame: timeFrame,
         resetTime: now,
-        nextResetTime: now.add(timeFrame.duration), // 상대시간으로 계산
+        nextResetTime: now.add(timeFrame.duration),
       );
       controller.add(resetEvent);
 
       if (AppConfig.enableTradeLog) {
-        log.i('🔄 Global reset triggered: ${timeFrame.displayName}');
+        log.i('🔄 Reset triggered: ${timeFrame.displayName}');
       }
     }
   }
 
-  /// 수동 리셋 (모든 TimeFrame)
+  /// 🎯 수동 리셋 (모든 TimeFrame)
+  /// 각 모듈 Controller에서 호출 가능
   void resetAll() {
     final now = DateTime.now();
     
@@ -104,18 +108,19 @@ class GlobalTimeFrameManager {
         final resetEvent = TimeFrameResetEvent(
           timeFrame: timeFrame,
           resetTime: now,
-          nextResetTime: now.add(timeFrame.duration), // 상대시간으로 계산
+          nextResetTime: now.add(timeFrame.duration),
         );
         controller.add(resetEvent);
       }
     }
 
     if (AppConfig.enableTradeLog) {
-      log.i('🔄 Global manual reset: all timeframes');
+      log.i('🔄 Manual reset: all timeframes');
     }
   }
 
-  /// 특정 TimeFrame 수동 리셋
+  /// 🎯 특정 TimeFrame 수동 리셋
+  /// 각 모듈 Controller에서 호출 가능
   void resetTimeFrame(TimeFrame timeFrame) {
     final now = DateTime.now();
     _lastResetTimes[timeFrame] = now;
@@ -125,17 +130,18 @@ class GlobalTimeFrameManager {
       final resetEvent = TimeFrameResetEvent(
         timeFrame: timeFrame,
         resetTime: now,
-        nextResetTime: now.add(timeFrame.duration), // 상대시간으로 계산
+        nextResetTime: now.add(timeFrame.duration),
       );
       controller.add(resetEvent);
 
       if (AppConfig.enableTradeLog) {
-        log.i('🔄 Global manual reset: ${timeFrame.displayName}');
+        log.i('🔄 Manual reset: ${timeFrame.displayName}');
       }
     }
   }
 
-  /// 다음 리셋 시간 조회 (상대시간 기반)
+  /// 🎯 다음 리셋 시간 조회
+  /// UI 카운트다운에서 사용
   DateTime? getNextResetTime(TimeFrame timeFrame) {
     final lastReset = _lastResetTimes[timeFrame];
     if (lastReset == null) return null;
@@ -143,12 +149,25 @@ class GlobalTimeFrameManager {
     return lastReset.add(timeFrame.duration);
   }
 
-  /// 마지막 리셋 시간 조회
+  /// 🎯 마지막 리셋 시간 조회
+  /// Transformer에서 시작 시간 계산용
   DateTime? getLastResetTime(TimeFrame timeFrame) {
     return _lastResetTimes[timeFrame];
   }
 
-  /// 리소스 정리
+  /// 🎯 현재 활성 TimeFrame 목록 (디버그용)
+  List<TimeFrame> get activeTimeFrames => _controllers.keys.toList();
+
+  /// 🎯 디버그 정보
+  Map<String, dynamic> get debugInfo => {
+    'activeTimeFrames': activeTimeFrames.map((tf) => tf.displayName).toList(),
+    'activeTimers': _timers.length,
+    'lastResetTimes': _lastResetTimes.map(
+      (tf, time) => MapEntry(tf.displayName, time.toIso8601String()),
+    ),
+  };
+
+  /// 🎯 리소스 정리
   void dispose() {
     // 모든 타이머 정리
     for (final timer in _timers.values) {
@@ -166,28 +185,16 @@ class GlobalTimeFrameManager {
     _lastResetTimes.clear();
 
     if (AppConfig.enableTradeLog) {
-      log.i('🛑 Global TimeFrame Manager disposed');
+      log.i('🛑 TimeFrame Manager disposed');
     }
   }
-
-  /// 현재 활성 TimeFrame 목록
-  List<TimeFrame> get activeTimeFrames => _controllers.keys.toList();
-
-  /// 디버그 정보
-  Map<String, dynamic> get debugInfo => {
-    'activeTimeFrames': activeTimeFrames.map((tf) => tf.displayName).toList(),
-    'activeTimers': _timers.length,
-    'lastResetTimes': _lastResetTimes.map(
-      (tf, time) => MapEntry(tf.displayName, time.toIso8601String()),
-    ),
-  };
 }
 
 // ══════════════════════════════════════════════════════════════════════════════
-// 🎯 Providers
+// 🎯 Provider (타이머 관리용)
 // ══════════════════════════════════════════════════════════════════════════════
 
-/// 글로벌 TimeFrame 관리자 Provider
+/// 글로벌 TimeFrame 타이머 관리자 Provider
 final globalTimeFrameManagerProvider = Provider<GlobalTimeFrameManager>((ref) {
   final manager = GlobalTimeFrameManager();
   
@@ -199,16 +206,11 @@ final globalTimeFrameManagerProvider = Provider<GlobalTimeFrameManager>((ref) {
 });
 
 /// TimeFrame별 리셋 이벤트 스트림 Provider
+/// Transformer에서 사용
 final timeFrameResetStreamProvider = StreamProvider.family<TimeFrameResetEvent, TimeFrame>((ref, timeFrame) {
   final manager = ref.read(globalTimeFrameManagerProvider);
   return manager.getResetStream(timeFrame);
 });
-
-/// 선택된 TimeFrame Provider (Volume용)
-final volumeSelectedTimeFrameProvider = StateProvider<TimeFrame>((ref) => TimeFrame.min1);
-
-/// 선택된 TimeFrame Provider (Surge용)  
-final surgeSelectedTimeFrameProvider = StateProvider<TimeFrame>((ref) => TimeFrame.min1);
 
 /// 공통 처리 설정 Provider
 final commonProcessingConfigProvider = Provider<ProcessingConfig>((ref) {
@@ -224,70 +226,14 @@ final commonProcessingConfigProvider = Provider<ProcessingConfig>((ref) {
   );
 });
 
-/// TimeFrame 컨트롤러 Provider
-final globalTimeFrameControllerProvider = Provider((ref) => GlobalTimeFrameController(ref));
-
 // ══════════════════════════════════════════════════════════════════════════════
-// 🎛️ Global TimeFrame Controller
+// 🎯 각 모듈별 TimeFrame State Providers (UI 상태 관리)
 // ══════════════════════════════════════════════════════════════════════════════
 
-class GlobalTimeFrameController {
-  final Ref _ref;
-  
-  GlobalTimeFrameController(this._ref);
+/// Volume 선택된 TimeFrame Provider
+/// VolumeController에서 직접 관리
+final volumeSelectedTimeFrameProvider = StateProvider<TimeFrame>((ref) => TimeFrame.min1);
 
-  /// Volume 시간대 변경
-  void setVolumeTimeFrame(TimeFrame timeFrame) {
-    _ref.read(volumeSelectedTimeFrameProvider.notifier).state = timeFrame;
-    
-    if (AppConfig.enableTradeLog) {
-      log.i('🔄 Volume TimeFrame changed: ${timeFrame.displayName}');
-    }
-  }
-
-  /// Surge 시간대 변경
-  void setSurgeTimeFrame(TimeFrame timeFrame) {
-    _ref.read(surgeSelectedTimeFrameProvider.notifier).state = timeFrame;
-    
-    if (AppConfig.enableTradeLog) {
-      log.i('🔄 Surge TimeFrame changed: ${timeFrame.displayName}');
-    }
-  }
-
-  /// 모든 TimeFrame 리셋
-  void resetAllTimeFrames() {
-    final manager = _ref.read(globalTimeFrameManagerProvider);
-    manager.resetAll();
-  }
-
-  /// 특정 TimeFrame 리셋
-  void resetTimeFrame(TimeFrame timeFrame) {
-    final manager = _ref.read(globalTimeFrameManagerProvider);
-    manager.resetTimeFrame(timeFrame);
-  }
-
-  /// 다음 리셋 시간 조회
-  DateTime? getNextResetTime(TimeFrame timeFrame) {
-    final manager = _ref.read(globalTimeFrameManagerProvider);
-    return manager.getNextResetTime(timeFrame);
-  }
-
-  // ══════════════════════════════════════════════════════════════════════════════
-  // Getters
-  // ══════════════════════════════════════════════════════════════════════════════
-
-  TimeFrame get currentVolumeTimeFrame => _ref.read(volumeSelectedTimeFrameProvider);
-  TimeFrame get currentSurgeTimeFrame => _ref.read(surgeSelectedTimeFrameProvider);
-  
-  List<TimeFrame> get availableTimeFrames => TimeFrame.fromAppConfig();
-  
-  int getVolumeTimeFrameIndex() {
-    return availableTimeFrames.indexOf(currentVolumeTimeFrame);
-  }
-  
-  int getSurgeTimeFrameIndex() {
-    return availableTimeFrames.indexOf(currentSurgeTimeFrame);
-  }
-  
-  String getTimeFrameName(TimeFrame timeFrame) => timeFrame.displayName;
-}
+/// Surge 선택된 TimeFrame Provider  
+/// SurgeController에서 직접 관리
+final surgeSelectedTimeFrameProvider = StateProvider<TimeFrame>((ref) => TimeFrame.min1);

@@ -9,13 +9,15 @@ import 'trade_page.dart';
 import 'volume_page.dart';
 import 'sector_page.dart';
 import 'surge_page.dart';
+import 'signal_page.dart'; // 🔥 시그널 페이지 추가
 // 🔥 Controller Provider들 import 추가
 import '../controllers/volume_controller.dart';
 import '../controllers/surge_controller.dart';
 import '../controllers/trade_controller.dart';
 import '../controllers/sector_controller.dart';
+import '../controllers/signal_controller.dart'; // 🔥 시그널 컨트롤러 추가
 
-/// 🎯 메인 페이지 - PageView로 4개 화면 관리
+/// 🎯 메인 페이지 - PageView로 5개 화면 관리
 class MainPage extends ConsumerStatefulWidget {
   const MainPage({Key? key}) : super(key: key);
 
@@ -30,7 +32,7 @@ class _MainPageState extends ConsumerState<MainPage> with TickerProviderStateMix
   // ✅ TradePage의 ScrollController를 위한 각 페이지별 관리
   final Map<int, ScrollController> _pageScrollControllers = {};
   
-  // 4개 페이지 정보
+  // 🔥 5개 페이지 정보 (시그널 메뉴 추가)
   final List<PageInfo> _pages = [
     PageInfo(
       index: 0,
@@ -56,6 +58,12 @@ class _MainPageState extends ConsumerState<MainPage> with TickerProviderStateMix
       icon: Icons.pie_chart,
       builder: (scrollController) => SectorPage(scrollController: scrollController),
     ),
+    PageInfo(
+      index: 4,
+      title: '시그널',
+      icon: Icons.flash_on,
+      builder: (scrollController) => SignalPage(scrollController: scrollController),
+    ),
   ];
 
   @override
@@ -71,7 +79,7 @@ class _MainPageState extends ConsumerState<MainPage> with TickerProviderStateMix
       vsync: this,
     );
     
-    // ✅ 각 페이지별 ScrollController 초기화
+    // ✅ 각 페이지별 ScrollController 초기화 (5개로 확장)
     for (int i = 0; i < _pages.length; i++) {
       _pageScrollControllers[i] = ScrollController();
     }
@@ -104,7 +112,11 @@ class _MainPageState extends ConsumerState<MainPage> with TickerProviderStateMix
       ref.read(sectorControllerProvider);
       debugPrint('🔥 SectorController 초기화 완료');
       
-      debugPrint('✅ 모든 Controller 초기화 완료 - 4개 메뉴 모두 실행 시작!');
+      // 🔥 5. SignalController 초기화 (시그널 메뉴)
+      ref.read(signalControllerProvider);
+      debugPrint('🔥 SignalController 초기화 완료');
+      
+      debugPrint('✅ 모든 Controller 초기화 완료 - 5개 메뉴 모두 실행 시작!');
       
     } catch (e) {
       debugPrint('❌ Controller 초기화 오류: $e');
@@ -135,7 +147,7 @@ class _MainPageState extends ConsumerState<MainPage> with TickerProviderStateMix
         child: PageView.builder(
           controller: _pageController,
           onPageChanged: _onPageChanged,
-          itemCount: _pages.length,
+          itemCount: _pages.length, // 🔥 5개로 자동 확장
           // ✅ iOS 스타일 physics + 스크롤 충돌 방지
           physics: const BouncingScrollPhysics(
             parent: AlwaysScrollableScrollPhysics(),

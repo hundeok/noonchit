@@ -11,6 +11,7 @@ class _Item<T extends num> {
 
 /// 🚀 O(1) 시간 복잡도로 완전 최적화된 슬라이딩 윈도우
 /// 모든 통계 지표를 O(1)로 계산 (rSquared 포함)
+/// 🆕 V5.0 PatternDetector 호환성 추가
 class RollingWindow<T extends num> {
   final Duration span;
   final Queue<_Item<T>> _queue = Queue<_Item<T>>();
@@ -37,8 +38,13 @@ class RollingWindow<T extends num> {
   RollingWindow({required this.span});
 
   // ==========================================================================
-  // 📥 데이터 추가 (모든 누적값 실시간 업데이트)
+  // 📥 데이터 추가 (V5.0 PatternDetector 호환)
   // ==========================================================================
+  
+  /// 🆕 V5.0 PatternDetector 호환 메서드
+  void addValue(T value, DateTime timestamp) {
+    add(value, timestamp: timestamp);
+  }
   
   /// 새 데이터 추가 (모든 누적값 즉시 업데이트)
   void add(T value, {DateTime? timestamp}) {
@@ -224,7 +230,7 @@ class RollingWindow<T extends num> {
   T get min => _queue.isEmpty ? 0 as T : _queue.map((e) => e.value).reduce(math.min);
 
   // ==========================================================================
-  // 🛠️ 유틸리티 메서드들
+  // 🛠️ 유틸리티 메서드들 (V5.0 호환 추가)
   // ==========================================================================
   
   /// 윈도우 데이터 모두 제거
@@ -241,7 +247,7 @@ class RollingWindow<T extends num> {
     _syy = 0.0;
   }
   
-  /// 특정 시점까지의 데이터 강제 제거
+  /// 특정 시점까지의 데이터 강제 제거 (V5.0 호환)
   void evictBefore(DateTime cutoff) {
     while (_queue.isNotEmpty && _queue.first.timestamp.isBefore(cutoff)) {
       final old = _queue.removeFirst();
@@ -261,9 +267,16 @@ class RollingWindow<T extends num> {
     _recalculateConsecutiveIncreases();
   }
   
+  /// 🆕 V5.0 호환: 강제 정리
+  void forceCleanup() {
+    final now = DateTime.now();
+    _evictOld(now);
+  }
+  
   /// 윈도우 상태 정보 (디버깅용)
   Map<String, dynamic> get debugInfo => const <String, dynamic>{
     'performance': 'All O(1) optimized',
+    'version': 'V5.0 Compatible',
   }..addAll({
     'length': length,
     'span': '${span.inSeconds}s',
@@ -292,12 +305,12 @@ class RollingWindow<T extends num> {
     'streak': 'O(1) - consecutiveIncreases',
     'z_score': 'O(1) - zScore calculation',
     'data_access': 'O(n) - values, timestamps, min, max (acceptable)',
-    'overall': 'Fully optimized for real-time streaming',
+    'overall': 'Fully optimized for real-time streaming + V5.0 Compatible',
   };
   
   @override
   String toString() {
-    return 'RollingWindow(length: $length, span: ${span.inSeconds}s, '
+    return 'RollingWindow V5.0 Compatible(length: $length, span: ${span.inSeconds}s, '
            'mean: ${mean.toStringAsFixed(2)}, R²: ${rSquared.toStringAsFixed(3)})';
   }
 }

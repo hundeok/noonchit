@@ -1,0 +1,4681 @@
+\n\n// ====== lib/core/di/bottom_line_provider.dart ======\n
+// core/di/bottom_line_provider.dart
+// 🔥 바텀라인 Provider - 실시간 누적 데이터 기반
+
+import 'dart:async';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+import '../config/app_config.dart';
+import '../utils/logger.dart';
+import '../services/openai_service.dart';
+import '../utils/bottom_line_queue.dart';
+import '../utils/bottom_line_constants.dart';
+import '../utils/bottom_line_insight_engine.dart';
+import '../../data/processors/bottom_line_aggregator.dart';
+import '../../domain/entities/bottom_line.dart';
+import '../../domain/entities/trade.dart';
+
+// 🔥 모든 필요한 Provider들을 app_providers에서 import
+import 'app_providers.dart';
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 🔥 바텀라인 전용 실시간 데이터 수집 (타임프레임 무관)
+// ══════════════════════════════════════════════════════════════════════════════
+
+/// 바텀라인 전용 실시간 Trade 스트림 (리셋 없음)
+final bottomLineTradeStreamProvider = StreamProvider<Trade>((ref) async* {
+  ref.keepAlive(); // 연결 유지
+  
+  // 🎯 Master Trade Stream 직접 구독 (타임프레임 변환 없음)
+  final masterStream = await ref.read(masterTradeStreamProvider.future);
+  
+  if (AppConfig.enableTradeLog) {
+    log.d('🔥 Bottom line real-time stream started');
+  }
+  
+  // 실시간 데이터 그대로 흘려보내기 (필터링/집계 없음)
+  yield* masterStream;
+});
+
+/// 바텀라인 전용 데이터 애그리게이터 (지속적 누적)
+final bottomLineRealtimeDataProvider = StreamProvider<MarketSnapshot>((ref) async* {
+  final aggregator = ref.read(bottomLineAggregatorProvider);
+  
+  // 30초마다 스냅샷 생성 (누적 데이터 기반)
+  Timer.periodic(const Duration(seconds: BottomLineConstants.refreshIntervalSeconds), (timer) {
+    final snapshot = aggregator.generateRealtimeSnapshot();
+    if (snapshot != null) {
+      // StreamController를 통해 스냅샷 방출
+    }
+  });
+  
+  // 🔥 올바른 방법: StreamProvider에서 .stream으로 접근
+  final tradeStream = ref.watch(bottomLineTradeStreamProvider.stream);
+  await for (final trade in tradeStream) {
+    // 🔥 실시간으로 계속 누적 (리셋 없음)
+    aggregator.addRealtimeTrade(trade);
+    
+    // 30초 간격으로만 스냅샷 생성
+    if (aggregator.shouldGenerateSnapshot()) {
+      final snapshot = aggregator.generateRealtimeSnapshot();
+      if (snapshot != null) {
+        yield snapshot;
+      }
+    }
+  }
+});
+
+/// 바텀라인 스냅샷 Provider (30초마다 갱신)
+final bottomLineSnapshotProvider = Provider<MarketSnapshot?>((ref) {
+  final realtimeSnapshot = ref.watch(bottomLineRealtimeDataProvider).valueOrNull;
+  
+  if (realtimeSnapshot == null) {
+    // 초기 데이터가 없으면 기존 Provider에서 현재 상태 가져오기
+    return _getInitialSnapshot(ref);
+  }
+  
+  return realtimeSnapshot;
+});
+
+/// 초기 스냅샷 생성 (앱 시작 시)
+MarketSnapshot? _getInitialSnapshot(Ref ref) {
+  try {
+    // 🎯 실제 Provider에서 현재 상태 가져오기
+    final currentTrades = ref.read(tradeListProvider).valueOrNull ?? [];
+    final currentVolumes = ref.read(currentVolumeListProvider);
+    final currentSurges = ref.read(currentSurgeListProvider);
+    final currentSectors = ref.read(currentSectorVolumeListProvider);
+    
+    if (currentTrades.isEmpty && currentVolumes.isEmpty && currentSurges.isEmpty) {
+      return null;
+    }
+    
+    // 초기 스냅샷 생성 (이전 스냅샷 없음)
+    return MarketSnapshot.create(
+      trades: currentTrades.take(50).toList(), // 최근 50개만
+      volumes: currentVolumes.take(50).toList(),
+      surges: currentSurges,
+      sectors: currentSectors.take(10).toList(),
+      previousSnapshot: null,
+    );
+  } catch (e) {
+    log.e('🚨 Initial snapshot generation failed: $e');
+    return null;
+  }
+}
+
+/// 바텀라인 인사이트 생성 Provider
+final bottomLineInsightsProvider = Provider<List<CandidateInsight>>((ref) {
+  final snapshot = ref.watch(bottomLineSnapshotProvider);
+  
+  if (snapshot == null) {
+    return [];
+  }
+  
+  // 인사이트 엔진으로 룰 실행
+  final insights = RuleRegistry.generateInsights(snapshot);
+  
+  if (AppConfig.enableTradeLog && insights.isNotEmpty) {
+    log.d('🔥 Generated ${insights.length} insights: ${insights.map((i) => '${i.id}(${i.finalScore.toStringAsFixed(1)})').join(', ')}');
+  }
+  
+  return insights;
+});
+
+/// AI 생성 바텀라인 Provider (OpenAI 호출)
+final bottomLineGeneratedProvider = FutureProvider<List<BottomLineItem>>((ref) async {
+  final insights = ref.watch(bottomLineInsightsProvider);
+  
+  if (insights.isEmpty) {
+    // 인사이트가 없으면 플레이스홀더 반환
+    return [
+      BottomLineItem(
+        headline: '📊 시장 데이터 수집 중...',
+        timestamp: DateTime.now(),
+        priority: 0.1,
+        sourceInsightId: 'placeholder',
+      ),
+    ];
+  }
+  
+  try {
+    // OpenAI 서비스로 바텀라인 생성
+    final openAI = ref.read(openAIServiceProvider);
+    final headlines = await openAI.generateBottomLines(insights);
+    
+    // BottomLineItem으로 변환
+    final items = <BottomLineItem>[];
+    for (int i = 0; i < headlines.length && i < insights.length; i++) {
+      items.add(BottomLineItem.fromInsight(
+        headline: headlines[i],
+        insight: insights[i],
+      ));
+    }
+    
+    if (AppConfig.enableTradeLog) {
+      log.d('🤖 AI generated ${items.length} bottom lines');
+    }
+    
+    return items;
+    
+  } catch (e, stackTrace) {
+    log.e('🚨 Bottom line generation failed: $e', e, stackTrace);
+    
+    // AI 실패 시 템플릿 기반 대체
+    return insights.map((insight) => BottomLineItem.fromInsight(
+      headline: insight.populatedTemplate,
+      insight: insight,
+    )).toList();
+  }
+});
+
+/// 바텀라인 메인 데이터 Provider (큐에 자동 추가)
+final bottomLineDataProvider = Provider<List<BottomLineItem>>((ref) {
+  final generatedItems = ref.watch(bottomLineGeneratedProvider);
+  final queueNotifier = ref.read(bottomLineQueueProvider.notifier);
+  
+  generatedItems.when(
+    data: (items) {
+      if (items.isNotEmpty) {
+        // 긴급 아이템과 일반 아이템 분리
+        final urgentItems = items.where((item) => item.isUrgent).toList();
+        final normalItems = items.where((item) => !item.isUrgent).toList();
+        
+        // 긴급 아이템은 즉시 큐 앞에 추가
+        for (final urgentItem in urgentItems) {
+          queueNotifier.addUrgentItem(urgentItem);
+        }
+        
+        // 일반 아이템은 배치로 추가
+        if (normalItems.isNotEmpty) {
+          queueNotifier.addItems(normalItems);
+        }
+      }
+    },
+    loading: () {},
+    error: (error, stack) {
+      log.e('🚨 Bottom line data error: $error');
+    },
+  );
+  
+  return generatedItems.valueOrNull ?? [];
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 🎨 UI용 Provider들
+// ══════════════════════════════════════════════════════════════════════════════
+
+/// 현재 표시할 바텀라인 아이템 Provider
+final currentBottomLineItemProvider = Provider<BottomLineItem?>((ref) {
+  final queue = ref.watch(bottomLineQueueProvider);
+  
+  // 데이터 생성 트리거 (watch만 하고 값은 사용하지 않음)
+  ref.watch(bottomLineDataProvider);
+  
+  return queue.currentItem?.item;
+});
+
+/// 바텀라인 큐 상태 Provider (디버깅용)
+final bottomLineQueueStateProvider = Provider<Map<String, dynamic>>((ref) {
+  final queue = ref.watch(bottomLineQueueProvider);
+  
+  return {
+    'queue_length': queue.queueLength,
+    'current_item': queue.currentItem?.item.headline ?? 'None',
+    'has_urgent': queue.hasUrgentItems,
+    'next_refresh_in': BottomLineConstants.refreshIntervalSeconds,
+  };
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 🔧 의존성 Provider들
+// ══════════════════════════════════════════════════════════════════════════════
+
+/// 바텀라인 애그리게이터 Provider
+final bottomLineAggregatorProvider = Provider<BottomLineAggregator>((ref) {
+  return BottomLineAggregator();
+});
+
+/// 바텀라인 큐 Provider
+final bottomLineQueueProvider = StateNotifierProvider<BottomLineQueueNotifier, BottomLineQueue>((ref) {
+  return BottomLineQueueNotifier();
+});
+
+/// 바텀라인 큐 관리 Notifier
+class BottomLineQueueNotifier extends StateNotifier<BottomLineQueue> {
+  BottomLineQueueNotifier() : super(BottomLineQueue());
+
+  void addItem(BottomLineItem item) {
+    state.addItem(item);
+    // StateNotifier는 상태 변경을 알리기 위해 새 인스턴스를 생성해야 하지만
+    // BottomLineQueue는 내부 상태를 변경하는 방식이므로 이렇게 처리
+    state = state;
+  }
+
+  void addItems(List<BottomLineItem> items) {
+    state.addItems(items);
+    state = state;
+  }
+
+  void addUrgentItem(BottomLineItem item) {
+    state.addUrgentItem(item);
+    state = state;
+  }
+
+  void showNext() {
+    state.showNext();
+    state = state;
+  }
+
+  void skipCurrent() {
+    state.skipCurrent();
+    state = state;
+  }
+
+  void setPaused(bool paused) {
+    state.setPaused(paused);
+    state = state;
+  }
+
+  void setSpeedMultiplier(double multiplier) {
+    state.setSpeedMultiplier(multiplier);
+    state = state;
+  }
+
+  void clear() {
+    state.clear();
+    state = state;
+  }
+}
+
+/// OpenAI 서비스 Provider  
+final openAIServiceProvider = Provider<OpenAIService>((ref) {
+  return OpenAIService();
+});
+
+/// 인사이트 엔진 Provider
+final insightEngineProvider = Provider<BottomLineInsightEngine>((ref) {
+  return BottomLineInsightEngine();
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 🎛️ 설정 Provider들
+// ══════════════════════════════════════════════════════════════════════════════
+
+/// 바텀라인 활성화/비활성화 Provider
+final bottomLineEnabledProvider = StateProvider<bool>((ref) => true);
+
+/// 바텀라인 표시 속도 Provider (개발자용)
+final bottomLineSpeedMultiplierProvider = StateProvider<double>((ref) => 1.0);
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 🚨 에러 처리 및 대체 Provider들
+// ══════════════════════════════════════════════════════════════════════════════
+
+/// 바텀라인 에러 상태 Provider
+final bottomLineErrorProvider = StateProvider<String?>((ref) => null);
+
+/// 바텀라인 연결 상태 Provider
+final bottomLineConnectionProvider = Provider<bool>((ref) {
+  // 4대 Provider 중 하나라도 데이터가 있으면 연결됨으로 간주
+  final hasTradeData = ref.watch(tradeListProvider).hasValue;
+  final hasVolumeData = ref.watch(currentVolumeListProvider).isNotEmpty;
+  final hasSurgeData = ref.watch(currentSurgeListProvider).isNotEmpty;
+  
+  return hasTradeData || hasVolumeData || hasSurgeData;
+});
+
+/// 대체 바텀라인 Provider (AI 실패 시)
+final fallbackBottomLineProvider = Provider<BottomLineItem>((ref) {
+  final timestamp = DateTime.now();
+  final minute = timestamp.minute;
+  
+  // 시간대별 다른 메시지
+  const messages = [
+    '📊 암호화폐 시장 실시간 모니터링 중',
+    '💰 고액거래 패턴 분석 중', 
+    '⚡ 급등 코인 스캔 진행 중',
+    '🔥 시장 트렌드 분석 중',
+    '📈 거래량 급증 감지 대기 중',
+  ];
+  
+  return BottomLineItem(
+    headline: messages[minute % messages.length],
+    timestamp: timestamp,
+    priority: 0.1,
+    sourceInsightId: 'fallback_$minute',
+  );
+});\n\n// ====== lib/core/utils/bottom_line_insight_engine.dart ======\n
+// core/utils/bottom_line_insight_engine.dart
+// 🧠 바텀라인 인사이트 엔진 - 룰 기반 시장 패턴 분석
+import 'dart:math' as math;
+import 'package:flutter/foundation.dart';
+import '../../domain/entities/bottom_line.dart';
+import 'bottom_line_constants.dart';
+import 'logger.dart';
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 🎯 인사이트 생성 결과
+// ══════════════════════════════════════════════════════════════════════════════
+
+/// 인사이트 생성 결과 (성공/실패 정보 포함)
+@immutable
+class InsightGenerationResult {
+  final List<CandidateInsight> insights;
+  final List<String> triggeredRules;
+  final List<String> failedRules;
+  final Duration processingTime;
+  final Map<String, dynamic> diagnostics;
+
+  const InsightGenerationResult({
+    required this.insights,
+    required this.triggeredRules,
+    required this.failedRules,
+    required this.processingTime,
+    required this.diagnostics,
+  });
+
+  /// 성공적으로 생성된 인사이트 개수
+  int get successCount => insights.length;
+
+  /// 실행된 룰 개수
+  int get totalRulesExecuted => triggeredRules.length + failedRules.length;
+
+  /// 성공률
+  double get successRate => totalRulesExecuted > 0
+      ? triggeredRules.length / totalRulesExecuted
+      : 0.0;
+
+  /// 고우선순위 인사이트 개수
+  int get highPriorityCount => insights.where((i) => i.isHighPriority).length;
+
+  @override
+  String toString() {
+    return 'InsightResult($successCount insights, ${triggeredRules.length}/$totalRulesExecuted rules, ${processingTime.inMilliseconds}ms)';
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 🧠 인사이트 엔진 메인 클래스
+// ══════════════════════════════════════════════════════════════════════════════
+
+/// 바텀라인 인사이트 엔진 - 룰 기반 패턴 분석 및 인사이트 생성
+class BottomLineInsightEngine {
+  // 📊 성능 통계
+  int _totalExecutions = 0;
+  int _totalInsightsGenerated = 0;
+  int _totalRulesExecuted = 0;
+  Duration _totalProcessingTime = Duration.zero;
+  final Map<String, int> _ruleExecutionCount = {};
+  final Map<String, int> _ruleSuccessCount = {};
+  final Map<String, Duration> _ruleProcessingTime = {};
+
+  // 🔍 룰 실행 통계
+  DateTime? _lastExecution;
+  MarketSnapshot? _lastSnapshot;
+
+  /// 모든 등록된 룰들 (RuleRegistry에서 가져옴)
+  List<InsightRule> get allRules => RuleRegistry.allRules;
+
+  /// 활성화된 룰들만
+  List<InsightRule> get activeRules => allRules
+      .where((rule) => BottomLineConstants.isRuleEnabled(rule.id))
+      .toList();
+
+  // ══════════════════════════════════════════════════════════════════════════════
+  // 🎯 메인 인사이트 생성 메서드
+  // ══════════════════════════════════════════════════════════════════════════════
+
+  /// 시장 스냅샷에서 인사이트 생성 (메인 엔트리 포인트)
+  InsightGenerationResult generateInsights(MarketSnapshot snapshot) {
+    final stopwatch = Stopwatch()..start();
+    
+    try {
+      // 📊 실행 통계 업데이트
+      _totalExecutions++;
+      _lastExecution = DateTime.now();
+      _lastSnapshot = snapshot;
+
+      // 🔍 스냅샷 검증
+      final validation = _validateSnapshot(snapshot);
+      if (!validation['isValid']) {
+        return _createEmptyResult(
+          stopwatch.elapsed,
+          'Invalid snapshot: ${validation['reason']}',
+        );
+      }
+
+      // 🧠 룰 실행
+      final results = _executeAllRules(snapshot);
+
+      // 📈 인사이트 후처리
+      final processedInsights = _postProcessInsights(results['insights'], snapshot);
+
+      // 📊 통계 업데이트
+      _updateStats(processedInsights, results, stopwatch.elapsed);
+
+      stopwatch.stop();
+
+      final result = InsightGenerationResult(
+        insights: processedInsights,
+        triggeredRules: results['triggeredRules'],
+        failedRules: results['failedRules'],
+        processingTime: stopwatch.elapsed,
+        diagnostics: _generateDiagnostics(snapshot, results),
+      );
+
+      if (BottomLineConstants.enableLogging && processedInsights.isNotEmpty) {
+        log.d('🧠 Generated ${processedInsights.length} insights: ${processedInsights.map((i) => '${i.id}(${i.finalScore.toStringAsFixed(1)})').join(', ')}');
+      }
+
+      return result;
+    } catch (e, stackTrace) {
+      stopwatch.stop();
+      log.e('🚨 Insight generation failed: $e', e, stackTrace);
+      return _createErrorResult(stopwatch.elapsed, e.toString());
+    }
+  }
+
+  /// 모든 활성 룰 실행
+  Map<String, dynamic> _executeAllRules(MarketSnapshot snapshot) {
+    final insights = <CandidateInsight>[];
+    final triggeredRules = <String>[];
+    final failedRules = <String>[];
+
+    for (final rule in activeRules) {
+      try {
+        final ruleStopwatch = Stopwatch()..start();
+
+        // 🔍 룰 실행 (타임아웃 체크)
+        final insight = _executeRuleWithTimeout(rule, snapshot);
+
+        ruleStopwatch.stop();
+
+        // 📊 룰별 통계 업데이트
+        _updateRuleStats(rule.id, ruleStopwatch.elapsed, insight != null);
+
+        if (insight != null) {
+          insights.add(insight);
+          triggeredRules.add(rule.id);
+
+          if (BottomLineConstants.enableDetailedLogging) {
+            log.d('✅ Rule ${rule.id} triggered: score=${insight.finalScore.toStringAsFixed(2)}');
+          }
+        } else {
+          if (BottomLineConstants.enableDetailedLogging) {
+            log.d('❌ Rule ${rule.id} not triggered');
+          }
+        }
+      } catch (e) {
+        failedRules.add(rule.id);
+        log.w('🚨 Rule ${rule.id} failed: $e');
+      }
+    }
+
+    return {
+      'insights': insights,
+      'triggeredRules': triggeredRules,
+      'failedRules': failedRules,
+    };
+  }
+
+  /// 타임아웃이 있는 룰 실행
+  CandidateInsight? _executeRuleWithTimeout(InsightRule rule, MarketSnapshot snapshot) {
+    final timeout = Duration(milliseconds: BottomLineConstants.ruleExecutionTimeoutMs);
+
+    try {
+      // 간단한 타임아웃 구현 (Isolate 사용 안 함)
+      final startTime = DateTime.now();
+      final insight = rule.generateInsight(snapshot);
+      final elapsed = DateTime.now().difference(startTime);
+
+      if (elapsed > timeout) {
+        log.w('⏱️ Rule ${rule.id} took ${elapsed.inMilliseconds}ms (timeout: ${timeout.inMilliseconds}ms)');
+      }
+
+      return insight;
+    } catch (e) {
+      log.w('🚨 Rule ${rule.id} execution error: $e');
+      return null;
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════
+  // 📈 인사이트 후처리 & 최적화
+  // ══════════════════════════════════════════════════════════════════════════════
+
+  /// 생성된 인사이트들 후처리 (정렬, 필터링, 최적화)
+  List<CandidateInsight> _postProcessInsights(List<CandidateInsight> insights, MarketSnapshot snapshot) {
+    if (insights.isEmpty) return insights;
+
+    // 🔍 1. 중복 제거 (같은 시장/패턴)
+    final deduplicated = _removeDuplicateInsights(insights);
+
+    // 📊 2. 점수 정규화 및 조정
+    final normalized = _normalizeInsightScores(deduplicated, snapshot);
+
+    // 📈 3. 우선순위 정렬 (점수 높은 순)
+    normalized.sort((a, b) => b.finalScore.compareTo(a.finalScore));
+
+    // 🎯 4. 상위 N개만 선택 (AI 비용 절약)
+    final selected = normalized.take(BottomLineConstants.maxInsightsPerSnapshot).toList();
+
+    // 🔥 5. 긴급 인사이트 식별 및 마킹
+    final marked = _markUrgentInsights(selected);
+
+    if (BottomLineConstants.enableDetailedLogging) {
+      log.d('📈 Post-processed insights: ${insights.length} → ${marked.length}');
+    }
+
+    return marked;
+  }
+
+  /// 중복 인사이트 제거
+  List<CandidateInsight> _removeDuplicateInsights(List<CandidateInsight> insights) {
+    final uniqueInsights = <String, CandidateInsight>{};
+
+    for (final insight in insights) {
+      // 템플릿 변수에서 시장 정보 추출
+      final market = insight.templateVars['market'] as String? ?? '';
+      final ruleType = insight.id.split('_').first;
+
+      // 키: 룰타입_시장 (예: smart_money_KRW-BTC)
+      final key = '${ruleType}_$market';
+
+      // 더 높은 점수의 인사이트만 유지
+      if (!uniqueInsights.containsKey(key) ||
+          uniqueInsights[key]!.finalScore < insight.finalScore) {
+        uniqueInsights[key] = insight;
+      }
+    }
+
+    return uniqueInsights.values.toList();
+  }
+
+  /// 인사이트 점수 정규화
+  List<CandidateInsight> _normalizeInsightScores(List<CandidateInsight> insights, MarketSnapshot snapshot) {
+    if (insights.isEmpty) return insights;
+
+    // 현재 최고점과 최저점
+    final scores = insights.map((i) => i.finalScore).toList();
+    final maxScore = scores.reduce(math.max);
+    final minScore = scores.reduce(math.min);
+
+    // 점수 범위가 너무 좁으면 정규화 생략
+    if (maxScore - minScore < 0.5) return insights;
+
+    // 컨텍스트 기반 보정
+    final marketContext = _analyzeMarketContext(snapshot);
+
+    return insights.map((insight) {
+      double adjustedScore = insight.finalScore;
+
+      // 시장 상황에 따른 점수 조정
+      if (marketContext['isVolatile']) {
+        // 변동성 높은 상황에서는 급등/급락 인사이트 강화
+        if (insight.id.contains('surge') || insight.id.contains('spike')) {
+          adjustedScore *= 1.2;
+        }
+      }
+
+      if (marketContext['isHighVolume']) {
+        // 고거래량 상황에서는 스마트머니 인사이트 강화
+        if (insight.id.contains('smart_money')) {
+          adjustedScore *= 1.1;
+        }
+      }
+
+      // 정규화 (0.0 ~ 5.0 범위)
+      adjustedScore = math.min(adjustedScore, BottomLineConstants.maxInsightScore);
+
+      return CandidateInsight(
+        id: insight.id,
+        template: insight.template,
+        score: adjustedScore,
+        weight: insight.weight,
+        templateVars: insight.templateVars,
+        timestamp: insight.timestamp,
+        isUrgent: adjustedScore >= BottomLineConstants.urgentInsightThreshold,
+      );
+    }).toList();
+  }
+
+  /// 긴급 인사이트 마킹
+  List<CandidateInsight> _markUrgentInsights(List<CandidateInsight> insights) {
+    return insights.map((insight) {
+      final isUrgent = insight.finalScore >= BottomLineConstants.urgentInsightThreshold;
+
+      if (isUrgent && !insight.isUrgent) {
+        return CandidateInsight(
+          id: insight.id,
+          template: insight.template,
+          score: insight.score,
+          weight: insight.weight,
+          templateVars: insight.templateVars,
+          timestamp: insight.timestamp,
+          isUrgent: true,
+        );
+      }
+
+      return insight;
+    }).toList();
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════
+  // 🔍 시장 컨텍스트 분석
+  // ══════════════════════════════════════════════════════════════════════════════
+
+  /// 시장 상황 분석 (점수 조정용)
+  Map<String, dynamic> _analyzeMarketContext(MarketSnapshot snapshot) {
+    // 변동성 분석
+    final priceChanges = snapshot.priceDelta.values.where((change) => change.abs() > 0).toList();
+    final avgPriceChange = priceChanges.isNotEmpty
+        ? priceChanges.map((c) => c.abs()).reduce((a, b) => a + b) / priceChanges.length
+        : 0.0;
+    final isVolatile = avgPriceChange > 5.0; // 평균 5% 이상 변동
+
+    // 거래량 분석
+    final totalVolume = snapshot.topVolumes.fold<double>(0, (sum, v) => sum + v.totalVolume);
+    final isHighVolume = totalVolume > 1000000000; // 10억 이상
+
+    // 급등/급락 코인 개수
+    final surgingCount = snapshot.surges.where((s) => s.changePercent > 10).length;
+    final plungingCount = snapshot.surges.where((s) => s.changePercent < -10).length;
+
+    // 고액거래 활성도
+    final largeTradeCount = snapshot.topTrades
+        .where((t) => t.total >= BottomLineConstants.largeTradeThreshold)
+        .length;
+
+    return {
+      'isVolatile': isVolatile,
+      'isHighVolume': isHighVolume,
+      'avgPriceChange': avgPriceChange,
+      'totalVolume': totalVolume,
+      'surgingCount': surgingCount,
+      'plungingCount': plungingCount,
+      'largeTradeCount': largeTradeCount,
+      'marketMood': _classifyMarketMood(surgingCount, plungingCount, avgPriceChange),
+    };
+  }
+
+  /// 시장 분위기 분류
+  String _classifyMarketMood(int surgingCount, int plungingCount, double avgPriceChange) {
+    if (surgingCount > plungingCount * 2 && avgPriceChange > 3.0) {
+      return 'bullish'; // 강세
+    } else if (plungingCount > surgingCount * 2 && avgPriceChange > 3.0) {
+      return 'bearish'; // 약세
+    } else if (avgPriceChange > 5.0) {
+      return 'volatile'; // 변동성
+    } else {
+      return 'neutral'; // 중립
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════
+  // 📊 통계 및 검증
+  // ══════════════════════════════════════════════════════════════════════════════
+
+  /// 스냅샷 유효성 검증
+  Map<String, dynamic> _validateSnapshot(MarketSnapshot snapshot) {
+    // 기본 데이터 존재 여부
+    if (snapshot.topTrades.isEmpty &&
+        snapshot.topVolumes.isEmpty &&
+        snapshot.surges.isEmpty) {
+      return {
+      'isValid': false, 
+      'reason': 'No data available'
+    };
+    }
+
+    // 타임스탬프 검증 (너무 오래된 데이터)
+    final age = DateTime.now().difference(snapshot.timestamp);
+    if (age.inMinutes > 10) {
+      return {
+      'isValid': false, 
+      'reason': 'Data too old: ${age.inMinutes} minutes'
+    };
+    }
+
+    // 데이터 일관성 검증
+    final inconsistencies = <String>[];
+
+    // 가격 변화율 검증 (-100% ~ +1000% 범위)
+    for (final entry in snapshot.priceDelta.entries) {
+      if (entry.value < -100 || entry.value > 1000) {
+        inconsistencies.add('Invalid price change: ${entry.key} ${entry.value}%');
+      }
+    }
+
+    // 볼륨 변화율 검증 (-100% ~ +10000% 범위)
+    for (final entry in snapshot.volChangePct.entries) {
+      if (entry.value < -100 || entry.value > 10000) {
+        inconsistencies.add('Invalid volume change: ${entry.key} ${entry.value}%');
+      }
+    }
+
+    if (inconsistencies.isNotEmpty) {
+      log.w('⚠️ Snapshot inconsistencies: ${inconsistencies.join(', ')}');
+    }
+
+    return {
+      'isValid': true, 
+      'inconsistencies': inconsistencies
+    };
+  }
+
+  /// 룰별 실행 통계 업데이트
+  void _updateRuleStats(String ruleId, Duration elapsed, bool success) {
+    _ruleExecutionCount[ruleId] = (_ruleExecutionCount[ruleId] ?? 0) + 1;
+    if (success) {
+      _ruleSuccessCount[ruleId] = (_ruleSuccessCount[ruleId] ?? 0) + 1;
+    }
+
+    final currentTime = _ruleProcessingTime[ruleId] ?? Duration.zero;
+    _ruleProcessingTime[ruleId] = currentTime + elapsed;
+    _totalRulesExecuted++;
+  }
+
+  /// 전체 통계 업데이트
+  void _updateStats(List<CandidateInsight> insights, Map<String, dynamic> results, Duration elapsed) {
+    _totalInsightsGenerated += insights.length;
+    _totalProcessingTime += elapsed;
+  }
+
+  /// 진단 정보 생성
+  Map<String, dynamic> _generateDiagnostics(MarketSnapshot snapshot, Map<String, dynamic> results) {
+    final marketContext = _analyzeMarketContext(snapshot);
+
+    return {
+      'snapshot_age_seconds': DateTime.now().difference(snapshot.timestamp).inSeconds,
+      'data_points': {
+        'trades': snapshot.topTrades.length,
+        'volumes': snapshot.topVolumes.length,
+        'surges': snapshot.surges.length,
+        'sectors': snapshot.sectorVolumes.length,
+      },
+      'market_context': marketContext,
+      'rule_performance': _getRulePerformanceSnapshot(),
+      'engine_stats': getEngineStats(),
+    };
+  }
+
+  /// 빈 결과 생성
+  InsightGenerationResult _createEmptyResult(Duration elapsed, String reason) {
+    return InsightGenerationResult(
+      insights: const <CandidateInsight>[],
+      triggeredRules: const <String>[],
+      failedRules: const <String>[],
+      processingTime: elapsed,
+      diagnostics: {'reason': reason},
+    );
+  }
+
+  /// 에러 결과 생성
+  InsightGenerationResult _createErrorResult(Duration elapsed, String error) {
+    return InsightGenerationResult(
+      insights: const <CandidateInsight>[],
+      triggeredRules: const <String>[],
+      failedRules: activeRules.map((r) => r.id).toList(),
+      processingTime: elapsed,
+      diagnostics: {'error': error},
+    );
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════
+  // 📊 성능 모니터링 & 통계
+  // ══════════════════════════════════════════════════════════════════════════════
+
+  /// 엔진 전체 통계
+  Map<String, dynamic> getEngineStats() {
+    final avgProcessingTime = _totalExecutions > 0
+        ? _totalProcessingTime.inMilliseconds / _totalExecutions
+        : 0.0;
+
+    final avgInsightsPerExecution = _totalExecutions > 0
+        ? _totalInsightsGenerated / _totalExecutions
+        : 0.0;
+
+    return {
+      'total_executions': _totalExecutions,
+      'total_insights_generated': _totalInsightsGenerated,
+      'total_rules_executed': _totalRulesExecuted,
+      'avg_processing_time_ms': avgProcessingTime,
+      'avg_insights_per_execution': avgInsightsPerExecution,
+      'last_execution': _lastExecution?.toIso8601String() ?? 'Never',
+      'active_rules_count': activeRules.length,
+      'total_rules_count': allRules.length,
+    };
+  }
+
+  /// 룰별 성능 통계
+  Map<String, dynamic> _getRulePerformanceSnapshot() {
+    final performance = <String, Map<String, dynamic>>{};
+
+    for (final ruleId in _ruleExecutionCount.keys) {
+      final executions = _ruleExecutionCount[ruleId] ?? 0;
+      final successes = _ruleSuccessCount[ruleId] ?? 0;
+      final totalTime = _ruleProcessingTime[ruleId] ?? Duration.zero;
+
+      performance[ruleId] = {
+        'executions': executions,
+        'successes': successes,
+        'success_rate': executions > 0 ? successes / executions : 0.0,
+        'avg_time_ms': executions > 0 ? totalTime.inMilliseconds / executions : 0.0,
+        'total_time_ms': totalTime.inMilliseconds,
+      };
+    }
+
+    return performance;
+  }
+
+  /// 엔진 상태 리셋
+  void resetStats() {
+    _totalExecutions = 0;
+    _totalInsightsGenerated = 0;
+    _totalRulesExecuted = 0;
+    _totalProcessingTime = Duration.zero;
+    _ruleExecutionCount.clear();
+    _ruleSuccessCount.clear();
+    _ruleProcessingTime.clear();
+    _lastExecution = null;
+    _lastSnapshot = null;
+
+    if (BottomLineConstants.enableLogging) {
+      log.d('📊 Insight engine stats reset');
+    }
+  }
+
+  /// 상세 진단 보고서 생성 (디버깅용)
+  Map<String, dynamic> generateDiagnosticReport() {
+    return {
+      'engine_info': {
+        'version': '1.0.0',
+        'initialization_time': DateTime.now().toIso8601String(),
+        'rules_loaded': allRules.map((r) => r.id).toList(),
+        'active_rules': activeRules.map((r) => r.id).toList(),
+      },
+      'performance': getEngineStats(),
+      'rule_performance': _getRulePerformanceSnapshot(),
+      'configuration': {
+        'min_insight_score': BottomLineConstants.minInsightScore,
+        'urgent_threshold': BottomLineConstants.urgentInsightThreshold,
+        'max_insights_per_snapshot': BottomLineConstants.maxInsightsPerSnapshot,
+        'rule_timeout_ms': BottomLineConstants.ruleExecutionTimeoutMs,
+      },
+      'last_snapshot_info': _lastSnapshot != null ? {
+        'timestamp': _lastSnapshot!.timestamp.toIso8601String(),
+        'trades_count': _lastSnapshot!.topTrades.length,
+        'volumes_count': _lastSnapshot!.topVolumes.length,
+        'surges_count': _lastSnapshot!.surges.length,
+      } : null,
+    };
+  }
+}\n\n// ====== lib/core/utils/bottom_line_circular_buffer.dart ======\n
+// core/utils/bottom_line_circular_buffer.dart
+// 🔄 메모리 효율적인 순환 버퍼 구현 (바텀라인 전용)
+
+import 'dart:math' as math;
+import 'bottom_line_constants.dart';
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 🔄 기본 순환 버퍼 (제네릭)
+// ══════════════════════════════════════════════════════════════════════════════
+
+/// 메모리 효율적인 순환 버퍼 (FIFO)
+/// 최대 크기 고정으로 메모리 사용량 제한
+class CircularBuffer<T> {
+  final int _maxSize;
+  final List<T?> _buffer;
+  int _head = 0;  // 다음 추가될 위치
+  int _tail = 0;  // 가장 오래된 데이터 위치
+  int _count = 0; // 현재 저장된 데이터 개수
+
+  CircularBuffer(this._maxSize) 
+    : assert(_maxSize > 0, 'Buffer size must be positive'),
+      _buffer = List<T?>.filled(_maxSize, null);
+
+  /// 현재 저장된 데이터 개수
+  int get length => _count;
+
+  /// 버퍼 최대 크기
+  int get maxSize => _maxSize;
+
+  /// 버퍼가 비어있는지
+  bool get isEmpty => _count == 0;
+
+  /// 버퍼가 가득 찼는지
+  bool get isFull => _count == _maxSize;
+
+  /// 사용률 (0.0 ~ 1.0)
+  double get utilization => _count / _maxSize;
+
+  /// 데이터 추가 (오래된 데이터 자동 제거)
+  void add(T item) {
+    _buffer[_head] = item;
+    _head = (_head + 1) % _maxSize;
+    
+    if (_count < _maxSize) {
+      _count++;
+    } else {
+      // 버퍼가 가득 찬 경우, tail도 이동
+      _tail = (_tail + 1) % _maxSize;
+    }
+  }
+
+  /// 여러 데이터 한 번에 추가
+  void addAll(Iterable<T> items) {
+    for (final item in items) {
+      add(item);
+    }
+  }
+
+  /// 가장 최근 데이터 반환 (제거하지 않음)
+  T? get last {
+    if (isEmpty) return null;
+    final lastIndex = (_head - 1 + _maxSize) % _maxSize;
+    return _buffer[lastIndex];
+  }
+
+  /// 가장 오래된 데이터 반환 (제거하지 않음)
+  T? get first {
+    if (isEmpty) return null;
+    return _buffer[_tail];
+  }
+
+  /// 인덱스로 데이터 접근 (0 = 가장 오래된 데이터)
+  T? operator [](int index) {
+    if (index < 0 || index >= _count) return null;
+    final actualIndex = (_tail + index) % _maxSize;
+    return _buffer[actualIndex];
+  }
+
+  /// 모든 데이터를 리스트로 반환 (오래된 순서)
+  List<T> get items {
+    if (isEmpty) return <T>[];
+    
+    final result = <T>[];
+    for (int i = 0; i < _count; i++) {
+      final item = this[i];
+      if (item != null) result.add(item);
+    }
+    return result;
+  }
+
+  /// 최신 N개 데이터 반환
+  List<T> getRecent(int count) {
+    if (count <= 0 || isEmpty) return <T>[];
+    
+    final actualCount = math.min(count, _count);
+    final result = <T>[];
+    
+    for (int i = _count - actualCount; i < _count; i++) {
+      final item = this[i];
+      if (item != null) result.add(item);
+    }
+    
+    return result;
+  }
+
+  /// 조건에 맞는 데이터 필터링
+  List<T> where(bool Function(T) test) {
+    return items.where(test).toList();
+  }
+
+  /// 데이터 개수 세기
+  int count(bool Function(T) test) {
+    return items.where(test).length;
+  }
+
+  /// 조건에 맞는 첫 번째 데이터 찾기
+  T? firstWhere(bool Function(T) test, {T? orElse}) {
+    for (final item in items) {
+      if (test(item)) return item;
+    }
+    return orElse;
+  }
+
+  /// 모든 데이터 제거
+  void clear() {
+    for (int i = 0; i < _maxSize; i++) {
+      _buffer[i] = null;
+    }
+    _head = 0;
+    _tail = 0;
+    _count = 0;
+  }
+
+  /// 오래된 데이터 일부 제거
+  void removeOld(int count) {
+    if (count <= 0 || isEmpty) return;
+    
+    final actualCount = math.min(count, _count);
+    
+    for (int i = 0; i < actualCount; i++) {
+      _buffer[_tail] = null;
+      _tail = (_tail + 1) % _maxSize;
+      _count--;
+    }
+  }
+
+  /// 메모리 사용량 추정 (바이트)
+  int get estimatedMemoryBytes {
+    // 대략적인 계산 (객체 오버헤드 포함)
+    return _maxSize * 64 + 128; // 64바이트 per slot + 오버헤드
+  }
+
+  /// 버퍼 상태 요약
+  Map<String, dynamic> get stats {
+    return {
+      'max_size': _maxSize,
+      'current_count': _count,
+      'utilization': '${(utilization * 100).toStringAsFixed(1)}%',
+      'is_full': isFull,
+      'memory_bytes': estimatedMemoryBytes,
+      'head_position': _head,
+      'tail_position': _tail,
+    };
+  }
+
+  @override
+  String toString() {
+    return 'CircularBuffer<$T>($_count/$maxSize, ${(utilization * 100).toStringAsFixed(1)}%)';
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 📊 시간 기반 순환 버퍼 (TTL 지원)
+// ══════════════════════════════════════════════════════════════════════════════
+
+/// 시간 정보와 함께 저장되는 데이터
+class TimestampedData<T> {
+  final T data;
+  final DateTime timestamp;
+
+  const TimestampedData(this.data, this.timestamp);
+
+  /// 데이터 생성 후 경과 시간
+  Duration get age => DateTime.now().difference(timestamp);
+
+  /// 지정된 시간보다 오래되었는지
+  bool isOlderThan(Duration duration) => age > duration;
+
+  @override
+  String toString() => 'TimestampedData($data, ${timestamp.toIso8601String()})';
+}
+
+/// 시간 기반 순환 버퍼 (TTL 자동 제거)
+class TimeBasedCircularBuffer<T> extends CircularBuffer<TimestampedData<T>> {
+  final Duration _ttl;
+  DateTime? _lastCleanup;
+
+  TimeBasedCircularBuffer(int maxSize, this._ttl) : super(maxSize);
+
+  /// TTL (Time To Live)
+  Duration get ttl => _ttl;
+
+  /// 데이터 추가 (자동으로 타임스탬프 부여)
+  void addData(T data) {
+    add(TimestampedData(data, DateTime.now()));
+    _autoCleanup();
+  }
+
+  /// 유효한 데이터만 반환 (TTL 체크)
+  List<T> get validData {
+    return items
+      .where((item) => !item.isOlderThan(_ttl))
+      .map((item) => item.data)
+      .toList();
+  }
+
+  /// 최신 유효 데이터 N개 반환
+  List<T> getRecentValidData(int count) {
+    final valid = validData;
+    final actualCount = math.min(count, valid.length);
+    return valid.reversed.take(actualCount).toList().reversed.toList();
+  }
+
+  /// 만료된 데이터 개수
+  int get expiredCount {
+    return items.where((item) => item.isOlderThan(_ttl)).length;
+  }
+
+  /// 자동 정리 (1분마다)
+  void _autoCleanup() {
+    final now = DateTime.now();
+    if (_lastCleanup == null || 
+        now.difference(_lastCleanup!).inMinutes >= 1) {
+      removeExpired();
+      _lastCleanup = now;
+    }
+  }
+
+  /// 만료된 데이터 제거
+  void removeExpired() {
+    if (isEmpty) return;
+
+    int expiredCount = 0;
+    while (!isEmpty && first!.isOlderThan(_ttl)) {
+      removeOld(1);
+      expiredCount++;
+    }
+
+    if (BottomLineConstants.enableDetailedLogging && expiredCount > 0) {
+      // log.d('🗑️ Removed $expiredCount expired items from TimeBasedCircularBuffer');
+    }
+  }
+
+  /// 통계 정보 (TTL 포함)
+  @override
+  Map<String, dynamic> get stats {
+    final baseStats = super.stats;
+    
+    baseStats.addAll({
+      'ttl_seconds': _ttl.inSeconds,
+      'valid_count': validData.length,
+      'expired_count': expiredCount,
+      'oldest_age_seconds': isEmpty ? 0 : first!.age.inSeconds,
+      'newest_age_seconds': isEmpty ? 0 : last!.age.inSeconds,
+      'last_cleanup': _lastCleanup?.toIso8601String() ?? 'Never',
+    });
+    
+    return baseStats;
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 🎯 바텀라인 특화 버퍼들
+// ══════════════════════════════════════════════════════════════════════════════
+
+/// 거래 데이터 전용 순환 버퍼
+class TradeCircularBuffer extends CircularBuffer<Map<String, dynamic>> {
+  TradeCircularBuffer() : super(BottomLineConstants.maxRecentTrades);
+
+  /// 고액거래만 필터링
+  List<Map<String, dynamic>> get largeTrades {
+    return where((trade) {
+      final amount = trade['amount'] as double? ?? 0.0;
+      return amount >= BottomLineConstants.largeTradeThreshold;
+    });
+  }
+
+  /// 특정 마켓의 거래들
+  List<Map<String, dynamic>> getTradesForMarket(String market) {
+    return where((trade) => trade['market'] == market);
+  }
+
+  /// 최근 N분간의 거래들
+  List<Map<String, dynamic>> getTradesInLastMinutes(int minutes) {
+    final cutoff = DateTime.now().subtract(Duration(minutes: minutes));
+    return where((trade) {
+      final timestamp = trade['timestamp'] as int? ?? 0;
+      return DateTime.fromMillisecondsSinceEpoch(timestamp).isAfter(cutoff);
+    });
+  }
+
+  /// 거래량 합계 계산
+  double getTotalVolume() {
+    return items.fold(0.0, (sum, trade) {
+      final volume = trade['volume'] as double? ?? 0.0;
+      return sum + volume;
+    });
+  }
+
+  /// 거래대금 합계 계산
+  double getTotalAmount() {
+    return items.fold(0.0, (sum, trade) {
+      final amount = trade['amount'] as double? ?? 0.0;
+      return sum + amount;
+    });
+  }
+}
+
+/// 문자열 데이터 전용 순환 버퍼 (고액거래 ID 등)
+class StringCircularBuffer extends CircularBuffer<String> {
+  StringCircularBuffer(int maxSize) : super(maxSize);
+
+  /// 중복 제거된 고유 문자열들
+  Set<String> get uniqueItems => items.toSet();
+
+  /// 특정 패턴과 매칭되는 문자열들
+  List<String> getMatching(RegExp pattern) {
+    return where((item) => pattern.hasMatch(item));
+  }
+
+  /// 특정 접두사로 시작하는 문자열들
+  List<String> getStartingWith(String prefix) {
+    return where((item) => item.startsWith(prefix));
+  }
+
+  /// 문자열 길이 통계
+  Map<String, dynamic> get lengthStats {
+    if (isEmpty) {
+      return {'min': 0, 'max': 0, 'avg': 0.0};
+    }
+    
+    final lengths = items.map((item) => item.length).toList();
+    return {
+      'min': lengths.reduce(math.min),
+      'max': lengths.reduce(math.max),
+      'avg': lengths.reduce((a, b) => a + b) / lengths.length,
+    };
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 🏭 팩토리 클래스
+// ══════════════════════════════════════════════════════════════════════════════
+
+/// 바텀라인용 버퍼 팩토리
+class BottomLineBufferFactory {
+  BottomLineBufferFactory._();
+
+  /// 거래 데이터용 버퍼 생성
+  static TradeCircularBuffer createTradeBuffer() {
+    return TradeCircularBuffer();
+  }
+
+  /// 고액거래 ID용 버퍼 생성
+  static StringCircularBuffer createLargeTradeBuffer() {
+    return StringCircularBuffer(BottomLineConstants.maxRecentLargeTrades);
+  }
+
+  /// 시장 이름용 버퍼 생성
+  static StringCircularBuffer createMarketBuffer() {
+    return StringCircularBuffer(BottomLineConstants.maxTrackedMarkets);
+  }
+
+  /// TTL 기반 데이터 버퍼 생성
+  static TimeBasedCircularBuffer<T> createTimeBasedBuffer<T>(
+    int maxSize, 
+    Duration ttl,
+  ) {
+    return TimeBasedCircularBuffer<T>(maxSize, ttl);
+  }
+
+  /// 기본 제네릭 버퍼 생성
+  static CircularBuffer<T> createBuffer<T>(int maxSize) {
+    return CircularBuffer<T>(maxSize);
+  }
+
+  /// 버퍼 성능 테스트 (개발용)
+  static Map<String, dynamic> performanceTest() {
+    final stopwatch = Stopwatch()..start();
+    
+    // 1000개 데이터로 성능 테스트
+    final buffer = CircularBuffer<int>(1000);
+    
+    // 추가 성능
+    for (int i = 0; i < 2000; i++) {
+      buffer.add(i);
+    }
+    final addTime = stopwatch.elapsedMicroseconds;
+    
+    // 조회 성능
+    stopwatch.reset();
+    for (int i = 0; i < 1000; i++) {
+      buffer[i % buffer.length];
+    }
+    final accessTime = stopwatch.elapsedMicroseconds;
+    
+    // 필터링 성능
+    stopwatch.reset();
+    buffer.where((item) => item % 2 == 0);
+    final filterTime = stopwatch.elapsedMicroseconds;
+    
+    stopwatch.stop();
+    
+    return {
+      'add_2000_items_us': addTime,
+      'access_1000_times_us': accessTime,
+      'filter_once_us': filterTime,
+      'memory_usage_bytes': buffer.estimatedMemoryBytes,
+      'utilization': buffer.utilization,
+    };
+  }
+}\n\n// ====== lib/core/utils/bottom_line_constants.dart ======\n
+// core/utils/bottom_line_constants.dart
+// 🔥 바텀라인 시스템 - 모든 설정값과 상수 정의
+
+/// 바텀라인 시스템 전체 설정값
+class BottomLineConstants {
+  // 🚫 인스턴스 생성 방지
+  BottomLineConstants._();
+
+  // ══════════════════════════════════════════════════════════════════════════════
+  // ⏰ 타이머 & 주기 설정
+  // ══════════════════════════════════════════════════════════════════════════════
+
+  /// 바텀라인 새로고침 간격 (초) - AI 호출 주기
+  static const int refreshIntervalSeconds = 30;
+
+  /// 바텀라인 표시 간격 (초) - UI 전환 주기  
+  static const int displayIntervalSeconds = 18;
+
+  /// 스냅샷 생성 최소 간격 (초)
+  static const int minSnapshotIntervalSeconds = 15;
+
+  /// 메모리 정리 간격 (분)
+  static const int cleanupIntervalMinutes = 5;
+
+  /// 베이스라인 갱신 간격 (시간)
+  static const int baselineRefreshHours = 1;
+
+  // ══════════════════════════════════════════════════════════════════════════════
+  // 💰 거래 임계값 설정
+  // ══════════════════════════════════════════════════════════════════════════════
+
+  /// 고액거래 임계값 (원) - 2천만원
+  static const double largeTradeThreshold = 20000000.0;
+
+  /// 초대형거래 임계값 (원) - 1억원  
+  static const double megaTradeThreshold = 100000000.0;
+
+  /// 스마트머니 룰 최소 고액거래 횟수
+  static const int smartMoneyMinTradeCount = 3;
+
+  /// 볼륨 급증 임계값 (%) - 200% 이상
+  static const double volumeSpikeThreshold = 200.0;
+
+  /// 급등/급락 임계값 (%) - 10% 이상
+  static const double surgeThreshold = 10.0;
+
+  /// 섹터 로테이션 임계값 (%p) - 7%p 이상
+  static const double sectorRotationThreshold = 7.0;
+
+  // ══════════════════════════════════════════════════════════════════════════════
+  // 📊 인사이트 점수 계산 설정
+  // ══════════════════════════════════════════════════════════════════════════════
+
+  /// 인사이트 생성 최소 점수
+  static const double minInsightScore = 1.0;
+
+  /// 긴급 인사이트 임계값
+  static const double urgentInsightThreshold = 2.5;
+
+  /// 최고 인사이트 점수 (정규화용)
+  static const double maxInsightScore = 5.0;
+
+  /// 점수 계산 가중치 - 가격 변화
+  static const double scorePriceChangeWeight = 0.3;
+
+  /// 점수 계산 가중치 - 볼륨 변화
+  static const double scoreVolumeChangeWeight = 0.25;
+
+  /// 점수 계산 가중치 - 고액거래
+  static const double scoreLargeTradeWeight = 0.25;
+
+  /// 점수 계산 가중치 - 섹터 변화
+  static const double scoreSectorChangeWeight = 0.2;
+
+  // ══════════════════════════════════════════════════════════════════════════════
+  // 🔄 메모리 관리 설정
+  // ══════════════════════════════════════════════════════════════════════════════
+
+  /// 최근 거래 최대 보관 개수
+  static const int maxRecentTrades = 1000;
+
+  /// 최근 고액거래 최대 보관 개수
+  static const int maxRecentLargeTrades = 100;
+
+  /// 시장별 최대 추적 개수
+  static const int maxTrackedMarkets = 200;
+
+  /// 섹터별 최대 추적 개수
+  static const int maxTrackedSectors = 20;
+
+  /// 시장 비활성 제거 시간 (분) - 5분간 거래 없으면 제거
+  static const int marketInactiveMinutes = 5;
+
+  /// 캐시된 스냅샷 최대 개수
+  static const int maxCachedSnapshots = 3;
+
+  // ══════════════════════════════════════════════════════════════════════════════
+  // 🎨 UI 큐 관리 설정
+  // ══════════════════════════════════════════════════════════════════════════════
+
+  /// 바텀라인 큐 최대 크기
+  static const int maxQueueSize = 12;
+
+  /// 큐 부족 임계값 (이하일 때 새로 생성)
+  static const int queueRefillThreshold = 4;
+
+  /// 긴급 아이템 최대 개수
+  static const int maxUrgentItems = 3;
+
+  /// 일반 아이템 최대 개수
+  static const int maxNormalItems = 9;
+
+  /// 플레이스홀더 아이템 개수
+  static const int placeholderItemCount = 3;
+
+  // ══════════════════════════════════════════════════════════════════════════════
+  // 🤖 AI 서비스 설정
+  // ══════════════════════════════════════════════════════════════════════════════
+
+  /// OpenAI API 타임아웃 (초)
+  static const int openAITimeoutSeconds = 10;
+
+  /// AI 재시도 최대 횟수
+  static const int aiMaxRetryCount = 2;
+
+  /// AI 재시도 간격 (초)
+  static const int aiRetryDelaySeconds = 1;
+
+  /// GPT 모델명 (일반)
+  static const String gptModelNormal = 'gpt-3.5-turbo';
+
+  /// GPT 모델명 (긴급)
+  static const String gptModelUrgent = 'gpt-4';
+
+  /// 바텀라인 최대 길이 (글자)
+  static const int maxHeadlineLength = 120;
+
+  /// 바텀라인 최소 길이 (글자)
+  static const int minHeadlineLength = 15;
+
+  /// AI 생성 배치 크기
+  static const int aiBatchSize = 5;
+
+  // ══════════════════════════════════════════════════════════════════════════════
+  // 📝 로깅 & 디버깅 설정
+  // ══════════════════════════════════════════════════════════════════════════════
+
+  /// 바텀라인 로깅 활성화
+  static const bool enableLogging = true;
+
+  /// 성능 모니터링 활성화
+  static const bool enablePerformanceMonitoring = true;
+
+  /// 메모리 사용량 로깅 활성화
+  static const bool enableMemoryLogging = false;
+
+  /// AI 호출 로깅 활성화
+  static const bool enableAILogging = true;
+
+  /// 디버그 모드에서만 상세 로깅
+  static bool get enableDetailedLogging => 
+    enableLogging && const bool.fromEnvironment('dart.vm.product') == false;
+
+  // ══════════════════════════════════════════════════════════════════════════════
+  // 🎛️ 룰 시스템 설정
+  // ══════════════════════════════════════════════════════
+
+  /// 룰별 가중치 설정
+  static const Map<String, double> ruleWeights = {
+    'smart_money': 1.0,      // 스마트머니 룰
+    'volume_spike': 0.8,     // 볼륨 급증 룰
+    'surge_chain': 0.7,      // 연쇄 급등 룰  
+    'sector_rotation': 0.8,  // 섹터 로테이션 룰
+    'fallback': 0.3,         // 폴백 룰
+  };
+
+  /// 룰별 활성화 상태
+  static const Map<String, bool> ruleEnabled = {
+    'smart_money': true,
+    'volume_spike': true,
+    'surge_chain': true,
+    'sector_rotation': true,
+    'fallback': true,
+  };
+
+  /// 인사이트 생성 최대 개수 (AI 비용 절약)
+  static const int maxInsightsPerSnapshot = 5;
+
+  /// 룰 실행 타임아웃 (밀리초)
+  static const int ruleExecutionTimeoutMs = 1000;
+
+  // ══════════════════════════════════════════════════════════════════════════════
+  // 🚨 에러 처리 & 대체 설정
+  // ══════════════════════════════════════════════════════════════════════════════
+
+  /// 연속 에러 허용 횟수
+  static const int maxConsecutiveErrors = 3;
+
+  /// 에러 후 대기 시간 (초)
+  static const int errorBackoffSeconds = 30;
+
+  /// AI 실패 시 대체 메시지 사용 여부
+  static const bool useFallbackMessages = true;
+
+  /// 네트워크 연결 체크 간격 (초)
+  static const int connectionCheckIntervalSeconds = 60;
+
+  /// 데이터 부족 시 플레이스홀더 표시 여부
+  static const bool showPlaceholderWhenNoData = true;
+
+  // ══════════════════════════════════════════════════════════════════════════════
+  // 🎨 UI 애니메이션 설정
+  // ══════════════════════════════════════════════════════════════════════════════
+
+  /// 바텀라인 전환 애니메이션 시간 (밀리초)
+  static const int transitionAnimationMs = 300;
+
+  /// 마퀴 텍스트 스크롤 속도 (픽셀/초)
+  static const double marqueeScrollSpeed = 50.0;
+
+  /// 긴급 바텀라인 깜빡임 간격 (밀리초)
+  static const int urgentBlinkIntervalMs = 1000;
+
+  /// 바텀라인 높이 (픽셀)
+  static const double bottomLineHeight = 50.0;
+
+  // ══════════════════════════════════════════════════════════════════════════════
+  // 📱 플랫폼별 설정
+  // ══════════════════════════════════════════════════════════════════════════════
+
+  /// 안드로이드 최적화 설정
+  static const Map<String, dynamic> androidOptimizations = {
+    'reduce_animations': false,
+    'battery_optimization': true,
+    'background_processing': true,
+  };
+
+  /// iOS 최적화 설정
+  static const Map<String, dynamic> iosOptimizations = {
+    'background_app_refresh': true,
+    'memory_pressure_handling': true,
+    'smooth_animations': true,
+  };
+
+  // ══════════════════════════════════════════════════════════════════════════════
+  // 🔢 수치 포맷팅 설정
+  // ══════════════════════════════════════════════════════════════════════════════
+
+  /// 금액 표시 단위 (억원)
+  static const double amountUnit = 100000000.0;
+
+  /// 소수점 자리수 - 가격
+  static const int priceDecimalPlaces = 1;
+
+  /// 소수점 자리수 - 퍼센트
+  static const int percentDecimalPlaces = 1;
+
+  /// 소수점 자리수 - 볼륨
+  static const int volumeDecimalPlaces = 1;
+
+  /// 큰 수 표시 임계값 (억)
+  static const double largeNumberThreshold = 1.0;
+
+  // ══════════════════════════════════════════════════════════════════════════════
+  // 🎯 개발/테스트 설정
+  // ══════════════════════════════════════════════════════════════════════════════
+
+  /// 개발 모드에서 타이머 가속화 (배수)
+  static const double devModeSpeedMultiplier = 1.0;
+
+  /// 테스트 모드에서 AI 호출 비활성화
+  static const bool disableAIInTest = true;
+
+  /// 목업 데이터 사용 여부
+  static const bool useMockData = false;
+
+  /// 성능 벤치마킹 활성화
+  static const bool enableBenchmarking = false;
+
+  // ══════════════════════════════════════════════════════════════════════════════
+  // 🔧 헬퍼 메서드들
+  // ══════════════════════════════════════════════════════════════════════════════
+
+  /// 현재 환경에 맞는 타이머 간격 반환
+  static Duration getRefreshInterval() {
+    const base = Duration(seconds: refreshIntervalSeconds);
+    if (const bool.fromEnvironment('dart.vm.product') == false) {
+      // 개발 모드에서는 가속화
+      return Duration(seconds: (base.inSeconds / devModeSpeedMultiplier).round());
+    }
+    return base;
+  }
+
+  /// 현재 환경에 맞는 표시 간격 반환
+  static Duration getDisplayInterval() {
+    const base = Duration(seconds: displayIntervalSeconds);
+    if (const bool.fromEnvironment('dart.vm.product') == false) {
+      return Duration(seconds: (base.inSeconds / devModeSpeedMultiplier).round());
+    }
+    return base;
+  }
+
+  /// 룰이 활성화되어 있는지 확인
+  static bool isRuleEnabled(String ruleId) {
+    return ruleEnabled[ruleId] ?? false;
+  }
+
+  /// 룰의 가중치 반환
+  static double getRuleWeight(String ruleId) {
+    return ruleWeights[ruleId] ?? 0.0;
+  }
+
+  /// 금액을 억원 단위로 포맷팅
+  static String formatAmount(double amount) {
+    final amountInEok = amount / amountUnit;
+    return '${amountInEok.toStringAsFixed(priceDecimalPlaces)}억원';
+  }
+
+  /// 퍼센트 포맷팅
+  static String formatPercent(double percent) {
+    return '${percent.toStringAsFixed(percentDecimalPlaces)}%';
+  }
+
+  /// 현재 설정 요약 반환 (디버깅용)
+  static Map<String, dynamic> getConfigSummary() {
+    return {
+      'refresh_interval': refreshIntervalSeconds,
+      'display_interval': displayIntervalSeconds,
+      'large_trade_threshold': formatAmount(largeTradeThreshold),
+      'max_queue_size': maxQueueSize,
+      'max_recent_trades': maxRecentTrades,
+      'ai_timeout': openAITimeoutSeconds,
+      'logging_enabled': enableLogging,
+      'rules_enabled': ruleEnabled.values.where((e) => e).length,
+      'memory_limits': {
+        'markets': maxTrackedMarkets,
+        'trades': maxRecentTrades,
+        'large_trades': maxRecentLargeTrades,
+      },
+    };
+  }
+
+  /// 시스템 상태 검증
+  static bool validateConfig() {
+    // 기본적인 설정값 검증
+    if (refreshIntervalSeconds <= 0) return false;
+    if (displayIntervalSeconds <= 0) return false;
+    if (maxQueueSize <= 0) return false;
+    if (largeTradeThreshold <= 0) return false;
+    
+    // 타이머 간격 검증 (표시 간격 < 새로고침 간격)
+    if (displayIntervalSeconds >= refreshIntervalSeconds) return false;
+    
+    // 큐 크기 검증
+    if (queueRefillThreshold >= maxQueueSize) return false;
+    
+    // 가중치 검증 (0 ~ 1 범위)
+    for (final weight in ruleWeights.values) {
+      if (weight < 0.0 || weight > 1.0) return false;
+    }
+    
+    return true;
+  }
+}\n\n// ====== lib/core/utils/bottom_line_queue.dart ======\n
+// core/utils/bottom_line_queue.dart
+// 🎨 바텀라인 UI 큐 관리 시스템 (18초 간격 표시)
+
+import 'dart:collection';
+import 'dart:math' as math;
+import 'package:flutter/foundation.dart';
+import '../../domain/entities/bottom_line.dart';
+import 'bottom_line_constants.dart';
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 🎨 바텀라인 큐 상태 열거형
+// ══════════════════════════════════════════════════════════════════════════════
+
+enum BottomLineQueueState {
+  /// 정상 상태 - 충분한 아이템 보유
+  normal,
+  
+  /// 부족 상태 - 리필 필요 (4개 미만)
+  needsRefill,
+  
+  /// 빈 상태 - 표시할 아이템 없음
+  empty,
+  
+  /// 긴급 상태 - 긴급 아이템 우선 표시
+  urgent,
+  
+  /// 일시정지 상태 - 표시 중단
+  paused,
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 🎯 바텀라인 큐 아이템 래퍼
+// ══════════════════════════════════════════════════════════════════════════════
+
+/// 큐에서 관리되는 바텀라인 아이템 (메타데이터 포함)
+@immutable
+class QueuedBottomLineItem {
+  final BottomLineItem item;
+  final DateTime queuedAt;        // 큐에 추가된 시간
+  final int displayCount;         // 표시된 횟수
+  final bool isUrgent;           // 긴급 아이템 여부
+  final double priority;         // 우선순위 (높을수록 먼저 표시)
+  final String id;               // 고유 ID
+
+  const QueuedBottomLineItem({
+    required this.item,
+    required this.queuedAt,
+    this.displayCount = 0,
+    required this.isUrgent,
+    required this.priority,
+    required this.id,
+  });
+
+  /// 큐 아이템 생성 팩토리
+  factory QueuedBottomLineItem.fromBottomLineItem(BottomLineItem item) {
+    return QueuedBottomLineItem(
+      item: item,
+      queuedAt: DateTime.now(),
+      isUrgent: item.isUrgent,
+      priority: item.priority,
+      id: '${item.sourceInsightId}_${DateTime.now().millisecondsSinceEpoch}',
+    );
+  }
+
+  /// 표시 횟수 증가
+  QueuedBottomLineItem incrementDisplayCount() {
+    return QueuedBottomLineItem(
+      item: item,
+      queuedAt: queuedAt,
+      displayCount: displayCount + 1,
+      isUrgent: isUrgent,
+      priority: priority,
+      id: id,
+    );
+  }
+
+  /// 큐에서 대기한 시간
+  Duration get queuedDuration => DateTime.now().difference(queuedAt);
+
+  /// 만료 여부 (5분 이상 대기)
+  bool get isExpired => queuedDuration.inMinutes > 5;
+
+  /// 우선순위 점수 계산 (긴급도 + 시간 가중치)
+  double get effectivePriority {
+    double score = priority;
+    
+    // 긴급 아이템은 +2.0 보너스
+    if (isUrgent) score += 2.0;
+    
+    // 오래 대기한 아이템은 우선순위 상승 (최대 +1.0)
+    final waitMinutes = queuedDuration.inMinutes;
+    final timeBonus = math.min(waitMinutes * 0.1, 1.0);
+    score += timeBonus;
+    
+    return score;
+  }
+
+  @override
+  String toString() {
+    return 'QueuedItem(${item.headline.substring(0, math.min(20, item.headline.length))}..., '
+           'urgent: $isUrgent, priority: ${priority.toStringAsFixed(1)}, '
+           'displayed: $displayCount, queued: ${queuedDuration.inSeconds}s)';
+  }
+
+  @override
+  bool operator ==(Object other) {
+    if (identical(this, other)) return true;
+    return other is QueuedBottomLineItem && other.id == id;
+  }
+
+  @override
+  int get hashCode => id.hashCode;
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 🎨 바텀라인 큐 관리자
+// ══════════════════════════════════════════════════════════════════════════════
+
+/// ESPN 스타일 바텀라인 큐 관리 시스템
+class BottomLineQueue {
+  // 🎯 큐 저장소 (우선순위별 분리)
+  final Queue<QueuedBottomLineItem> _urgentQueue = Queue<QueuedBottomLineItem>();
+  final Queue<QueuedBottomLineItem> _normalQueue = Queue<QueuedBottomLineItem>();
+  final Queue<QueuedBottomLineItem> _fallbackQueue = Queue<QueuedBottomLineItem>();
+  
+  // 📊 상태 관리
+  QueuedBottomLineItem? _currentItem;
+  BottomLineQueueState _state = BottomLineQueueState.empty;
+  DateTime? _lastDisplayTime;
+  DateTime? _lastRefillTime;
+  int _totalDisplayed = 0;
+  int _totalAdded = 0;
+  
+  // 🎛️ 설정
+  bool _isPaused = false;
+  double _speedMultiplier = 1.0;
+  
+  /// 현재 표시 중인 아이템
+  QueuedBottomLineItem? get currentItem => _currentItem;
+  
+  /// 현재 큐 상태
+  BottomLineQueueState get state => _state;
+  
+  /// 총 큐 길이 (모든 큐 합계)
+  int get queueLength => _urgentQueue.length + _normalQueue.length + _fallbackQueue.length;
+  
+  /// 긴급 아이템 개수
+  int get urgentCount => _urgentQueue.length;
+  
+  /// 일반 아이템 개수
+  int get normalCount => _normalQueue.length;
+  
+  /// 대체 아이템 개수
+  int get fallbackCount => _fallbackQueue.length;
+  
+  /// 긴급 아이템이 있는지
+  bool get hasUrgentItems => _urgentQueue.isNotEmpty;
+  
+  /// 큐가 비어있는지
+  bool get isEmpty => queueLength == 0;
+  
+  /// 리필이 필요한지 (4개 미만)
+  bool get needsRefill => queueLength < BottomLineConstants.queueRefillThreshold;
+  
+  /// 일시정지 상태인지
+  bool get isPaused => _isPaused;
+  
+  /// 속도 배수
+  double get speedMultiplier => _speedMultiplier;
+  
+  /// 마지막 표시 시간
+  DateTime? get lastDisplayTime => _lastDisplayTime;
+  
+  /// 다음 표시까지 남은 시간 (초)
+  int get secondsUntilNext {
+    if (_lastDisplayTime == null) return 0;
+    
+    final elapsed = DateTime.now().difference(_lastDisplayTime!).inSeconds;
+    final interval = (BottomLineConstants.displayIntervalSeconds / _speedMultiplier).round();
+    
+    return math.max(0, interval - elapsed);
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════
+  // 📥 아이템 추가 메서드들
+  // ══════════════════════════════════════════════════════════════════════════════
+
+  /// 바텀라인 아이템 추가 (자동 분류)
+  void addItem(BottomLineItem item) {
+    final queuedItem = QueuedBottomLineItem.fromBottomLineItem(item);
+    
+    if (item.isUrgent) {
+      _addToUrgentQueue(queuedItem);
+    } else {
+      _addToNormalQueue(queuedItem);
+    }
+    
+    _totalAdded++;
+    _updateState();
+    
+    if (BottomLineConstants.enableDetailedLogging) {
+      // log.d('📥 Added item to queue: ${queuedItem}');
+    }
+  }
+
+  /// 여러 아이템 한 번에 추가
+  void addItems(List<BottomLineItem> items) {
+    for (final item in items) {
+      addItem(item);
+    }
+    
+    if (BottomLineConstants.enableLogging) {
+      // log.d('📥 Added ${items.length} items to queue (total: $queueLength)');
+    }
+  }
+
+  /// 긴급 아이템 즉시 추가 (맨 앞에)
+  void addUrgentItem(BottomLineItem item) {
+    final queuedItem = QueuedBottomLineItem.fromBottomLineItem(item);
+    _urgentQueue.addFirst(queuedItem);
+    _totalAdded++;
+    _updateState();
+    
+    if (BottomLineConstants.enableLogging) {
+      // log.d('🚨 Added urgent item to front: ${queuedItem}');
+    }
+  }
+
+  /// 대체 아이템 추가 (큐 고갈 방지용)
+  void addFallbackItem(BottomLineItem item) {
+    final queuedItem = QueuedBottomLineItem.fromBottomLineItem(item);
+    _fallbackQueue.addLast(queuedItem);
+    _updateState();
+    
+    if (BottomLineConstants.enableDetailedLogging) {
+      // log.d('🛡️ Added fallback item: ${queuedItem}');
+    }
+  }
+
+  /// 긴급 큐에 추가 (중복 체크)
+  void _addToUrgentQueue(QueuedBottomLineItem item) {
+    // 중복 제거 (같은 insight는 하나만)
+    _urgentQueue.removeWhere((existing) => 
+      existing.item.sourceInsightId == item.item.sourceInsightId);
+    
+    // 최대 개수 제한
+    while (_urgentQueue.length >= BottomLineConstants.maxUrgentItems) {
+      _urgentQueue.removeFirst();
+    }
+    
+    _urgentQueue.addLast(item);
+  }
+
+  /// 일반 큐에 추가 (우선순위 정렬)
+  void _addToNormalQueue(QueuedBottomLineItem item) {
+    final queueList = _normalQueue.toList();
+    
+    // 중복 제거
+    queueList.removeWhere((existing) => 
+      existing.item.sourceInsightId == item.item.sourceInsightId);
+    
+    // 우선순위 순으로 삽입
+    queueList.add(item);
+    queueList.sort((a, b) => b.effectivePriority.compareTo(a.effectivePriority));
+    
+    // 최대 개수 제한
+    final limitedList = queueList.take(BottomLineConstants.maxNormalItems).toList();
+    
+    _normalQueue.clear();
+    _normalQueue.addAll(limitedList);
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════
+  // 📤 아이템 표시 메서드들
+  // ══════════════════════════════════════════════════════════════════════════════
+
+  /// 다음 아이템 표시 (18초 간격)
+  BottomLineQueue showNext() {
+    if (_isPaused) return this;
+    
+    // 현재 아이템 표시 횟수 증가
+    if (_currentItem != null) {
+      _currentItem = _currentItem!.incrementDisplayCount();
+    }
+    
+    // 다음 아이템 선택
+    final nextItem = _getNextItem();
+    
+    if (nextItem != null) {
+      _currentItem = nextItem;
+      _lastDisplayTime = DateTime.now();
+      _totalDisplayed++;
+      
+      // 사용된 아이템을 큐에서 제거
+      _removeUsedItem(nextItem);
+      
+      if (BottomLineConstants.enableDetailedLogging) {
+        // log.d('📺 Showing next item: ${nextItem}');
+      }
+    } else {
+      // 표시할 아이템이 없음
+      _currentItem = null;
+      
+      if (BottomLineConstants.enableLogging) {
+        // log.w('📺 No items to display, queue is empty');
+      }
+    }
+    
+    _updateState();
+    return this;
+  }
+
+  /// 다음 표시할 아이템 선택 (우선순위 순)
+  QueuedBottomLineItem? _getNextItem() {
+    // 1. 긴급 아이템 우선
+    if (_urgentQueue.isNotEmpty) {
+      return _urgentQueue.first;
+    }
+    
+    // 2. 일반 아이템 (우선순위 순)
+    if (_normalQueue.isNotEmpty) {
+      return _normalQueue.first;
+    }
+    
+    // 3. 대체 아이템 (큐 고갈 시)
+    if (_fallbackQueue.isNotEmpty) {
+      return _fallbackQueue.first;
+    }
+    
+    return null;
+  }
+
+  /// 사용된 아이템을 큐에서 제거
+  void _removeUsedItem(QueuedBottomLineItem item) {
+    _urgentQueue.remove(item);
+    _normalQueue.remove(item);
+    _fallbackQueue.remove(item);
+  }
+
+  /// 즉시 다음 아이템으로 스킵
+  BottomLineQueue skipCurrent() {
+    if (_currentItem != null) {
+      if (BottomLineConstants.enableLogging) {
+        // log.d('⏭️ Skipping current item: ${_currentItem}');
+      }
+    }
+    
+    return showNext();
+  }
+
+  /// 현재 아이템 다시 표시 (18초 연장)
+  BottomLineQueue repeatCurrent() {
+    if (_currentItem != null) {
+      _lastDisplayTime = DateTime.now();
+      
+      if (BottomLineConstants.enableDetailedLogging) {
+        // log.d('🔄 Repeating current item: ${_currentItem}');
+      }
+    }
+    
+    return this;
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════
+  // 🎛️ 큐 제어 메서드들
+  // ══════════════════════════════════════════════════════════════════════════════
+
+  /// 큐 일시정지/재개
+  BottomLineQueue setPaused(bool paused) {
+    _isPaused = paused;
+    _updateState();
+    
+    if (BottomLineConstants.enableLogging) {
+      // log.d('⏸️ Queue ${paused ? 'paused' : 'resumed'}');
+    }
+    
+    return this;
+  }
+
+  /// 표시 속도 변경 (배수)
+  BottomLineQueue setSpeedMultiplier(double multiplier) {
+    _speedMultiplier = math.max(0.1, math.min(5.0, multiplier));
+    
+    if (BottomLineConstants.enableLogging) {
+      // log.d('⚡ Speed multiplier set to ${_speedMultiplier}x');
+    }
+    
+    return this;
+  }
+
+  /// 큐 전체 비우기
+  BottomLineQueue clear() {
+    _urgentQueue.clear();
+    _normalQueue.clear();
+    _fallbackQueue.clear();
+    _currentItem = null;
+    _updateState();
+    
+    if (BottomLineConstants.enableLogging) {
+      // log.d('🗑️ Queue cleared');
+    }
+    
+    return this;
+  }
+
+  /// 만료된 아이템 제거
+  BottomLineQueue removeExpired() {
+    int removedCount = 0;
+    
+    // 각 큐에서 만료된 아이템 제거
+    removedCount += _removeExpiredFromQueue(_urgentQueue);
+    removedCount += _removeExpiredFromQueue(_normalQueue);
+    removedCount += _removeExpiredFromQueue(_fallbackQueue);
+    
+    if (removedCount > 0) {
+      _updateState();
+      
+      if (BottomLineConstants.enableLogging) {
+        // log.d('🗑️ Removed $removedCount expired items');
+      }
+    }
+    
+    return this;
+  }
+
+  /// 특정 큐에서 만료된 아이템 제거
+  int _removeExpiredFromQueue(Queue<QueuedBottomLineItem> queue) {
+    final originalLength = queue.length;
+    queue.removeWhere((item) => item.isExpired);
+    return originalLength - queue.length;
+  }
+
+  /// 큐 상태 업데이트
+  void _updateState() {
+    if (_isPaused) {
+      _state = BottomLineQueueState.paused;
+    } else if (hasUrgentItems) {
+      _state = BottomLineQueueState.urgent;
+    } else if (isEmpty) {
+      _state = BottomLineQueueState.empty;
+    } else if (needsRefill) {
+      _state = BottomLineQueueState.needsRefill;
+    } else {
+      _state = BottomLineQueueState.normal;
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════
+  // 📊 통계 및 모니터링
+  // ══════════════════════════════════════════════════════════════════════════════
+
+  /// 큐 통계 정보
+  Map<String, dynamic> get stats {
+    
+    return {
+      'state': _state.name,
+      'queue_length': queueLength,
+      'urgent_count': urgentCount,
+      'normal_count': normalCount,
+      'fallback_count': fallbackCount,
+      'current_item': _currentItem?.item.headline ?? 'None',
+      'total_added': _totalAdded,
+      'total_displayed': _totalDisplayed,
+      'display_rate': _totalAdded > 0 ? (_totalDisplayed / _totalAdded * 100).toStringAsFixed(1) : '0.0',
+      'is_paused': _isPaused,
+      'speed_multiplier': _speedMultiplier,
+      'seconds_until_next': secondsUntilNext,
+      'last_display': _lastDisplayTime?.toIso8601String() ?? 'Never',
+      'needs_refill': needsRefill,
+      'memory_usage_items': queueLength,
+    };
+  }
+
+  /// 우선순위 분포 통계
+  Map<String, dynamic> get priorityStats {
+    final allItems = [
+      ..._urgentQueue,
+      ..._normalQueue,
+      ..._fallbackQueue,
+    ];
+    
+    if (allItems.isEmpty) {
+      return {'count': 0, 'min': 0.0, 'max': 0.0, 'avg': 0.0};
+    }
+    
+    final priorities = allItems.map((item) => item.effectivePriority).toList();
+    priorities.sort();
+    
+    return {
+      'count': priorities.length,
+      'min': priorities.first,
+      'max': priorities.last,
+      'avg': priorities.reduce((a, b) => a + b) / priorities.length,
+      'median': priorities[priorities.length ~/ 2],
+    };
+  }
+
+  /// 성능 메트릭
+  Map<String, dynamic> get performanceMetrics {
+    final now = DateTime.now();
+    final startTime = _lastRefillTime ?? now;
+    final uptimeMinutes = now.difference(startTime).inMinutes;
+    
+    return {
+      'uptime_minutes': uptimeMinutes,
+      'items_per_minute': uptimeMinutes > 0 ? _totalAdded / uptimeMinutes : 0.0,
+      'display_efficiency': _totalAdded > 0 ? _totalDisplayed / _totalAdded : 0.0,
+      'queue_turnover_rate': queueLength > 0 ? _totalDisplayed / queueLength : 0.0,
+      'average_queue_length': queueLength.toDouble(),
+      'urgent_ratio': queueLength > 0 ? urgentCount / queueLength : 0.0,
+    };
+  }
+
+  @override
+  String toString() {
+    return 'BottomLineQueue(state: ${_state.name}, length: $queueLength, '
+           'urgent: $urgentCount, current: ${_currentItem?.item.headline ?? 'None'})';
+  }
+}\n\n// ====== lib/data/processors/bottom_line_aggregator.dart ======\n
+// data/processors/bottom_line_aggregator.dart
+// 🔄 바텀라인 데이터 애그리게이터 - 실시간 누적 & 스냅샷 생성
+
+import 'dart:collection';
+import 'dart:math' as math;
+import 'package:flutter/foundation.dart';
+
+import '../../core/utils/bottom_line_circular_buffer.dart';
+import '../../core/utils/bottom_line_constants.dart';
+import '../../core/utils/logger.dart';
+import '../../domain/entities/bottom_line.dart';
+import '../../domain/entities/trade.dart';
+import '../../domain/entities/volume.dart';
+import '../../domain/entities/surge.dart';
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 📊 실시간 시장 통계 클래스들
+// ══════════════════════════════════════════════════════════════════════════════
+
+/// 시장별 실시간 집계 통계 (메모리 효율적)
+@immutable
+class RealtimeMarketStats {
+  final String market;
+  final double totalVolume;           // 누적 거래량
+  final double totalAmount;           // 누적 거래대금
+  final int tradeCount;               // 총 거래 횟수
+  final double basePrice;             // 시작 가격 (급등/급락 계산용)
+  final double currentPrice;          // 현재 가격
+  final double highPrice;             // 최고가
+  final double lowPrice;              // 최저가
+  final int largeTradeCount;          // 고액거래 횟수
+  final DateTime firstTradeTime;      // 첫 거래 시간
+  final DateTime lastTradeTime;       // 마지막 거래 시간
+  final double weightedAvgPrice;      // 거래량 가중 평균가
+
+  const RealtimeMarketStats({
+    required this.market,
+    required this.totalVolume,
+    required this.totalAmount,
+    required this.tradeCount,
+    required this.basePrice,
+    required this.currentPrice,
+    required this.highPrice,
+    required this.lowPrice,
+    required this.largeTradeCount,
+    required this.firstTradeTime,
+    required this.lastTradeTime,
+    required this.weightedAvgPrice,
+  });
+
+  /// 초기 통계 생성
+  factory RealtimeMarketStats.initial(Trade firstTrade) {
+    return RealtimeMarketStats(
+      market: firstTrade.market,
+      totalVolume: firstTrade.volume,
+      totalAmount: firstTrade.total,
+      tradeCount: 1,
+      basePrice: firstTrade.price,
+      currentPrice: firstTrade.price,
+      highPrice: firstTrade.price,
+      lowPrice: firstTrade.price,
+      largeTradeCount: firstTrade.total >= BottomLineConstants.largeTradeThreshold ? 1 : 0,
+      firstTradeTime: DateTime.fromMillisecondsSinceEpoch(firstTrade.timestampMs),
+      lastTradeTime: DateTime.fromMillisecondsSinceEpoch(firstTrade.timestampMs),
+      weightedAvgPrice: firstTrade.price,
+    );
+  }
+
+  /// 새 거래 추가하여 통계 업데이트
+  RealtimeMarketStats addTrade(Trade trade) {
+    final newTotalVolume = totalVolume + trade.volume;
+    final newTotalAmount = totalAmount + trade.total;
+    final newTradeCount = tradeCount + 1;
+    final newLargeTradeCount = largeTradeCount + 
+      (trade.total >= BottomLineConstants.largeTradeThreshold ? 1 : 0);
+    
+    // 거래량 가중 평균가 계산
+    final newWeightedAvgPrice = newTotalVolume > 0
+      ? (weightedAvgPrice * totalVolume + trade.price * trade.volume) / newTotalVolume
+      : trade.price;
+
+    return RealtimeMarketStats(
+      market: market,
+      totalVolume: newTotalVolume,
+      totalAmount: newTotalAmount,
+      tradeCount: newTradeCount,
+      basePrice: basePrice, // 변경하지 않음 (시작점 유지)
+      currentPrice: trade.price,
+      highPrice: math.max(highPrice, trade.price),
+      lowPrice: math.min(lowPrice, trade.price),
+      largeTradeCount: newLargeTradeCount,
+      firstTradeTime: firstTradeTime, // 변경하지 않음
+      lastTradeTime: DateTime.fromMillisecondsSinceEpoch(trade.timestampMs),
+      weightedAvgPrice: newWeightedAvgPrice,
+    );
+  }
+
+  /// 가격 변화율 계산
+  double get changePercent {
+    if (basePrice <= 0) return 0.0;
+    return ((currentPrice - basePrice) / basePrice) * 100;
+  }
+
+  /// 변동성 계산 (고가-저가 범위)
+  double get volatilityPercent {
+    if (lowPrice <= 0) return 0.0;
+    return ((highPrice - lowPrice) / lowPrice) * 100;
+  }
+
+  /// 거래 활발도 (분당 거래 횟수)
+  double get tradesPerMinute {
+    final duration = lastTradeTime.difference(firstTradeTime);
+    if (duration.inMinutes == 0) return tradeCount.toDouble();
+    return tradeCount / duration.inMinutes;
+  }
+
+  /// 고액거래 비율
+  double get largeTradeRatio {
+    if (tradeCount == 0) return 0.0;
+    return largeTradeCount / tradeCount;
+  }
+
+  /// 활성도 여부 (최근 5분 내 거래)
+  bool get isActive {
+    return DateTime.now().difference(lastTradeTime).inMinutes < 5;
+  }
+
+  /// Trade Entity로 변환
+  Trade toTradeEntity() {
+    return Trade(
+      market: market,
+      price: currentPrice,
+      volume: totalVolume,
+      side: 'BID', // 기본값
+      changePrice: currentPrice - basePrice,
+      changeState: changePercent > 0 ? 'RISE' : (changePercent < 0 ? 'FALL' : 'EVEN'),
+      timestampMs: lastTradeTime.millisecondsSinceEpoch,
+      sequentialId: 'aggregated_${market}_${lastTradeTime.millisecondsSinceEpoch}',
+    );
+  }
+
+  /// Volume Entity로 변환
+  Volume toVolumeEntity() {
+    return Volume(
+      market: market,
+      totalVolume: totalVolume,
+      lastUpdatedMs: lastTradeTime.millisecondsSinceEpoch,
+      timeFrame: 'realtime',
+      timeFrameStartMs: firstTradeTime.millisecondsSinceEpoch,
+    );
+  }
+
+  /// Surge Entity로 변환
+  Surge toSurgeEntity() {
+    return Surge(
+      market: market,
+      changePercent: changePercent,
+      basePrice: basePrice,
+      currentPrice: currentPrice,
+      lastUpdatedMs: lastTradeTime.millisecondsSinceEpoch,
+      timeFrame: 'realtime',
+      timeFrameStartMs: firstTradeTime.millisecondsSinceEpoch,
+    );
+  }
+
+  @override
+  String toString() {
+    return 'MarketStats($market: ${tradeCount}trades, ${changePercent.toStringAsFixed(1)}%, ${(totalAmount/100000000).toStringAsFixed(1)}억)';
+  }
+}
+
+/// 섹터별 실시간 집계 통계
+@immutable
+class RealtimeSectorStats {
+  final String sector;
+  final double totalVolume;
+  final double totalAmount;
+  final Set<String> activeMarkets;
+  final DateTime firstUpdateTime;
+  final DateTime lastUpdateTime;
+  final int marketCount;
+
+  const RealtimeSectorStats({
+    required this.sector,
+    required this.totalVolume,
+    required this.totalAmount,
+    required this.activeMarkets,
+    required this.firstUpdateTime,
+    required this.lastUpdateTime,
+    required this.marketCount,
+  });
+
+  /// 초기 섹터 통계 생성
+  factory RealtimeSectorStats.initial(String sector, String market, double volume, double amount) {
+    final now = DateTime.now();
+    return RealtimeSectorStats(
+      sector: sector,
+      totalVolume: volume,
+      totalAmount: amount,
+      activeMarkets: {market},
+      firstUpdateTime: now,
+      lastUpdateTime: now,
+      marketCount: 1,
+    );
+  }
+
+  /// 마켓 데이터 추가
+  RealtimeSectorStats addMarketData(String market, double volume, double amount) {
+    final newActiveMarkets = Set<String>.from(activeMarkets)..add(market);
+    
+    return RealtimeSectorStats(
+      sector: sector,
+      totalVolume: totalVolume + volume,
+      totalAmount: totalAmount + amount,
+      activeMarkets: newActiveMarkets,
+      firstUpdateTime: firstUpdateTime,
+      lastUpdateTime: DateTime.now(),
+      marketCount: newActiveMarkets.length,
+    );
+  }
+
+  /// Volume Entity로 변환
+  Volume toVolumeEntity() {
+    return Volume(
+      market: 'SECTOR-$sector',
+      totalVolume: totalVolume,
+      lastUpdatedMs: lastUpdateTime.millisecondsSinceEpoch,
+      timeFrame: 'realtime',
+      timeFrameStartMs: firstUpdateTime.millisecondsSinceEpoch,
+    );
+  }
+
+  @override
+  String toString() {
+    return 'SectorStats($sector: ${marketCount}markets, ${(totalAmount/100000000).toStringAsFixed(1)}억)';
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 🔄 바텀라인 실시간 데이터 애그리게이터 (메인 클래스)
+// ══════════════════════════════════════════════════════════════════════════════
+
+/// 바텀라인용 실시간 데이터 애그리게이터 - 메모리 효율적 누적 처리
+class BottomLineAggregator {
+  // 📊 실시간 통계 저장소
+  final Map<String, RealtimeMarketStats> _marketStats = <String, RealtimeMarketStats>{};
+  final Map<String, RealtimeSectorStats> _sectorStats = <String, RealtimeSectorStats>{};
+  
+  // 🔄 순환 버퍼들 (메모리 효율적)
+  late final TradeCircularBuffer _recentTrades;
+  late final StringCircularBuffer _recentLargeTrades;
+  late final TimeBasedCircularBuffer<String> _marketActivity;
+  
+  // 📸 스냅샷 캐시
+  final Queue<MarketSnapshot> _snapshotHistory = Queue<MarketSnapshot>();
+  MarketSnapshot? _lastSnapshot;
+  MarketSnapshot? _baselineSnapshot;
+  
+  // ⏰ 시간 관리
+  late final DateTime _startTime;
+  DateTime? _lastSnapshotTime;
+  DateTime? _lastCleanupTime;
+  int _snapshotCounter = 0;
+  
+  // 📊 성능 통계
+  int _totalTradesProcessed = 0;
+  int _totalSnapshotsGenerated = 0;
+  Duration _totalProcessingTime = Duration.zero;
+
+  BottomLineAggregator() : _startTime = DateTime.now() {
+    _initializeBuffers();
+    
+    if (BottomLineConstants.enableLogging) {
+      log.d('🔄 BottomLine Aggregator initialized at $_startTime');
+    }
+  }
+
+  void _initializeBuffers() {
+    _recentTrades = BottomLineBufferFactory.createTradeBuffer();
+    _recentLargeTrades = BottomLineBufferFactory.createLargeTradeBuffer();
+    _marketActivity = BottomLineBufferFactory.createTimeBasedBuffer<String>(
+      BottomLineConstants.maxTrackedMarkets,
+      const Duration(minutes: 10), // 10분 TTL
+    );
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════
+  // 📊 실시간 데이터 추가 (메인 로직)
+  // ══════════════════════════════════════════════════════════════════════════════
+
+  /// 실시간 거래 데이터 추가 및 통계 업데이트
+  void addRealtimeTrade(Trade trade) {
+    final stopwatch = Stopwatch()..start();
+    
+    try {
+      // 🔄 순환 버퍼에 추가
+      final tradeMap = _tradeToMap(trade);
+      _recentTrades.add(tradeMap);
+      
+      // 📊 시장별 통계 업데이트
+      _updateMarketStats(trade);
+      
+      // 🏷️ 섹터별 통계 업데이트
+      _updateSectorStats(trade);
+      
+      // 🎯 고액거래 추적
+      if (trade.total >= BottomLineConstants.largeTradeThreshold) {
+        _recentLargeTrades.add('${trade.market}:${trade.total.toInt()}:${trade.timestampMs}');
+      }
+      
+      // 📈 시장 활동 추적
+      _marketActivity.addData(trade.market);
+      
+      // 🗑️ 주기적 정리
+      _performPeriodicCleanup();
+      
+      // 📊 통계 업데이트
+      _totalTradesProcessed++;
+      stopwatch.stop();
+      _totalProcessingTime += stopwatch.elapsed;
+      
+      if (BottomLineConstants.enableDetailedLogging && _totalTradesProcessed % 100 == 0) {
+        log.d('📊 Processed ${_totalTradesProcessed} trades, ${_marketStats.length} markets tracked');
+      }
+      
+    } catch (e, stackTrace) {
+      stopwatch.stop();
+      log.e('🚨 Trade processing failed: $e', e, stackTrace);
+    }
+  }
+
+  /// Trade를 Map으로 변환 (CircularBuffer 호환)
+  Map<String, dynamic> _tradeToMap(Trade trade) {
+    return {
+      'market': trade.market,
+      'price': trade.price,
+      'volume': trade.volume,
+      'amount': trade.total,
+      'timestamp': trade.timestampMs,
+      'side': trade.side,
+    };
+  }
+
+  /// 시장별 통계 업데이트
+  void _updateMarketStats(Trade trade) {
+    final market = trade.market;
+    
+    if (_marketStats.containsKey(market)) {
+      _marketStats[market] = _marketStats[market]!.addTrade(trade);
+    } else {
+      _marketStats[market] = RealtimeMarketStats.initial(trade);
+    }
+  }
+
+  /// 섹터별 통계 업데이트
+  void _updateSectorStats(Trade trade) {
+    final sector = _classifyMarketSector(trade.market);
+    
+    if (_sectorStats.containsKey(sector)) {
+      _sectorStats[sector] = _sectorStats[sector]!
+        .addMarketData(trade.market, trade.volume, trade.total);
+    } else {
+      _sectorStats[sector] = RealtimeSectorStats.initial(
+        sector, trade.market, trade.volume, trade.total);
+    }
+  }
+
+  /// 시장 섹터 분류 (기존 SectorClassification 활용)
+  String _classifyMarketSector(String market) {
+    final ticker = market.replaceFirst('KRW-', '');
+    
+    // 메이저 코인
+    if (['BTC', 'ETH'].contains(ticker)) {
+      return 'Major';
+    }
+    
+    // 레이어1 블록체인
+    if (['SOL', 'ADA', 'AVAX', 'DOT', 'MATIC'].contains(ticker)) {
+      return 'Layer1';
+    }
+    
+    // DeFi 토큰
+    if (['UNI', 'AAVE', 'COMP', 'SUSHI', 'CRV'].contains(ticker)) {
+      return 'DeFi';
+    }
+    
+    // 메타버스/게임
+    if (['SAND', 'MANA', 'AXS', 'ENJ'].contains(ticker)) {
+      return 'Metaverse';
+    }
+    
+    // AI/빅데이터
+    if (['FET', 'OCEAN', 'GRT'].contains(ticker)) {
+      return 'AI';
+    }
+    
+    // 기본값
+    return 'Altcoin';
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════
+  // 📸 스냅샷 생성 (30초마다)
+  // ══════════════════════════════════════════════════════════════════════════════
+
+  /// 스냅샷 생성 필요 여부 확인
+  bool shouldGenerateSnapshot() {
+    if (_lastSnapshotTime == null) return true;
+    
+    final elapsed = DateTime.now().difference(_lastSnapshotTime!);
+    return elapsed.inSeconds >= BottomLineConstants.refreshIntervalSeconds;
+  }
+
+  /// 실시간 통계에서 마켓 스냅샷 생성
+  MarketSnapshot? generateRealtimeSnapshot() {
+    if (!shouldGenerateSnapshot()) return null;
+    
+    final stopwatch = Stopwatch()..start();
+    
+    try {
+      final now = DateTime.now();
+      
+      // 📊 각 타입별 Entity 생성
+      final trades = _generateTradeEntities();
+      final volumes = _generateVolumeEntities();
+      final surges = _generateSurgeEntities();
+      final sectors = _generateSectorVolumeEntities();
+      
+      // 📈 델타 계산 (이전 스냅샷 대비)
+      final deltas = _calculateDeltas();
+      
+      // 📸 스냅샷 생성
+      final snapshot = MarketSnapshot(
+        timestamp: now,
+        timeFrame: 'min5', // TimeFrame.min5 대신 문자열 사용
+        topTrades: trades,
+        topVolumes: volumes,
+        surges: surges,
+        sectorVolumes: sectors,
+        volChangePct: deltas['volume'] ?? {},
+        sectorShareDelta: deltas['sector'] ?? {},
+        priceDelta: deltas['price'] ?? {},
+      );
+      
+      // 📦 스냅샷 캐싱
+      _cacheSnapshot(snapshot);
+      
+      // ⏰ 시간 업데이트
+      _lastSnapshotTime = now;
+      _snapshotCounter++;
+      
+      // 📊 통계 업데이트
+      _totalSnapshotsGenerated++;
+      stopwatch.stop();
+      _totalProcessingTime += stopwatch.elapsed;
+      
+      if (BottomLineConstants.enableLogging) {
+        log.d('📸 Snapshot #$_snapshotCounter generated: ${trades.length}T/${volumes.length}V/${surges.length}S/${sectors.length}SEC (${stopwatch.elapsedMilliseconds}ms)');
+      }
+      
+      return snapshot;
+      
+    } catch (e, stackTrace) {
+      stopwatch.stop();
+      log.e('🚨 Snapshot generation failed: $e', e, stackTrace);
+      return null;
+    }
+  }
+
+  /// 실시간 통계에서 Trade 엔티티들 생성
+  List<Trade> _generateTradeEntities() {
+    // 고액거래 중심으로 최근 거래들 선택
+    final largeTrades = _recentTrades.largeTrades;
+    
+    // 시장별로 그룹핑하여 중복 제거
+    final marketTrades = <String, Map<String, dynamic>>{};
+    for (final trade in largeTrades) {
+      final market = trade['market'] as String;
+      if (!marketTrades.containsKey(market) || 
+          (trade['amount'] as double) > (marketTrades[market]!['amount'] as double)) {
+        marketTrades[market] = trade;
+      }
+    }
+    
+    // Trade 엔티티로 변환
+    final trades = marketTrades.values.map((tradeMap) {
+      return Trade(
+        market: tradeMap['market'] as String,
+        price: tradeMap['price'] as double,
+        volume: tradeMap['volume'] as double,
+        side: tradeMap['side'] as String? ?? 'BID',
+        changePrice: 0.0, // 계산 필요시 추가
+        changeState: 'EVEN', // 계산 필요시 추가
+        timestampMs: tradeMap['timestamp'] as int,
+        sequentialId: 'agg_${tradeMap['market']}_${tradeMap['timestamp']}',
+      );
+    }).toList();
+    
+    // 거래대금 순 정렬
+    trades.sort((a, b) => b.total.compareTo(a.total));
+    
+    return trades.take(50).toList();
+  }
+
+  /// 실시간 통계에서 Volume 엔티티들 생성
+  List<Volume> _generateVolumeEntities() {
+    final volumes = _marketStats.values
+      .where((stats) => stats.isActive && stats.totalVolume > 0)
+      .map((stats) => stats.toVolumeEntity())
+      .toList();
+    
+    // 볼륨 순 정렬
+    volumes.sort((a, b) => b.totalVolume.compareTo(a.totalVolume));
+    
+    return volumes.take(50).toList();
+  }
+
+  /// 실시간 통계에서 Surge 엔티티들 생성
+  List<Surge> _generateSurgeEntities() {
+    final surges = _marketStats.values
+      .where((stats) => stats.isActive && stats.changePercent.abs() > 0.1)
+      .map((stats) => stats.toSurgeEntity())
+      .toList();
+    
+    // 변화율 절댓값 순 정렬 (급등이 먼저)
+    surges.sort((a, b) {
+      if (a.changePercent > 0 && b.changePercent < 0) return -1;
+      if (a.changePercent < 0 && b.changePercent > 0) return 1;
+      return b.changePercent.abs().compareTo(a.changePercent.abs());
+    });
+    
+    return surges;
+  }
+
+  /// 실시간 통계에서 섹터 Volume 엔티티들 생성
+  List<Volume> _generateSectorVolumeEntities() {
+    final sectorVolumes = _sectorStats.values
+      .where((stats) => stats.totalVolume > 0)
+      .map((stats) => stats.toVolumeEntity())
+      .toList();
+    
+    // 볼륨 순 정렬
+    sectorVolumes.sort((a, b) => b.totalVolume.compareTo(a.totalVolume));
+    
+    return sectorVolumes.take(10).toList();
+  }
+
+  /// 이전 스냅샷 대비 델타 계산
+  Map<String, Map<String, double>> _calculateDeltas() {
+    if (_lastSnapshot == null) {
+      return {'volume': {}, 'sector': {}, 'price': {}};
+    }
+    
+    // 볼륨 변화율 계산
+    final volChangePct = <String, double>{};
+    for (final stats in _marketStats.values) {
+      final prevVolume = _lastSnapshot!.topVolumes
+        .where((v) => v.market == stats.market)
+        .firstOrNull?.totalVolume ?? 0.0;
+      
+      if (prevVolume > 0) {
+        volChangePct[stats.market] = 
+          ((stats.totalVolume - prevVolume) / prevVolume) * 100;
+      }
+    }
+    
+    // 섹터 점유율 변화 계산
+    final sectorShareDelta = <String, double>{};
+    final currentTotalVolume = _sectorStats.values
+      .fold<double>(0, (sum, stats) => sum + stats.totalVolume);
+    
+    if (currentTotalVolume > 0) {
+      for (final stats in _sectorStats.values) {
+        final currentShare = (stats.totalVolume / currentTotalVolume) * 100;
+        
+        final prevTotalVolume = _lastSnapshot!.sectorVolumes
+          .fold<double>(0, (sum, v) => sum + v.totalVolume);
+        final prevSectorVolume = _lastSnapshot!.sectorVolumes
+          .where((v) => v.market == 'SECTOR-${stats.sector}')
+          .firstOrNull?.totalVolume ?? 0.0;
+        
+        if (prevTotalVolume > 0) {
+          final prevShare = (prevSectorVolume / prevTotalVolume) * 100;
+          sectorShareDelta['SECTOR-${stats.sector}'] = currentShare - prevShare;
+        }
+      }
+    }
+    
+    // 가격 변화율
+    final priceDelta = <String, double>{};
+    for (final stats in _marketStats.values) {
+      priceDelta[stats.market] = stats.changePercent;
+    }
+    
+    return {
+      'volume': volChangePct,
+      'sector': sectorShareDelta,
+      'price': priceDelta,
+    };
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════
+  // 💾 스냅샷 캐싱 및 관리
+  // ══════════════════════════════════════════════════════════════════════════════
+
+  /// 스냅샷 캐싱
+  void _cacheSnapshot(MarketSnapshot snapshot) {
+    _lastSnapshot = snapshot;
+    
+    // 첫 번째 스냅샷을 베이스라인으로 설정
+    _baselineSnapshot ??= snapshot;
+    
+    // 스냅샷 히스토리 관리 (최대 3개)
+    _snapshotHistory.addLast(snapshot);
+    while (_snapshotHistory.length > BottomLineConstants.maxCachedSnapshots) {
+      _snapshotHistory.removeFirst();
+    }
+  }
+
+  /// 마지막 스냅샷 반환
+  MarketSnapshot? getLastSnapshot() => _lastSnapshot;
+
+  /// 베이스라인 스냅샷 반환
+  MarketSnapshot? getBaselineSnapshot() => _baselineSnapshot;
+
+  /// 스냅샷 히스토리 반환
+  List<MarketSnapshot> getSnapshotHistory() => _snapshotHistory.toList();
+
+  /// 베이스라인 스냅샷 갱신 (1시간마다)
+  void refreshBaseline() {
+    if (_lastSnapshot != null) {
+      _baselineSnapshot = _lastSnapshot;
+      
+      if (BottomLineConstants.enableLogging) {
+        log.d('📍 Baseline snapshot refreshed');
+      }
+    }
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════
+  // 🗑️ 메모리 관리 및 정리
+  // ══════════════════════════════════════════════════════════════════════════════
+
+  /// 주기적 정리 수행
+  void _performPeriodicCleanup() {
+    final now = DateTime.now();
+    
+    // 5분마다 정리
+    if (_lastCleanupTime == null || 
+        now.difference(_lastCleanupTime!).inMinutes >= BottomLineConstants.cleanupIntervalMinutes) {
+      _performCleanup();
+      _lastCleanupTime = now;
+    }
+    
+    // 1시간마다 베이스라인 갱신
+    if (_baselineSnapshot != null &&
+        now.difference(_baselineSnapshot!.timestamp).inHours >= BottomLineConstants.baselineRefreshHours) {
+      refreshBaseline();
+    }
+  }
+
+  /// 메모리 정리 실행
+  void _performCleanup() {
+    final beforeSize = getMemoryUsageEstimate();
+    int removedMarkets = 0;
+    int removedSectors = 0;
+    
+    // 비활성 시장 제거
+    final inactiveMarkets = _marketStats.entries
+      .where((entry) => !entry.value.isActive)
+      .map((entry) => entry.key)
+      .toList();
+    
+    for (final market in inactiveMarkets) {
+      _marketStats.remove(market);
+      removedMarkets++;
+    }
+    
+    // 빈 섹터 제거
+    final emptySectors = _sectorStats.entries
+      .where((entry) => entry.value.totalVolume == 0)
+      .map((entry) => entry.key)
+      .toList();
+    
+    for (final sector in emptySectors) {
+      _sectorStats.remove(sector);
+      removedSectors++;
+    }
+    
+    // 순환 버퍼 정리 (자동)
+    _marketActivity.removeExpired();
+    
+    final afterSize = getMemoryUsageEstimate();
+    
+    if (BottomLineConstants.enableLogging && (removedMarkets > 0 || removedSectors > 0)) {
+      log.d('🗑️ Cleanup completed: -${removedMarkets}markets, -${removedSectors}sectors, ${beforeSize}B→${afterSize}B');
+    }
+  }
+
+  /// 메모리 사용량 추정
+  int getMemoryUsageEstimate() {
+    int total = 0;
+    
+    // 시장별 통계
+    total += _marketStats.length * 300; // ~300바이트 per market
+    
+    // 섹터별 통계
+    total += _sectorStats.length * 200; // ~200바이트 per sector
+    
+    // 순환 버퍼들
+    total += _recentTrades.estimatedMemoryBytes;
+    total += _recentLargeTrades.estimatedMemoryBytes;
+    total += _marketActivity.estimatedMemoryBytes;
+    
+    // 스냅샷 히스토리
+    total += _snapshotHistory.length * 10000; // ~10KB per snapshot
+    
+    return total;
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════
+  // 📊 통계 및 모니터링
+  // ══════════════════════════════════════════════════════════════════════════════
+
+  /// 전체 애그리게이터 통계
+  Map<String, dynamic> getStats() {
+    final now = DateTime.now();
+    final uptimeMinutes = now.difference(_startTime).inMinutes;
+    
+    final avgProcessingTime = _totalTradesProcessed > 0
+      ? _totalProcessingTime.inMicroseconds / _totalTradesProcessed
+      : 0.0;
+    
+    final tradesPerMinute = uptimeMinutes > 0
+      ? _totalTradesProcessed / uptimeMinutes
+      : 0.0;
+    
+    return {
+      'uptime_minutes': uptimeMinutes,
+      'total_trades_processed': _totalTradesProcessed,
+      'total_snapshots_generated': _totalSnapshotsGenerated,
+      'trades_per_minute': tradesPerMinute.toStringAsFixed(1),
+      'avg_processing_time_us': avgProcessingTime.toStringAsFixed(1),
+      'markets_tracked': _marketStats.length,
+      'sectors_tracked': _sectorStats.length,
+      'active_markets': _marketStats.values.where((s) => s.isActive).length,
+      'memory_usage_bytes': getMemoryUsageEstimate(),
+      'last_snapshot': _lastSnapshotTime?.toIso8601String() ?? 'Never',
+      'last_cleanup': _lastCleanupTime?.toIso8601String() ?? 'Never',
+      'snapshot_counter': _snapshotCounter,
+      'cache_sizes': {
+        'recent_trades': _recentTrades.length,
+        'large_trades': _recentLargeTrades.length,
+        'market_activity': _marketActivity.length,
+        'snapshot_history': _snapshotHistory.length,
+      },
+    };
+  }
+
+  /// 시장별 상세 통계
+  Map<String, dynamic> getMarketStats() {
+    final marketStats = <String, Map<String, dynamic>>{};
+    
+    for (final entry in _marketStats.entries) {
+      final stats = entry.value;
+      marketStats[entry.key] = {
+        'total_volume': stats.totalVolume,
+        'total_amount': (stats.totalAmount / 100000000).toStringAsFixed(1), // 억원
+        'trade_count': stats.tradeCount,
+        'change_percent': stats.changePercent.toStringAsFixed(2),
+        'volatility_percent': stats.volatilityPercent.toStringAsFixed(2),
+        'large_trade_count': stats.largeTradeCount,
+        'large_trade_ratio': (stats.largeTradeRatio * 100).toStringAsFixed(1),
+        'trades_per_minute': stats.tradesPerMinute.toStringAsFixed(1),
+        'is_active': stats.isActive,
+        'current_price': stats.currentPrice,
+        'price_range': '${stats.lowPrice} ~ ${stats.highPrice}',
+        'first_trade': stats.firstTradeTime.toIso8601String(),
+        'last_trade': stats.lastTradeTime.toIso8601String(),
+      };
+    }
+    
+    return marketStats;
+  }
+
+  /// 섹터별 상세 통계
+  Map<String, dynamic> getSectorStats() {
+    final sectorStats = <String, Map<String, dynamic>>{};
+    
+    for (final entry in _sectorStats.entries) {
+      final stats = entry.value;
+      sectorStats[entry.key] = {
+        'total_volume': stats.totalVolume,
+        'total_amount': (stats.totalAmount / 100000000).toStringAsFixed(1), // 억원
+        'market_count': stats.marketCount,
+        'active_markets': stats.activeMarkets.toList(),
+        'first_update': stats.firstUpdateTime.toIso8601String(),
+        'last_update': stats.lastUpdateTime.toIso8601String(),
+      };
+    }
+    
+    return sectorStats;
+  }
+
+  /// 성능 메트릭
+  Map<String, dynamic> getPerformanceMetrics() {
+    final now = DateTime.now();
+    final uptimeSeconds = now.difference(_startTime).inSeconds;
+    
+    return {
+      'uptime_seconds': uptimeSeconds,
+      'throughput': {
+        'trades_per_second': uptimeSeconds > 0 ? _totalTradesProcessed / uptimeSeconds : 0.0,
+        'snapshots_per_hour': uptimeSeconds > 0 ? (_totalSnapshotsGenerated * 3600) / uptimeSeconds : 0.0,
+      },
+      'efficiency': {
+        'avg_trade_processing_us': _totalTradesProcessed > 0 
+          ? _totalProcessingTime.inMicroseconds / _totalTradesProcessed 
+          : 0.0,
+        'memory_per_market_bytes': _marketStats.isNotEmpty 
+          ? getMemoryUsageEstimate() / _marketStats.length 
+          : 0,
+        'active_market_ratio': _marketStats.isNotEmpty
+          ? _marketStats.values.where((s) => s.isActive).length / _marketStats.length
+          : 0.0,
+      },
+      'quality': {
+        'data_completeness': _calculateDataCompleteness(),
+        'market_coverage': _calculateMarketCoverage(),
+        'temporal_consistency': _calculateTemporalConsistency(),
+      },
+    };
+  }
+
+  /// 데이터 완전성 계산
+  double _calculateDataCompleteness() {
+    if (_marketStats.isEmpty) return 0.0;
+    
+    int completeMarkets = 0;
+    for (final stats in _marketStats.values) {
+      // 완전한 데이터 기준: 거래 5회 이상 + 가격 변화 있음
+      if (stats.tradeCount >= 5 && stats.currentPrice != stats.basePrice) {
+        completeMarkets++;
+      }
+    }
+    
+    return completeMarkets / _marketStats.length;
+  }
+
+  /// 시장 커버리지 계산
+  double _calculateMarketCoverage() {
+    // 활성 시장의 비율
+    if (_marketStats.isEmpty) return 0.0;
+    
+    final activeMarkets = _marketStats.values.where((s) => s.isActive).length;
+    return activeMarkets / _marketStats.length;
+  }
+
+  /// 시간적 일관성 계산
+  double _calculateTemporalConsistency() {
+    // 최근 데이터의 신선도
+    if (_marketStats.isEmpty) return 0.0;
+    
+    final now = DateTime.now();
+    int freshMarkets = 0;
+    
+    for (final stats in _marketStats.values) {
+      final age = now.difference(stats.lastTradeTime).inMinutes;
+      if (age <= 5) { // 5분 이내 데이터
+        freshMarkets++;
+      }
+    }
+    
+    return freshMarkets / _marketStats.length;
+  }
+
+  /// 상위 시장 순위 (다양한 기준)
+  Map<String, List<String>> getTopMarkets() {
+    final allStats = _marketStats.values.where((s) => s.isActive).toList();
+    
+    return {
+      'by_volume': (allStats.toList()
+        ..sort((a, b) => b.totalVolume.compareTo(a.totalVolume)))
+        .take(10)
+        .map((s) => s.market)
+        .toList(),
+      
+      'by_amount': (allStats.toList()
+        ..sort((a, b) => b.totalAmount.compareTo(a.totalAmount)))
+        .take(10)
+        .map((s) => s.market)
+        .toList(),
+      
+      'by_change': (allStats.toList()
+        ..sort((a, b) => b.changePercent.abs().compareTo(a.changePercent.abs())))
+        .take(10)
+        .map((s) => s.market)
+        .toList(),
+      
+      'by_trades': (allStats.toList()
+        ..sort((a, b) => b.tradeCount.compareTo(a.tradeCount)))
+        .take(10)
+        .map((s) => s.market)
+        .toList(),
+      
+      'by_large_trades': (allStats.toList()
+        ..sort((a, b) => b.largeTradeCount.compareTo(a.largeTradeCount)))
+        .take(10)
+        .map((s) => s.market)
+        .toList(),
+    };
+  }
+
+  // ══════════════════════════════════════════════════════════════════════════════
+  // 🔧 유틸리티 메서드들
+  // ══════════════════════════════════════════════════════════════════════════════
+
+  /// 특정 시장의 상세 정보 조회
+  RealtimeMarketStats? getMarketDetails(String market) {
+    return _marketStats[market];
+  }
+
+  /// 특정 섹터의 상세 정보 조회
+  RealtimeSectorStats? getSectorDetails(String sector) {
+    return _sectorStats[sector];
+  }
+
+  /// 최근 고액거래 목록 조회
+  List<String> getRecentLargeTrades({int limit = 20}) {
+    return _recentLargeTrades.items.reversed.take(limit).toList();
+  }
+
+  /// 최근 활성 시장 목록 조회
+  List<String> getRecentActiveMarkets({int limit = 20}) {
+    return _marketActivity.validData.reversed.toSet().take(limit).toList();
+  }
+
+  /// 시장 활성도 히트맵 데이터
+  Map<String, int> getMarketActivityHeatmap() {
+    final heatmap = <String, int>{};
+    
+    for (final market in _marketActivity.validData) {
+      heatmap[market] = (heatmap[market] ?? 0) + 1;
+    }
+    
+    return heatmap;
+  }
+
+  /// 데이터 상태 검증
+  Map<String, dynamic> validateDataIntegrity() {
+    final issues = <String>[];
+    final warnings = <String>[];
+    
+    // 기본 데이터 존재 여부
+    if (_marketStats.isEmpty) {
+      issues.add('No market data available');
+    }
+    
+    // 시간 일관성 체크
+    final now = DateTime.now();
+    for (final entry in _marketStats.entries) {
+      final stats = entry.value;
+      
+      // 미래 시간 체크
+      if (stats.lastTradeTime.isAfter(now)) {
+        issues.add('Future timestamp detected in ${entry.key}');
+      }
+      
+      // 첫 거래보다 마지막 거래가 이전인 경우
+      if (stats.lastTradeTime.isBefore(stats.firstTradeTime)) {
+        issues.add('Invalid time sequence in ${entry.key}');
+      }
+      
+      // 너무 오래된 데이터
+      if (now.difference(stats.lastTradeTime).inHours > 1) {
+        warnings.add('Stale data in ${entry.key} (${now.difference(stats.lastTradeTime).inHours}h old)');
+      }
+      
+      // 비정상적인 가격 데이터
+      if (stats.currentPrice <= 0 || stats.basePrice <= 0) {
+        issues.add('Invalid price data in ${entry.key}');
+      }
+      
+      // 비정상적인 볼륨 데이터
+      if (stats.totalVolume < 0) {
+        issues.add('Negative volume in ${entry.key}');
+      }
+    }
+    
+    return {
+      'is_valid': issues.isEmpty,
+      'issues': issues,
+      'warnings': warnings,
+      'markets_checked': _marketStats.length,
+      'sectors_checked': _sectorStats.length,
+      'check_timestamp': now.toIso8601String(),
+    };
+  }
+
+  /// 통계 리셋
+  void resetStats() {
+    _totalTradesProcessed = 0;
+    _totalSnapshotsGenerated = 0;
+    _totalProcessingTime = Duration.zero;
+    _snapshotCounter = 0;
+    
+    if (BottomLineConstants.enableLogging) {
+      log.d('📊 Aggregator stats reset');
+    }
+  }
+
+  /// 전체 데이터 리셋 (시작 시점 재설정)
+  void resetAllData() {
+    _marketStats.clear();
+    _sectorStats.clear();
+    _recentTrades.clear();
+    _recentLargeTrades.clear();
+    _marketActivity.clear();
+    _snapshotHistory.clear();
+    
+    _lastSnapshot = null;
+    _baselineSnapshot = null;
+    _lastSnapshotTime = null;
+    _lastCleanupTime = null;
+    
+    resetStats();
+    
+    if (BottomLineConstants.enableLogging) {
+      log.d('🔄 Aggregator completely reset');
+    }
+  }
+
+  /// 디버그 정보 생성
+  Map<String, dynamic> generateDebugReport() {
+    return {
+      'aggregator_info': {
+        'start_time': _startTime.toIso8601String(),
+        'uptime': DateTime.now().difference(_startTime).toString(),
+        'version': '1.0.0',
+      },
+      'data_summary': getStats(),
+      'performance': getPerformanceMetrics(),
+      'top_markets': getTopMarkets(),
+      'integrity_check': validateDataIntegrity(),
+      'memory_breakdown': {
+        'market_stats': '${_marketStats.length} × 300B = ${_marketStats.length * 300}B',
+        'sector_stats': '${_sectorStats.length} × 200B = ${_sectorStats.length * 200}B',
+        'recent_trades': '${_recentTrades.estimatedMemoryBytes}B',
+        'large_trades': '${_recentLargeTrades.estimatedMemoryBytes}B',
+        'market_activity': '${_marketActivity.estimatedMemoryBytes}B',
+        'snapshots': '${_snapshotHistory.length} × 10KB = ${_snapshotHistory.length * 10000}B',
+        'total_estimated': '${getMemoryUsageEstimate()}B',
+      },
+      'buffer_states': {
+        'recent_trades': _recentTrades.stats,
+        'large_trades': _recentLargeTrades.stats,
+        'market_activity': _marketActivity.stats,
+      },
+    };
+  }
+
+  /// 리소스 정리
+  void dispose() {
+    resetAllData();
+    
+    if (BottomLineConstants.enableLogging) {
+      log.d('🛑 BottomLine Aggregator disposed');
+    }
+  }
+}\n\n// ====== lib/domain/entities/bottom_line.freezed.dart ======\n
+// coverage:ignore-file
+// GENERATED CODE - DO NOT MODIFY BY HAND
+// ignore_for_file: type=lint
+// ignore_for_file: unused_element, deprecated_member_use, deprecated_member_use_from_same_package, use_function_type_syntax_for_parameters, unnecessary_const, avoid_init_to_null, invalid_override_different_default_values_named, prefer_expression_function_bodies, annotate_overrides, invalid_annotation_target, unnecessary_question_mark
+
+part of 'bottom_line.dart';
+
+// **************************************************************************
+// FreezedGenerator
+// **************************************************************************
+
+T _$identity<T>(T value) => value;
+
+final _privateConstructorUsedError = UnsupportedError(
+    'It seems like you constructed your class using `MyClass._()`. This constructor is only meant to be used by freezed and you are not supposed to need it nor use it.\nPlease check the documentation here for more information: https://github.com/rrousselGit/freezed#adding-getters-and-methods-to-our-models');
+
+/// @nodoc
+mixin _$MarketSnapshot {
+  DateTime get timestamp => throw _privateConstructorUsedError;
+  String get timeFrame => throw _privateConstructorUsedError;
+  List<Trade> get topTrades =>
+      throw _privateConstructorUsedError; // ≥20M, 최근 50건
+  List<Volume> get topVolumes =>
+      throw _privateConstructorUsedError; // 활성 마켓 상위 50개
+  List<Surge> get surges => throw _privateConstructorUsedError; // 변화 있는 코인만
+  List<Volume> get sectorVolumes =>
+      throw _privateConstructorUsedError; // 주요 섹터 10개
+  Map<String, double> get volChangePct =>
+      throw _privateConstructorUsedError; // 볼륨 변화율
+  Map<String, double> get sectorShareDelta =>
+      throw _privateConstructorUsedError; // 섹터 점유율 변화 (수정됨)
+  Map<String, double> get priceDelta => throw _privateConstructorUsedError;
+
+  /// Create a copy of MarketSnapshot
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  $MarketSnapshotCopyWith<MarketSnapshot> get copyWith =>
+      throw _privateConstructorUsedError;
+}
+
+/// @nodoc
+abstract class $MarketSnapshotCopyWith<$Res> {
+  factory $MarketSnapshotCopyWith(
+          MarketSnapshot value, $Res Function(MarketSnapshot) then) =
+      _$MarketSnapshotCopyWithImpl<$Res, MarketSnapshot>;
+  @useResult
+  $Res call(
+      {DateTime timestamp,
+      String timeFrame,
+      List<Trade> topTrades,
+      List<Volume> topVolumes,
+      List<Surge> surges,
+      List<Volume> sectorVolumes,
+      Map<String, double> volChangePct,
+      Map<String, double> sectorShareDelta,
+      Map<String, double> priceDelta});
+}
+
+/// @nodoc
+class _$MarketSnapshotCopyWithImpl<$Res, $Val extends MarketSnapshot>
+    implements $MarketSnapshotCopyWith<$Res> {
+  _$MarketSnapshotCopyWithImpl(this._value, this._then);
+
+  // ignore: unused_field
+  final $Val _value;
+  // ignore: unused_field
+  final $Res Function($Val) _then;
+
+  /// Create a copy of MarketSnapshot
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  @override
+  $Res call({
+    Object? timestamp = null,
+    Object? timeFrame = null,
+    Object? topTrades = null,
+    Object? topVolumes = null,
+    Object? surges = null,
+    Object? sectorVolumes = null,
+    Object? volChangePct = null,
+    Object? sectorShareDelta = null,
+    Object? priceDelta = null,
+  }) {
+    return _then(_value.copyWith(
+      timestamp: null == timestamp
+          ? _value.timestamp
+          : timestamp // ignore: cast_nullable_to_non_nullable
+              as DateTime,
+      timeFrame: null == timeFrame
+          ? _value.timeFrame
+          : timeFrame // ignore: cast_nullable_to_non_nullable
+              as String,
+      topTrades: null == topTrades
+          ? _value.topTrades
+          : topTrades // ignore: cast_nullable_to_non_nullable
+              as List<Trade>,
+      topVolumes: null == topVolumes
+          ? _value.topVolumes
+          : topVolumes // ignore: cast_nullable_to_non_nullable
+              as List<Volume>,
+      surges: null == surges
+          ? _value.surges
+          : surges // ignore: cast_nullable_to_non_nullable
+              as List<Surge>,
+      sectorVolumes: null == sectorVolumes
+          ? _value.sectorVolumes
+          : sectorVolumes // ignore: cast_nullable_to_non_nullable
+              as List<Volume>,
+      volChangePct: null == volChangePct
+          ? _value.volChangePct
+          : volChangePct // ignore: cast_nullable_to_non_nullable
+              as Map<String, double>,
+      sectorShareDelta: null == sectorShareDelta
+          ? _value.sectorShareDelta
+          : sectorShareDelta // ignore: cast_nullable_to_non_nullable
+              as Map<String, double>,
+      priceDelta: null == priceDelta
+          ? _value.priceDelta
+          : priceDelta // ignore: cast_nullable_to_non_nullable
+              as Map<String, double>,
+    ) as $Val);
+  }
+}
+
+/// @nodoc
+abstract class _$$MarketSnapshotImplCopyWith<$Res>
+    implements $MarketSnapshotCopyWith<$Res> {
+  factory _$$MarketSnapshotImplCopyWith(_$MarketSnapshotImpl value,
+          $Res Function(_$MarketSnapshotImpl) then) =
+      __$$MarketSnapshotImplCopyWithImpl<$Res>;
+  @override
+  @useResult
+  $Res call(
+      {DateTime timestamp,
+      String timeFrame,
+      List<Trade> topTrades,
+      List<Volume> topVolumes,
+      List<Surge> surges,
+      List<Volume> sectorVolumes,
+      Map<String, double> volChangePct,
+      Map<String, double> sectorShareDelta,
+      Map<String, double> priceDelta});
+}
+
+/// @nodoc
+class __$$MarketSnapshotImplCopyWithImpl<$Res>
+    extends _$MarketSnapshotCopyWithImpl<$Res, _$MarketSnapshotImpl>
+    implements _$$MarketSnapshotImplCopyWith<$Res> {
+  __$$MarketSnapshotImplCopyWithImpl(
+      _$MarketSnapshotImpl _value, $Res Function(_$MarketSnapshotImpl) _then)
+      : super(_value, _then);
+
+  /// Create a copy of MarketSnapshot
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  @override
+  $Res call({
+    Object? timestamp = null,
+    Object? timeFrame = null,
+    Object? topTrades = null,
+    Object? topVolumes = null,
+    Object? surges = null,
+    Object? sectorVolumes = null,
+    Object? volChangePct = null,
+    Object? sectorShareDelta = null,
+    Object? priceDelta = null,
+  }) {
+    return _then(_$MarketSnapshotImpl(
+      timestamp: null == timestamp
+          ? _value.timestamp
+          : timestamp // ignore: cast_nullable_to_non_nullable
+              as DateTime,
+      timeFrame: null == timeFrame
+          ? _value.timeFrame
+          : timeFrame // ignore: cast_nullable_to_non_nullable
+              as String,
+      topTrades: null == topTrades
+          ? _value._topTrades
+          : topTrades // ignore: cast_nullable_to_non_nullable
+              as List<Trade>,
+      topVolumes: null == topVolumes
+          ? _value._topVolumes
+          : topVolumes // ignore: cast_nullable_to_non_nullable
+              as List<Volume>,
+      surges: null == surges
+          ? _value._surges
+          : surges // ignore: cast_nullable_to_non_nullable
+              as List<Surge>,
+      sectorVolumes: null == sectorVolumes
+          ? _value._sectorVolumes
+          : sectorVolumes // ignore: cast_nullable_to_non_nullable
+              as List<Volume>,
+      volChangePct: null == volChangePct
+          ? _value._volChangePct
+          : volChangePct // ignore: cast_nullable_to_non_nullable
+              as Map<String, double>,
+      sectorShareDelta: null == sectorShareDelta
+          ? _value._sectorShareDelta
+          : sectorShareDelta // ignore: cast_nullable_to_non_nullable
+              as Map<String, double>,
+      priceDelta: null == priceDelta
+          ? _value._priceDelta
+          : priceDelta // ignore: cast_nullable_to_non_nullable
+              as Map<String, double>,
+    ));
+  }
+}
+
+/// @nodoc
+
+class _$MarketSnapshotImpl extends _MarketSnapshot {
+  const _$MarketSnapshotImpl(
+      {required this.timestamp,
+      required this.timeFrame,
+      required final List<Trade> topTrades,
+      required final List<Volume> topVolumes,
+      required final List<Surge> surges,
+      required final List<Volume> sectorVolumes,
+      required final Map<String, double> volChangePct,
+      required final Map<String, double> sectorShareDelta,
+      required final Map<String, double> priceDelta})
+      : _topTrades = topTrades,
+        _topVolumes = topVolumes,
+        _surges = surges,
+        _sectorVolumes = sectorVolumes,
+        _volChangePct = volChangePct,
+        _sectorShareDelta = sectorShareDelta,
+        _priceDelta = priceDelta,
+        super._();
+
+  @override
+  final DateTime timestamp;
+  @override
+  final String timeFrame;
+  final List<Trade> _topTrades;
+  @override
+  List<Trade> get topTrades {
+    if (_topTrades is EqualUnmodifiableListView) return _topTrades;
+    // ignore: implicit_dynamic_type
+    return EqualUnmodifiableListView(_topTrades);
+  }
+
+// ≥20M, 최근 50건
+  final List<Volume> _topVolumes;
+// ≥20M, 최근 50건
+  @override
+  List<Volume> get topVolumes {
+    if (_topVolumes is EqualUnmodifiableListView) return _topVolumes;
+    // ignore: implicit_dynamic_type
+    return EqualUnmodifiableListView(_topVolumes);
+  }
+
+// 활성 마켓 상위 50개
+  final List<Surge> _surges;
+// 활성 마켓 상위 50개
+  @override
+  List<Surge> get surges {
+    if (_surges is EqualUnmodifiableListView) return _surges;
+    // ignore: implicit_dynamic_type
+    return EqualUnmodifiableListView(_surges);
+  }
+
+// 변화 있는 코인만
+  final List<Volume> _sectorVolumes;
+// 변화 있는 코인만
+  @override
+  List<Volume> get sectorVolumes {
+    if (_sectorVolumes is EqualUnmodifiableListView) return _sectorVolumes;
+    // ignore: implicit_dynamic_type
+    return EqualUnmodifiableListView(_sectorVolumes);
+  }
+
+// 주요 섹터 10개
+  final Map<String, double> _volChangePct;
+// 주요 섹터 10개
+  @override
+  Map<String, double> get volChangePct {
+    if (_volChangePct is EqualUnmodifiableMapView) return _volChangePct;
+    // ignore: implicit_dynamic_type
+    return EqualUnmodifiableMapView(_volChangePct);
+  }
+
+// 볼륨 변화율
+  final Map<String, double> _sectorShareDelta;
+// 볼륨 변화율
+  @override
+  Map<String, double> get sectorShareDelta {
+    if (_sectorShareDelta is EqualUnmodifiableMapView) return _sectorShareDelta;
+    // ignore: implicit_dynamic_type
+    return EqualUnmodifiableMapView(_sectorShareDelta);
+  }
+
+// 섹터 점유율 변화 (수정됨)
+  final Map<String, double> _priceDelta;
+// 섹터 점유율 변화 (수정됨)
+  @override
+  Map<String, double> get priceDelta {
+    if (_priceDelta is EqualUnmodifiableMapView) return _priceDelta;
+    // ignore: implicit_dynamic_type
+    return EqualUnmodifiableMapView(_priceDelta);
+  }
+
+  @override
+  String toString() {
+    return 'MarketSnapshot(timestamp: $timestamp, timeFrame: $timeFrame, topTrades: $topTrades, topVolumes: $topVolumes, surges: $surges, sectorVolumes: $sectorVolumes, volChangePct: $volChangePct, sectorShareDelta: $sectorShareDelta, priceDelta: $priceDelta)';
+  }
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is _$MarketSnapshotImpl &&
+            (identical(other.timestamp, timestamp) ||
+                other.timestamp == timestamp) &&
+            (identical(other.timeFrame, timeFrame) ||
+                other.timeFrame == timeFrame) &&
+            const DeepCollectionEquality()
+                .equals(other._topTrades, _topTrades) &&
+            const DeepCollectionEquality()
+                .equals(other._topVolumes, _topVolumes) &&
+            const DeepCollectionEquality().equals(other._surges, _surges) &&
+            const DeepCollectionEquality()
+                .equals(other._sectorVolumes, _sectorVolumes) &&
+            const DeepCollectionEquality()
+                .equals(other._volChangePct, _volChangePct) &&
+            const DeepCollectionEquality()
+                .equals(other._sectorShareDelta, _sectorShareDelta) &&
+            const DeepCollectionEquality()
+                .equals(other._priceDelta, _priceDelta));
+  }
+
+  @override
+  int get hashCode => Object.hash(
+      runtimeType,
+      timestamp,
+      timeFrame,
+      const DeepCollectionEquality().hash(_topTrades),
+      const DeepCollectionEquality().hash(_topVolumes),
+      const DeepCollectionEquality().hash(_surges),
+      const DeepCollectionEquality().hash(_sectorVolumes),
+      const DeepCollectionEquality().hash(_volChangePct),
+      const DeepCollectionEquality().hash(_sectorShareDelta),
+      const DeepCollectionEquality().hash(_priceDelta));
+
+  /// Create a copy of MarketSnapshot
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @override
+  @pragma('vm:prefer-inline')
+  _$$MarketSnapshotImplCopyWith<_$MarketSnapshotImpl> get copyWith =>
+      __$$MarketSnapshotImplCopyWithImpl<_$MarketSnapshotImpl>(
+          this, _$identity);
+}
+
+abstract class _MarketSnapshot extends MarketSnapshot {
+  const factory _MarketSnapshot(
+      {required final DateTime timestamp,
+      required final String timeFrame,
+      required final List<Trade> topTrades,
+      required final List<Volume> topVolumes,
+      required final List<Surge> surges,
+      required final List<Volume> sectorVolumes,
+      required final Map<String, double> volChangePct,
+      required final Map<String, double> sectorShareDelta,
+      required final Map<String, double> priceDelta}) = _$MarketSnapshotImpl;
+  const _MarketSnapshot._() : super._();
+
+  @override
+  DateTime get timestamp;
+  @override
+  String get timeFrame;
+  @override
+  List<Trade> get topTrades; // ≥20M, 최근 50건
+  @override
+  List<Volume> get topVolumes; // 활성 마켓 상위 50개
+  @override
+  List<Surge> get surges; // 변화 있는 코인만
+  @override
+  List<Volume> get sectorVolumes; // 주요 섹터 10개
+  @override
+  Map<String, double> get volChangePct; // 볼륨 변화율
+  @override
+  Map<String, double> get sectorShareDelta; // 섹터 점유율 변화 (수정됨)
+  @override
+  Map<String, double> get priceDelta;
+
+  /// Create a copy of MarketSnapshot
+  /// with the given fields replaced by the non-null parameter values.
+  @override
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  _$$MarketSnapshotImplCopyWith<_$MarketSnapshotImpl> get copyWith =>
+      throw _privateConstructorUsedError;
+}
+
+/// @nodoc
+mixin _$CandidateInsight {
+  String get id => throw _privateConstructorUsedError;
+  String get template => throw _privateConstructorUsedError;
+  double get score => throw _privateConstructorUsedError;
+  double get weight => throw _privateConstructorUsedError;
+  Map<String, dynamic> get templateVars => throw _privateConstructorUsedError;
+  DateTime get timestamp => throw _privateConstructorUsedError;
+  bool get isUrgent => throw _privateConstructorUsedError;
+
+  /// Create a copy of CandidateInsight
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  $CandidateInsightCopyWith<CandidateInsight> get copyWith =>
+      throw _privateConstructorUsedError;
+}
+
+/// @nodoc
+abstract class $CandidateInsightCopyWith<$Res> {
+  factory $CandidateInsightCopyWith(
+          CandidateInsight value, $Res Function(CandidateInsight) then) =
+      _$CandidateInsightCopyWithImpl<$Res, CandidateInsight>;
+  @useResult
+  $Res call(
+      {String id,
+      String template,
+      double score,
+      double weight,
+      Map<String, dynamic> templateVars,
+      DateTime timestamp,
+      bool isUrgent});
+}
+
+/// @nodoc
+class _$CandidateInsightCopyWithImpl<$Res, $Val extends CandidateInsight>
+    implements $CandidateInsightCopyWith<$Res> {
+  _$CandidateInsightCopyWithImpl(this._value, this._then);
+
+  // ignore: unused_field
+  final $Val _value;
+  // ignore: unused_field
+  final $Res Function($Val) _then;
+
+  /// Create a copy of CandidateInsight
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  @override
+  $Res call({
+    Object? id = null,
+    Object? template = null,
+    Object? score = null,
+    Object? weight = null,
+    Object? templateVars = null,
+    Object? timestamp = null,
+    Object? isUrgent = null,
+  }) {
+    return _then(_value.copyWith(
+      id: null == id
+          ? _value.id
+          : id // ignore: cast_nullable_to_non_nullable
+              as String,
+      template: null == template
+          ? _value.template
+          : template // ignore: cast_nullable_to_non_nullable
+              as String,
+      score: null == score
+          ? _value.score
+          : score // ignore: cast_nullable_to_non_nullable
+              as double,
+      weight: null == weight
+          ? _value.weight
+          : weight // ignore: cast_nullable_to_non_nullable
+              as double,
+      templateVars: null == templateVars
+          ? _value.templateVars
+          : templateVars // ignore: cast_nullable_to_non_nullable
+              as Map<String, dynamic>,
+      timestamp: null == timestamp
+          ? _value.timestamp
+          : timestamp // ignore: cast_nullable_to_non_nullable
+              as DateTime,
+      isUrgent: null == isUrgent
+          ? _value.isUrgent
+          : isUrgent // ignore: cast_nullable_to_non_nullable
+              as bool,
+    ) as $Val);
+  }
+}
+
+/// @nodoc
+abstract class _$$CandidateInsightImplCopyWith<$Res>
+    implements $CandidateInsightCopyWith<$Res> {
+  factory _$$CandidateInsightImplCopyWith(_$CandidateInsightImpl value,
+          $Res Function(_$CandidateInsightImpl) then) =
+      __$$CandidateInsightImplCopyWithImpl<$Res>;
+  @override
+  @useResult
+  $Res call(
+      {String id,
+      String template,
+      double score,
+      double weight,
+      Map<String, dynamic> templateVars,
+      DateTime timestamp,
+      bool isUrgent});
+}
+
+/// @nodoc
+class __$$CandidateInsightImplCopyWithImpl<$Res>
+    extends _$CandidateInsightCopyWithImpl<$Res, _$CandidateInsightImpl>
+    implements _$$CandidateInsightImplCopyWith<$Res> {
+  __$$CandidateInsightImplCopyWithImpl(_$CandidateInsightImpl _value,
+      $Res Function(_$CandidateInsightImpl) _then)
+      : super(_value, _then);
+
+  /// Create a copy of CandidateInsight
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  @override
+  $Res call({
+    Object? id = null,
+    Object? template = null,
+    Object? score = null,
+    Object? weight = null,
+    Object? templateVars = null,
+    Object? timestamp = null,
+    Object? isUrgent = null,
+  }) {
+    return _then(_$CandidateInsightImpl(
+      id: null == id
+          ? _value.id
+          : id // ignore: cast_nullable_to_non_nullable
+              as String,
+      template: null == template
+          ? _value.template
+          : template // ignore: cast_nullable_to_non_nullable
+              as String,
+      score: null == score
+          ? _value.score
+          : score // ignore: cast_nullable_to_non_nullable
+              as double,
+      weight: null == weight
+          ? _value.weight
+          : weight // ignore: cast_nullable_to_non_nullable
+              as double,
+      templateVars: null == templateVars
+          ? _value._templateVars
+          : templateVars // ignore: cast_nullable_to_non_nullable
+              as Map<String, dynamic>,
+      timestamp: null == timestamp
+          ? _value.timestamp
+          : timestamp // ignore: cast_nullable_to_non_nullable
+              as DateTime,
+      isUrgent: null == isUrgent
+          ? _value.isUrgent
+          : isUrgent // ignore: cast_nullable_to_non_nullable
+              as bool,
+    ));
+  }
+}
+
+/// @nodoc
+
+class _$CandidateInsightImpl extends _CandidateInsight {
+  const _$CandidateInsightImpl(
+      {required this.id,
+      required this.template,
+      required this.score,
+      required this.weight,
+      required final Map<String, dynamic> templateVars,
+      required this.timestamp,
+      this.isUrgent = false})
+      : _templateVars = templateVars,
+        super._();
+
+  @override
+  final String id;
+  @override
+  final String template;
+  @override
+  final double score;
+  @override
+  final double weight;
+  final Map<String, dynamic> _templateVars;
+  @override
+  Map<String, dynamic> get templateVars {
+    if (_templateVars is EqualUnmodifiableMapView) return _templateVars;
+    // ignore: implicit_dynamic_type
+    return EqualUnmodifiableMapView(_templateVars);
+  }
+
+  @override
+  final DateTime timestamp;
+  @override
+  @JsonKey()
+  final bool isUrgent;
+
+  @override
+  String toString() {
+    return 'CandidateInsight(id: $id, template: $template, score: $score, weight: $weight, templateVars: $templateVars, timestamp: $timestamp, isUrgent: $isUrgent)';
+  }
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is _$CandidateInsightImpl &&
+            (identical(other.id, id) || other.id == id) &&
+            (identical(other.template, template) ||
+                other.template == template) &&
+            (identical(other.score, score) || other.score == score) &&
+            (identical(other.weight, weight) || other.weight == weight) &&
+            const DeepCollectionEquality()
+                .equals(other._templateVars, _templateVars) &&
+            (identical(other.timestamp, timestamp) ||
+                other.timestamp == timestamp) &&
+            (identical(other.isUrgent, isUrgent) ||
+                other.isUrgent == isUrgent));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, id, template, score, weight,
+      const DeepCollectionEquality().hash(_templateVars), timestamp, isUrgent);
+
+  /// Create a copy of CandidateInsight
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @override
+  @pragma('vm:prefer-inline')
+  _$$CandidateInsightImplCopyWith<_$CandidateInsightImpl> get copyWith =>
+      __$$CandidateInsightImplCopyWithImpl<_$CandidateInsightImpl>(
+          this, _$identity);
+}
+
+abstract class _CandidateInsight extends CandidateInsight {
+  const factory _CandidateInsight(
+      {required final String id,
+      required final String template,
+      required final double score,
+      required final double weight,
+      required final Map<String, dynamic> templateVars,
+      required final DateTime timestamp,
+      final bool isUrgent}) = _$CandidateInsightImpl;
+  const _CandidateInsight._() : super._();
+
+  @override
+  String get id;
+  @override
+  String get template;
+  @override
+  double get score;
+  @override
+  double get weight;
+  @override
+  Map<String, dynamic> get templateVars;
+  @override
+  DateTime get timestamp;
+  @override
+  bool get isUrgent;
+
+  /// Create a copy of CandidateInsight
+  /// with the given fields replaced by the non-null parameter values.
+  @override
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  _$$CandidateInsightImplCopyWith<_$CandidateInsightImpl> get copyWith =>
+      throw _privateConstructorUsedError;
+}
+
+/// @nodoc
+mixin _$BottomLineItem {
+  String get headline => throw _privateConstructorUsedError;
+  DateTime get timestamp => throw _privateConstructorUsedError;
+  double get priority => throw _privateConstructorUsedError;
+  String get sourceInsightId => throw _privateConstructorUsedError;
+  bool get isUrgent => throw _privateConstructorUsedError;
+  int get displayDurationSeconds => throw _privateConstructorUsedError;
+
+  /// Create a copy of BottomLineItem
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  $BottomLineItemCopyWith<BottomLineItem> get copyWith =>
+      throw _privateConstructorUsedError;
+}
+
+/// @nodoc
+abstract class $BottomLineItemCopyWith<$Res> {
+  factory $BottomLineItemCopyWith(
+          BottomLineItem value, $Res Function(BottomLineItem) then) =
+      _$BottomLineItemCopyWithImpl<$Res, BottomLineItem>;
+  @useResult
+  $Res call(
+      {String headline,
+      DateTime timestamp,
+      double priority,
+      String sourceInsightId,
+      bool isUrgent,
+      int displayDurationSeconds});
+}
+
+/// @nodoc
+class _$BottomLineItemCopyWithImpl<$Res, $Val extends BottomLineItem>
+    implements $BottomLineItemCopyWith<$Res> {
+  _$BottomLineItemCopyWithImpl(this._value, this._then);
+
+  // ignore: unused_field
+  final $Val _value;
+  // ignore: unused_field
+  final $Res Function($Val) _then;
+
+  /// Create a copy of BottomLineItem
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  @override
+  $Res call({
+    Object? headline = null,
+    Object? timestamp = null,
+    Object? priority = null,
+    Object? sourceInsightId = null,
+    Object? isUrgent = null,
+    Object? displayDurationSeconds = null,
+  }) {
+    return _then(_value.copyWith(
+      headline: null == headline
+          ? _value.headline
+          : headline // ignore: cast_nullable_to_non_nullable
+              as String,
+      timestamp: null == timestamp
+          ? _value.timestamp
+          : timestamp // ignore: cast_nullable_to_non_nullable
+              as DateTime,
+      priority: null == priority
+          ? _value.priority
+          : priority // ignore: cast_nullable_to_non_nullable
+              as double,
+      sourceInsightId: null == sourceInsightId
+          ? _value.sourceInsightId
+          : sourceInsightId // ignore: cast_nullable_to_non_nullable
+              as String,
+      isUrgent: null == isUrgent
+          ? _value.isUrgent
+          : isUrgent // ignore: cast_nullable_to_non_nullable
+              as bool,
+      displayDurationSeconds: null == displayDurationSeconds
+          ? _value.displayDurationSeconds
+          : displayDurationSeconds // ignore: cast_nullable_to_non_nullable
+              as int,
+    ) as $Val);
+  }
+}
+
+/// @nodoc
+abstract class _$$BottomLineItemImplCopyWith<$Res>
+    implements $BottomLineItemCopyWith<$Res> {
+  factory _$$BottomLineItemImplCopyWith(_$BottomLineItemImpl value,
+          $Res Function(_$BottomLineItemImpl) then) =
+      __$$BottomLineItemImplCopyWithImpl<$Res>;
+  @override
+  @useResult
+  $Res call(
+      {String headline,
+      DateTime timestamp,
+      double priority,
+      String sourceInsightId,
+      bool isUrgent,
+      int displayDurationSeconds});
+}
+
+/// @nodoc
+class __$$BottomLineItemImplCopyWithImpl<$Res>
+    extends _$BottomLineItemCopyWithImpl<$Res, _$BottomLineItemImpl>
+    implements _$$BottomLineItemImplCopyWith<$Res> {
+  __$$BottomLineItemImplCopyWithImpl(
+      _$BottomLineItemImpl _value, $Res Function(_$BottomLineItemImpl) _then)
+      : super(_value, _then);
+
+  /// Create a copy of BottomLineItem
+  /// with the given fields replaced by the non-null parameter values.
+  @pragma('vm:prefer-inline')
+  @override
+  $Res call({
+    Object? headline = null,
+    Object? timestamp = null,
+    Object? priority = null,
+    Object? sourceInsightId = null,
+    Object? isUrgent = null,
+    Object? displayDurationSeconds = null,
+  }) {
+    return _then(_$BottomLineItemImpl(
+      headline: null == headline
+          ? _value.headline
+          : headline // ignore: cast_nullable_to_non_nullable
+              as String,
+      timestamp: null == timestamp
+          ? _value.timestamp
+          : timestamp // ignore: cast_nullable_to_non_nullable
+              as DateTime,
+      priority: null == priority
+          ? _value.priority
+          : priority // ignore: cast_nullable_to_non_nullable
+              as double,
+      sourceInsightId: null == sourceInsightId
+          ? _value.sourceInsightId
+          : sourceInsightId // ignore: cast_nullable_to_non_nullable
+              as String,
+      isUrgent: null == isUrgent
+          ? _value.isUrgent
+          : isUrgent // ignore: cast_nullable_to_non_nullable
+              as bool,
+      displayDurationSeconds: null == displayDurationSeconds
+          ? _value.displayDurationSeconds
+          : displayDurationSeconds // ignore: cast_nullable_to_non_nullable
+              as int,
+    ));
+  }
+}
+
+/// @nodoc
+
+class _$BottomLineItemImpl extends _BottomLineItem {
+  const _$BottomLineItemImpl(
+      {required this.headline,
+      required this.timestamp,
+      required this.priority,
+      required this.sourceInsightId,
+      this.isUrgent = false,
+      this.displayDurationSeconds = 18})
+      : super._();
+
+  @override
+  final String headline;
+  @override
+  final DateTime timestamp;
+  @override
+  final double priority;
+  @override
+  final String sourceInsightId;
+  @override
+  @JsonKey()
+  final bool isUrgent;
+  @override
+  @JsonKey()
+  final int displayDurationSeconds;
+
+  @override
+  String toString() {
+    return 'BottomLineItem(headline: $headline, timestamp: $timestamp, priority: $priority, sourceInsightId: $sourceInsightId, isUrgent: $isUrgent, displayDurationSeconds: $displayDurationSeconds)';
+  }
+
+  @override
+  bool operator ==(Object other) {
+    return identical(this, other) ||
+        (other.runtimeType == runtimeType &&
+            other is _$BottomLineItemImpl &&
+            (identical(other.headline, headline) ||
+                other.headline == headline) &&
+            (identical(other.timestamp, timestamp) ||
+                other.timestamp == timestamp) &&
+            (identical(other.priority, priority) ||
+                other.priority == priority) &&
+            (identical(other.sourceInsightId, sourceInsightId) ||
+                other.sourceInsightId == sourceInsightId) &&
+            (identical(other.isUrgent, isUrgent) ||
+                other.isUrgent == isUrgent) &&
+            (identical(other.displayDurationSeconds, displayDurationSeconds) ||
+                other.displayDurationSeconds == displayDurationSeconds));
+  }
+
+  @override
+  int get hashCode => Object.hash(runtimeType, headline, timestamp, priority,
+      sourceInsightId, isUrgent, displayDurationSeconds);
+
+  /// Create a copy of BottomLineItem
+  /// with the given fields replaced by the non-null parameter values.
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  @override
+  @pragma('vm:prefer-inline')
+  _$$BottomLineItemImplCopyWith<_$BottomLineItemImpl> get copyWith =>
+      __$$BottomLineItemImplCopyWithImpl<_$BottomLineItemImpl>(
+          this, _$identity);
+}
+
+abstract class _BottomLineItem extends BottomLineItem {
+  const factory _BottomLineItem(
+      {required final String headline,
+      required final DateTime timestamp,
+      required final double priority,
+      required final String sourceInsightId,
+      final bool isUrgent,
+      final int displayDurationSeconds}) = _$BottomLineItemImpl;
+  const _BottomLineItem._() : super._();
+
+  @override
+  String get headline;
+  @override
+  DateTime get timestamp;
+  @override
+  double get priority;
+  @override
+  String get sourceInsightId;
+  @override
+  bool get isUrgent;
+  @override
+  int get displayDurationSeconds;
+
+  /// Create a copy of BottomLineItem
+  /// with the given fields replaced by the non-null parameter values.
+  @override
+  @JsonKey(includeFromJson: false, includeToJson: false)
+  _$$BottomLineItemImplCopyWith<_$BottomLineItemImpl> get copyWith =>
+      throw _privateConstructorUsedError;
+}
+\n\n// ====== lib/domain/entities/bottom_line.dart ======\n
+// domain/entities/bottom_line.dart
+// 🔥 바텀라인 시스템 - 모든 Entity & Rule 통합
+
+import 'package:freezed_annotation/freezed_annotation.dart';
+import '../entities/trade.dart';
+import '../entities/volume.dart';
+import '../entities/surge.dart';
+
+part 'bottom_line.freezed.dart';
+// part 'bottom_line.g.dart'; ← 이 라인 제거
+
+// ===== 1. 시장 스냅샷 Entity =====
+@freezed
+class MarketSnapshot with _$MarketSnapshot {
+  const factory MarketSnapshot({
+    required DateTime timestamp,
+    required String timeFrame,
+    required List<Trade> topTrades,           // ≥20M, 최근 50건
+    required List<Volume> topVolumes,         // 활성 마켓 상위 50개
+    required List<Surge> surges,              // 변화 있는 코인만
+    required List<Volume> sectorVolumes,      // 주요 섹터 10개
+    required Map<String, double> volChangePct,    // 볼륨 변화율
+    required Map<String, double> sectorShareDelta,    // 섹터 점유율 변화 (수정됨)
+    required Map<String, double> priceDelta,          // 가격 변화율 (수정됨)
+  }) = _MarketSnapshot;
+
+  // factory MarketSnapshot.fromJson(Map<String, dynamic> json) => 
+  //   _$MarketSnapshotFromJson(json); ← 이 라인들 제거
+
+  const MarketSnapshot._();
+
+  // 델타 계산 헬퍼
+  static MarketSnapshot create({
+    required List<Trade> trades,
+    required List<Volume> volumes,
+    required List<Surge> surges,
+    required List<Volume> sectors,
+    MarketSnapshot? previousSnapshot,
+  }) {
+    final now = DateTime.now();
+    
+    // 볼륨 변화율 계산
+    final volChangePct = <String, double>{};
+    if (previousSnapshot != null) {
+      for (final vol in volumes) {
+        final prevVol = previousSnapshot.topVolumes
+          .where((p) => p.market == vol.market)
+          .firstOrNull;
+        if (prevVol != null && prevVol.totalVolume > 0) {
+          volChangePct[vol.market] = 
+            ((vol.totalVolume - prevVol.totalVolume) / prevVol.totalVolume) * 100;
+        }
+      }
+    }
+
+    // 섹터 점유율 변화 계산
+    final sectorShareDelta = <String, double>{};
+    final totalVolume = volumes.fold<double>(0, (sum, v) => sum + v.totalVolume);
+    if (previousSnapshot != null && totalVolume > 0) {
+      for (final sector in sectors) {
+        final currentShare = (sector.totalVolume / totalVolume) * 100;
+        final prevTotalVol = previousSnapshot.topVolumes
+          .fold<double>(0, (sum, v) => sum + v.totalVolume);
+        if (prevTotalVol > 0) {
+          final prevSector = previousSnapshot.sectorVolumes
+            .where((s) => s.market == sector.market)
+            .firstOrNull;
+          if (prevSector != null) {
+            final prevShare = (prevSector.totalVolume / prevTotalVol) * 100;
+            sectorShareDelta[sector.market] = currentShare - prevShare;
+          }
+        }
+      }
+    }
+
+    // 가격 변화율 계산
+    final priceDelta = <String, double>{};
+    for (final surge in surges) {
+      priceDelta[surge.ticker] = surge.changePercent;
+    }
+
+    return MarketSnapshot(
+      timestamp: now,
+      timeFrame: 'min5', // 기본값
+      topTrades: trades.take(50).toList(),
+      topVolumes: volumes.take(50).toList(),
+      surges: surges,
+      sectorVolumes: sectors.take(10).toList(),
+      volChangePct: volChangePct,
+      sectorShareDelta: sectorShareDelta,
+      priceDelta: priceDelta,
+    );
+  }
+
+  // 스냅샷 해시 (캐싱용)
+  String get hash {
+    final content = [
+      timestamp.millisecondsSinceEpoch,
+      topTrades.length,
+      topVolumes.length,
+      surges.length,
+      sectorVolumes.length,
+    ].join('-');
+    return content.hashCode.toString();
+  }
+}
+
+// ===== 2. 후보 인사이트 Entity =====
+@freezed
+class CandidateInsight with _$CandidateInsight {
+  const factory CandidateInsight({
+    required String id,
+    required String template,
+    required double score,
+    required double weight,
+    required Map<String, dynamic> templateVars,
+    required DateTime timestamp,
+    @Default(false) bool isUrgent,
+  }) = _CandidateInsight;
+
+  // factory CandidateInsight.fromJson(Map<String, dynamic> json) => 
+  //   _$CandidateInsightFromJson(json); ← 이 라인들도 제거
+
+  const CandidateInsight._();
+
+  // 최종 점수 (가중치 적용)
+  double get finalScore => score * weight;
+
+  // 긴급 여부 판단 (점수 2.5 이상)
+  bool get isHighPriority => finalScore >= 2.5;
+
+  // 템플릿 변수 적용
+  String get populatedTemplate {
+    String result = template;
+    templateVars.forEach((key, value) {
+      result = result.replaceAll('{$key}', value.toString());
+    });
+    return result;
+  }
+}
+
+// ===== 3. 바텀라인 아이템 Entity =====
+@freezed
+class BottomLineItem with _$BottomLineItem {
+  const factory BottomLineItem({
+    required String headline,
+    required DateTime timestamp,
+    required double priority,
+    required String sourceInsightId,
+    @Default(false) bool isUrgent,
+    @Default(18) int displayDurationSeconds,
+  }) = _BottomLineItem;
+
+  // factory BottomLineItem.fromJson(Map<String, dynamic> json) => 
+  //   _$BottomLineItemFromJson(json); ← 이 라인들도 제거
+
+  const BottomLineItem._();
+
+  // AI 생성용 팩토리
+  factory BottomLineItem.fromInsight({
+    required String headline,
+    required CandidateInsight insight,
+  }) {
+    return BottomLineItem(
+      headline: headline,
+      timestamp: DateTime.now(),
+      priority: insight.finalScore,
+      sourceInsightId: insight.id,
+      isUrgent: insight.isHighPriority,
+    );
+  }
+
+  // 표시 순서 비교 (우선순위 높은 순)
+  int compareTo(BottomLineItem other) {
+    if (isUrgent != other.isUrgent) {
+      return isUrgent ? -1 : 1; // 긴급한 것이 먼저
+    }
+    return other.priority.compareTo(priority); // 높은 점수가 먼저
+  }
+}
+
+// ===== 4. 인사이트 룰 시스템 =====
+abstract class InsightRule {
+  String get id;
+  String get template;
+  double get weight;
+  
+  bool canTrigger(MarketSnapshot snapshot);
+  Map<String, dynamic> getTemplateVars(MarketSnapshot snapshot);
+  
+  // 점수 계산
+  double calculateScore(MarketSnapshot snapshot) {
+    if (!canTrigger(snapshot)) return 0.0;
+    
+    final vars = getTemplateVars(snapshot);
+    
+    // 기본 점수 계산 (가격변화^0.3 + 볼륨Z-score^0.25 + 고액거래^0.25 + 섹터변화^0.2)
+    double score = 0.0;
+    
+    // 가격 변화 요소
+    final priceChange = (vars['price_change'] as double?) ?? 0.0;
+    score += (priceChange.abs() / 100).clamp(0.0, 1.0) * 0.3;
+    
+    // 볼륨 요소
+    final volumeChange = (vars['volume_change'] as double?) ?? 0.0;
+    score += (volumeChange.abs() / 500).clamp(0.0, 1.0) * 0.25;
+    
+    // 고액거래 요소
+    final largeTradeCount = (vars['large_trade_count'] as int?) ?? 0;
+    score += (largeTradeCount / 5).clamp(0.0, 1.0) * 0.25;
+    
+    // 섹터 변화 요소
+    final sectorChange = (vars['sector_change'] as double?) ?? 0.0;
+    score += (sectorChange.abs() / 10).clamp(0.0, 1.0) * 0.2;
+    
+    return score * weight;
+  }
+
+  // 인사이트 생성
+  CandidateInsight? generateInsight(MarketSnapshot snapshot) {
+    final score = calculateScore(snapshot);
+    if (score < 1.0) return null; // 임계값 미달
+    
+    return CandidateInsight(
+      id: '${id}_${snapshot.timestamp.millisecondsSinceEpoch}',
+      template: template,
+      score: score,
+      weight: weight,
+      templateVars: getTemplateVars(snapshot),
+      timestamp: snapshot.timestamp,
+      isUrgent: score >= 2.5,
+    );
+  }
+}
+
+// ===== 5. 구체적인 룰 구현들 =====
+
+// 스마트머니 룰 (고액거래 패턴)
+class SmartMoneyRule extends InsightRule {
+  @override
+  String get id => 'smart_money';
+  
+  @override
+  String get template => '🔥 {market} {count}건 대형매수 탐지 · 총 {amount}억원';
+  
+  @override
+  double get weight => 1.0;
+  
+  @override
+  bool canTrigger(MarketSnapshot snapshot) {
+    final largeTrades = snapshot.topTrades
+      .where((t) => t.total >= 20000000) // 2천만원 이상
+      .toList();
+    
+    // 고액거래 3건 이상 + 동일 마켓 볼륨 급증
+    if (largeTrades.length < 3) return false;
+    
+    final markets = largeTrades.map((t) => t.market).toSet();
+    for (final market in markets) {
+      final marketTrades = largeTrades.where((t) => t.market == market).length;
+      final volumeChange = snapshot.volChangePct[market] ?? 0.0;
+      if (marketTrades >= 3 && volumeChange > 50) return true;
+    }
+    
+    return false;
+  }
+  
+  @override
+  Map<String, dynamic> getTemplateVars(MarketSnapshot snapshot) {
+    final largeTrades = snapshot.topTrades
+      .where((t) => t.total >= 20000000)
+      .toList();
+    
+    final marketGroups = <String, List<Trade>>{};
+    for (final trade in largeTrades) {
+      marketGroups.putIfAbsent(trade.market, () => []).add(trade);
+    }
+    
+    // 가장 활발한 마켓 선택
+    String topMarket = '';
+    int maxCount = 0;
+    double totalAmount = 0;
+    
+    for (final entry in marketGroups.entries) {
+      if (entry.value.length > maxCount) {
+        maxCount = entry.value.length;
+        topMarket = entry.key;
+        totalAmount = entry.value.fold(0, (sum, t) => sum + t.total);
+      }
+    }
+    
+    return {
+      'market': topMarket,
+      'count': maxCount,
+      'amount': (totalAmount / 100000000).toStringAsFixed(1), // 억원 단위
+      'large_trade_count': maxCount,
+      'volume_change': snapshot.volChangePct[topMarket] ?? 0.0,
+      'price_change': snapshot.priceDelta[topMarket] ?? 0.0,
+      'sector_change': 0.0,
+    };
+  }
+}
+
+// 볼륨 급증 룰
+class VolumeSpikeRule extends InsightRule {
+  @override
+  String get id => 'volume_spike';
+  
+  @override
+  String get template => '⚡ {market} 거래량 {change}%↑ · 평소 대비 {multiplier}배';
+  
+  @override
+  double get weight => 0.8;
+  
+  @override
+  bool canTrigger(MarketSnapshot snapshot) {
+    return snapshot.volChangePct.values.any((change) => change > 200);
+  }
+  
+  @override
+  Map<String, dynamic> getTemplateVars(MarketSnapshot snapshot) {
+    final maxEntry = snapshot.volChangePct.entries
+      .reduce((a, b) => a.value > b.value ? a : b);
+    
+    final multiplier = (maxEntry.value / 100 + 1).toStringAsFixed(1);
+    
+    return {
+      'market': maxEntry.key,
+      'change': maxEntry.value.toStringAsFixed(0),
+      'multiplier': multiplier,
+      'volume_change': maxEntry.value,
+      'price_change': snapshot.priceDelta[maxEntry.key] ?? 0.0,
+      'large_trade_count': 0,
+      'sector_change': 0.0,
+    };
+  }
+}
+
+// 연쇄 급등 룰
+class SurgeChainRule extends InsightRule {
+  @override
+  String get id => 'surge_chain';
+  
+  @override
+  String get template => '🔗 {theme} 테마 연쇄 급등 {count}종 · 평균 +{avg_change}%';
+  
+  @override
+  double get weight => 0.7;
+  
+  @override
+  bool canTrigger(MarketSnapshot snapshot) {
+    final surgingCoins = snapshot.surges
+      .where((s) => s.changePercent > 10)
+      .toList();
+    
+    return surgingCoins.length >= 3;
+  }
+  
+  @override
+  Map<String, dynamic> getTemplateVars(MarketSnapshot snapshot) {
+    final surgingCoins = snapshot.surges
+      .where((s) => s.changePercent > 10)
+      .toList();
+    
+    final avgChange = surgingCoins.isEmpty ? 0.0 :
+      surgingCoins.map((s) => s.changePercent).reduce((a, b) => a + b) / surgingCoins.length;
+    
+    return {
+      'theme': '연관코인', // TODO: 실제 테마 분류 로직
+      'count': surgingCoins.length,
+      'avg_change': avgChange.toStringAsFixed(1),
+      'volume_change': 0.0,
+      'price_change': avgChange,
+      'large_trade_count': 0,
+      'sector_change': 0.0,
+    };
+  }
+}
+
+// 섹터 로테이션 룰
+class SectorRotationRule extends InsightRule {
+  @override
+  String get id => 'sector_rotation';
+  
+  @override
+  String get template => '💫 {sector} 섹터 점유율 +{change}%p · 자금 유입 감지';
+  
+  @override
+  double get weight => 0.8;
+  
+  @override
+  bool canTrigger(MarketSnapshot snapshot) {
+    return snapshot.sectorShareDelta.values.any((change) => change > 7);
+  }
+  
+  @override
+  Map<String, dynamic> getTemplateVars(MarketSnapshot snapshot) {
+    final maxEntry = snapshot.sectorShareDelta.entries
+      .reduce((a, b) => a.value > b.value ? a : b);
+    
+    return {
+      'sector': maxEntry.key,
+      'change': maxEntry.value.toStringAsFixed(1),
+      'volume_change': 0.0,
+      'price_change': 0.0,
+      'large_trade_count': 0,
+      'sector_change': maxEntry.value,
+    };
+  }
+}
+
+// 폴백 룰 (빈 큐 방지)
+class FallbackRule extends InsightRule {
+  @override
+  String get id => 'fallback';
+  
+  @override
+  String get template => '💰 {market} 시장 활발 · 실시간 모니터링 중';
+  
+  @override
+  double get weight => 0.3; // 낮은 가중치
+  
+  @override
+  bool canTrigger(MarketSnapshot snapshot) {
+    // 고액거래가 1건 이상 있으면 무조건 트리거
+    return snapshot.topTrades.isNotEmpty;
+  }
+  
+  @override
+  Map<String, dynamic> getTemplateVars(MarketSnapshot snapshot) {
+    final topTrade = snapshot.topTrades.isNotEmpty 
+      ? snapshot.topTrades.first 
+      : null;
+    
+    return {
+      'market': topTrade?.market ?? 'BTC',
+      'volume_change': 0.0,
+      'price_change': 0.0,
+      'large_trade_count': snapshot.topTrades.length,
+      'sector_change': 0.0,
+    };
+  }
+}
+
+// ===== 6. 룰 레지스트리 =====
+class RuleRegistry {
+  static final List<InsightRule> allRules = [
+    SmartMoneyRule(),
+    VolumeSpikeRule(),
+    SurgeChainRule(),
+    SectorRotationRule(),
+    FallbackRule(),
+  ];
+  
+  // 특정 스냅샷에 대해 모든 룰 실행
+  static List<CandidateInsight> generateInsights(MarketSnapshot snapshot) {
+    final insights = <CandidateInsight>[];
+    
+    for (final rule in allRules) {
+      final insight = rule.generateInsight(snapshot);
+      if (insight != null) {
+        insights.add(insight);
+      }
+    }
+    
+    // 점수 높은 순으로 정렬
+    insights.sort((a, b) => b.finalScore.compareTo(a.finalScore));
+    
+    // 상위 5개만 반환 (AI 호출 비용 절약)
+    return insights.take(5).toList();
+  }
+  
+  // 긴급 인사이트 필터
+  static List<CandidateInsight> getUrgentInsights(List<CandidateInsight> insights) {
+    return insights.where((i) => i.isHighPriority).toList();
+  }
+  
+  // 룰 성능 통계 (디버깅용)
+  static Map<String, int> getRuleStats(List<CandidateInsight> insights) {
+    final stats = <String, int>{};
+    for (final insight in insights) {
+      final ruleId = insight.id.split('_').first;
+      stats[ruleId] = (stats[ruleId] ?? 0) + 1;
+    }
+    return stats;
+  }
+}\n\n// ====== lib/presentation/widgets/bottom_line_widget.dart ======\n

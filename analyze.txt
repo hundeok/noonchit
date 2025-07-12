@@ -1,23 +1,76 @@
 Analyzing noonchit...                                           
 
-warning • The library 'package:noonchit/core/di/surge_provider.dart' doesn't export a member with the shown name 'surgeRepositoryProvider' • lib/core/di/app_providers.dart:49:1 • undefined_shown_name
-warning • The library 'package:noonchit/core/di/surge_provider.dart' doesn't export a member with the shown name 'surgeUsecaseProvider' • lib/core/di/app_providers.dart:50:1 • undefined_shown_name
-warning • The library 'package:noonchit/core/di/surge_provider.dart' doesn't export a member with the shown name 'surgeTimeFrameIndexProvider' • lib/core/di/app_providers.dart:51:1 • undefined_shown_name
-warning • The library 'package:noonchit/core/di/surge_provider.dart' doesn't export a member with the shown name 'surgeTimeFrameProvider' • lib/core/di/app_providers.dart:52:1 • undefined_shown_name
-warning • The library 'package:noonchit/core/di/surge_provider.dart' doesn't export a member with the shown name 'surgeTimeFrameController' • lib/core/di/app_providers.dart:54:1 • undefined_shown_name
-warning • The value of the local variable 'filteredCount' isn't used • lib/core/di/trade_provider.dart:177:13 • unused_local_variable
-   info • 'stream' is deprecated and shouldn't be used. .stream will be removed in 3.0.0. As a replacement, either listen to the provider itself (AsyncValue) or .future • lib/core/di/trade_provider.dart:481:47 • deprecated_member_use
-   info • 'stream' is deprecated and shouldn't be used. .stream will be removed in 3.0.0. As a replacement, either listen to the provider itself (AsyncValue) or .future • lib/core/di/volume_provider.dart:338:47 • deprecated_member_use
-   info • Don't invoke 'print' in production code • lib/core/utils/cache_utils.dart:140:9 • avoid_print
-   info • The file name 'pattern_detector copy.dart' isn't a lower_case_with_underscores identifier • lib/core/utils/pattern_detector copy.dart:1:1 • file_names
-   info • Unnecessary braces in a string interpolation • lib/core/utils/timeframe_utils.dart:101:15 • unnecessary_brace_in_string_interps
-warning • The value of the field '_tradeRepository' isn't used • lib/domain/usecases/surge_usecase.dart:11:25 • unused_field
-warning • The value of the field '_repository' isn't used • lib/domain/usecases/trade_usecase.dart:12:25 • unused_field
-warning • The value of the field '_volumeRepo' isn't used • lib/domain/usecases/volume_usecase.dart:12:25 • unused_field
-  error • The getter 'resetTimeFrame' isn't defined for the type 'SurgeEvent' • lib/presentation/controllers/surge_controller.dart:43:23 • undefined_getter
-  error • The getter 'resetTimeFrame' isn't defined for the type 'SurgeEvent' • lib/presentation/controllers/surge_controller.dart:44:39 • undefined_getter
-warning • Unused import: '../../core/config/app_config.dart' • lib/presentation/controllers/trade_controller.dart:4:8 • unused_import
-warning • The value of the field '_usecase' isn't used • lib/presentation/controllers/trade_controller.dart:12:22 • unused_field
-warning • Unused import: '../../core/config/app_config.dart' • lib/presentation/pages/surge_page.dart:3:8 • unused_import
-warning • Unused import: '../../core/di/trade_provider.dart' • lib/presentation/pages/trade_page.dart:5:8 • unused_import
+  error • Target of URI doesn't exist: '../utils/insight_engine.dart' • lib/core/di/bottom_line_provider.dart:12:8 • uri_does_not_exist
+  error • The name 'Trade' isn't a type, so it can't be used as a type argument • lib/core/di/bottom_line_provider.dart:24:54 • non_type_as_type_argument
+   info • 'stream' is deprecated and shouldn't be used. .stream will be removed in 3.0.0. As a replacement, either listen to the provider itself (AsyncValue) or .future • lib/core/di/bottom_line_provider.dart:41:63 • deprecated_member_use
+   info • Use 'const' with the constructor to improve performance • lib/core/di/bottom_line_provider.dart:44:18 • prefer_const_constructors
+  error • Undefined name 'tradeListProvider' • lib/core/di/bottom_line_provider.dart:81:36 • undefined_identifier
+  error • Undefined name 'currentVolumeListProvider' • lib/core/di/bottom_line_provider.dart:82:37 • undefined_identifier
+  error • Undefined name 'currentSurgeListProvider' • lib/core/di/bottom_line_provider.dart:83:36 • undefined_identifier
+  error • Undefined name 'currentSectorVolumeListProvider' • lib/core/di/bottom_line_provider.dart:84:37 • undefined_identifier
+  error • Undefined name 'bottomLineQueueProvider' • lib/core/di/bottom_line_provider.dart:172:34 • undefined_identifier
+  error • Undefined name 'bottomLineQueueProvider' • lib/core/di/bottom_line_provider.dart:207:27 • undefined_identifier
+  error • Undefined name 'bottomLineQueueProvider' • lib/core/di/bottom_line_provider.dart:217:27 • undefined_identifier
+  error • The name 'InsightEngine' isn't a type, so it can't be used as a type argument • lib/core/di/bottom_line_provider.dart:242:40 • non_type_as_type_argument
+  error • The function 'InsightEngine' isn't defined • lib/core/di/bottom_line_provider.dart:243:10 • undefined_function
+  error • Undefined name 'tradeListProvider' • lib/core/di/bottom_line_provider.dart:266:34 • undefined_identifier
+  error • Undefined name 'currentVolumeListProvider' • lib/core/di/bottom_line_provider.dart:267:35 • undefined_identifier
+  error • Undefined name 'currentSurgeListProvider' • lib/core/di/bottom_line_provider.dart:268:34 • undefined_identifier
+   info • Unnecessary braces in a string interpolation • lib/core/di/bottom_line_provider.dart:291:32 • unnecessary_brace_in_string_interps
+warning • Unused import: 'dart:math' • lib/core/di/trade_provider.dart:3:8 • unused_import
+warning • Unused import: 'dart:math' • lib/core/services/openai_service.dart:6:8 • unused_import
+   info • Unnecessary braces in a string interpolation • lib/core/services/openai_service.dart:74:59 • unnecessary_brace_in_string_interps
+   info • Unnecessary braces in a string interpolation • lib/core/services/openai_service.dart:74:69 • unnecessary_brace_in_string_interps
+   info • Unnecessary braces in a string interpolation • lib/core/services/openai_service.dart:204:60 • unnecessary_brace_in_string_interps
+   info • Use 'const' with the constructor to improve performance • lib/core/services/openai_service.dart:240:18 • prefer_const_constructors
+   info • Use 'const' with the constructor to improve performance • lib/core/services/openai_service.dart:254:32 • prefer_const_constructors
+   info • Unnecessary braces in a string interpolation • lib/core/services/openai_service.dart:258:44 • unnecessary_brace_in_string_interps
+   info • Use interpolation to compose strings and values • lib/core/services/openai_service.dart:392:17 • prefer_interpolation_to_compose_strings
+warning • Unused import: 'dart:isolate' • lib/core/utils/advanced_metrics.dart:2:8 • unused_import
+warning • Unused import: 'dart:collection' • lib/core/utils/bottom_line_circular_buffer.dart:4:8 • unused_import
+warning • Unused import: 'package:flutter/foundation.dart' • lib/core/utils/bottom_line_circular_buffer.dart:6:8 • unused_import
+   info • Unnecessary braces in a string interpolation • lib/core/utils/bottom_line_circular_buffer.dart:170:32 • unnecessary_brace_in_string_interps
+   info • Unnecessary braces in a string interpolation • lib/core/utils/bottom_line_circular_buffer.dart:170:42 • unnecessary_brace_in_string_interps
+warning • The value of the local variable 'now' isn't used • lib/core/utils/bottom_line_circular_buffer.dart:213:11 • unused_local_variable
+warning • The value of the local variable 'now' isn't used • lib/core/utils/bottom_line_circular_buffer.dart:261:11 • unused_local_variable
+   info • Use 'const' with the constructor to improve performance • lib/core/utils/bottom_line_constants.dart:162:22 • prefer_const_constructors
+   info • Use 'const' with the constructor to improve performance • lib/core/utils/bottom_line_constants.dart:286:18 • prefer_const_constructors
+   info • Use 'const' with the constructor to improve performance • lib/core/utils/bottom_line_constants.dart:287:9 • prefer_const_constructors
+   info • Use 'const' with the constructor to improve performance • lib/core/utils/bottom_line_constants.dart:296:18 • prefer_const_constructors
+   info • Use 'const' with the constructor to improve performance • lib/core/utils/bottom_line_constants.dart:297:9 • prefer_const_constructors
+warning • Unused import: '../../domain/entities/trade.dart' • lib/core/utils/bottom_line_insight_engine.dart:6:8 • unused_import
+warning • Unused import: '../../domain/entities/volume.dart' • lib/core/utils/bottom_line_insight_engine.dart:7:8 • unused_import
+warning • Unused import: '../../domain/entities/surge.dart' • lib/core/utils/bottom_line_insight_engine.dart:8:8 • unused_import
+   info • Unnecessary braces in a string interpolation • lib/core/utils/bottom_line_insight_engine.dart:49:27 • unnecessary_brace_in_string_interps
+   info • Unnecessary braces in a string interpolation • lib/core/utils/bottom_line_insight_engine.dart:49:78 • unnecessary_brace_in_string_interps
+   info • Use 'const' with the constructor to improve performance • lib/core/utils/bottom_line_insight_engine.dart:179:21 • prefer_const_constructors
+   info • Use 'const' literals as arguments to constructors of '@immutable' classes • lib/core/utils/bottom_line_insight_engine.dart:452:17 • prefer_const_literals_to_create_immutables
+   info • Use 'const' literals as arguments to constructors of '@immutable' classes • lib/core/utils/bottom_line_insight_engine.dart:453:23 • prefer_const_literals_to_create_immutables
+   info • Use 'const' literals as arguments to constructors of '@immutable' classes • lib/core/utils/bottom_line_insight_engine.dart:454:20 • prefer_const_literals_to_create_immutables
+   info • Use 'const' literals as arguments to constructors of '@immutable' classes • lib/core/utils/bottom_line_insight_engine.dart:463:17 • prefer_const_literals_to_create_immutables
+   info • Use 'const' literals as arguments to constructors of '@immutable' classes • lib/core/utils/bottom_line_insight_engine.dart:464:23 • prefer_const_literals_to_create_immutables
+warning • The value of the local variable 'now' isn't used • lib/core/utils/bottom_line_queue.dart:454:11 • unused_local_variable
+warning • Unused import: '../../shared/widgets/sector_classification.dart' • lib/data/processors/bottom_line_aggregator.dart:15:8 • unused_import
+   info • Unnecessary braces in a string interpolation • lib/data/processors/bottom_line_aggregator.dart:324:29 • unnecessary_brace_in_string_interps
+  error • The getter 'amount' isn't defined for the type 'Trade' • lib/data/processors/bottom_line_aggregator.dart:362:58 • undefined_getter
+  error • The getter 'amount' isn't defined for the type 'Trade' • lib/data/processors/bottom_line_aggregator.dart:365:51 • undefined_getter
+   info • Unnecessary braces in a string interpolation • lib/data/processors/bottom_line_aggregator.dart:458:29 • unnecessary_brace_in_string_interps
+  error • The element type 'List<RealtimeMarketStats>' can't be assigned to the map value type 'List<String>' • lib/data/processors/bottom_line_aggregator.dart:882:20 • map_value_type_not_assignable
+  error • This expression has a type of 'void' so its value can't be used • lib/data/processors/bottom_line_aggregator.dart:884:9 • use_of_void_result
+  error • The element type 'List<RealtimeMarketStats>' can't be assigned to the map value type 'List<String>' • lib/data/processors/bottom_line_aggregator.dart:889:20 • map_value_type_not_assignable
+  error • This expression has a type of 'void' so its value can't be used • lib/data/processors/bottom_line_aggregator.dart:891:9 • use_of_void_result
+  error • The element type 'List<RealtimeMarketStats>' can't be assigned to the map value type 'List<String>' • lib/data/processors/bottom_line_aggregator.dart:896:20 • map_value_type_not_assignable
+  error • This expression has a type of 'void' so its value can't be used • lib/data/processors/bottom_line_aggregator.dart:898:9 • use_of_void_result
+  error • The element type 'List<RealtimeMarketStats>' can't be assigned to the map value type 'List<String>' • lib/data/processors/bottom_line_aggregator.dart:903:20 • map_value_type_not_assignable
+  error • This expression has a type of 'void' so its value can't be used • lib/data/processors/bottom_line_aggregator.dart:905:9 • use_of_void_result
+  error • The element type 'List<RealtimeMarketStats>' can't be assigned to the map value type 'List<String>' • lib/data/processors/bottom_line_aggregator.dart:910:26 • map_value_type_not_assignable
+  error • This expression has a type of 'void' so its value can't be used • lib/data/processors/bottom_line_aggregator.dart:912:9 • use_of_void_result
+   info • The import of 'dart:async' is unnecessary because all of the used elements are also provided by the import of 'dart:async' • lib/data/repositories/signal_repository_impl.dart:14:8 • unnecessary_import
+warning • The value of the local variable 'now' isn't used • lib/data/repositories/signal_repository_impl.dart:112:11 • unused_local_variable
+   info • Unnecessary braces in a string interpolation • lib/data/repositories/signal_repository_impl.dart:126:63 • unnecessary_brace_in_string_interps
+  error • The getter 'amount' isn't defined for the type 'Trade' • lib/domain/entities/bottom_line.dart:252:23 • undefined_getter
+  error • The getter 'amount' isn't defined for the type 'Trade' • lib/domain/entities/bottom_line.dart:271:23 • undefined_getter
+warning • The value of the field '_repository' isn't used • lib/domain/usecases/trade_usecase.dart:11:25 • unused_field
+warning • The value of the field '_tradeRepository' isn't used • lib/domain/usecases/volume_usecase.dart:13:25 • unused_field
+warning • The value of the field '_usecase' isn't used • lib/presentation/controllers/trade_controller.dart:11:22 • unused_field
 

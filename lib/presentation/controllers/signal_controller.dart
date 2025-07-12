@@ -20,10 +20,10 @@ class SignalState {
   final double threshold;
   final bool isPatternEnabled;
   final String? errorMessage;
-  final Map<String, dynamic>? systemHealth; // 🆕 V4.1
-  final Map<String, dynamic>? onlineMetricsHealth; // 🆕 V4.1
-  final String sortField; // 🆕 V4.1
-  final bool sortAscending; // 🆕 V4.1
+  final Map<String, dynamic>? systemHealth;
+  final Map<String, dynamic>? onlineMetricsHealth;
+  final String sortField;
+  final bool sortAscending;
 
   const SignalState({
     this.signals = const [],
@@ -32,7 +32,7 @@ class SignalState {
     this.currentPattern = PatternType.surge,
     this.selectedIndex = 0,
     this.threshold = 0.4,
-    this.isPatternEnabled = true,
+    this.isPatternEnabled = false,
     this.errorMessage,
     this.systemHealth,
     this.onlineMetricsHealth,
@@ -96,35 +96,76 @@ class SignalState {
   }
 }
 
-/// 🚀 Signal 화면 전용 ViewModel V4.1 - 온라인 지표 연동
+/// 🚀 Signal 화면 전용 ViewModel V4.1 - Clean Architecture + 단방향 데이터 흐름
 class SignalController extends StateNotifier<SignalState> {
   final SignalUseCase _usecase;
   final Ref _ref;
   StreamSubscription<Result<List<Signal>, AppException>>? _subscription;
-  StreamSubscription<Map<String, dynamic>>? _healthSubscription; // 🆕 V4.1
-  Timer? _healthUpdateTimer; // 🆕 V4.1
+  StreamSubscription<Map<String, dynamic>>? _healthSubscription;
+  Timer? _healthUpdateTimer;
 
   SignalController(this._usecase, this._ref) : super(const SignalState()) {
-    _startSystemHealthMonitoring(); // 🆕 V4.1
+    _startSystemHealthMonitoring();
+    _initializePatternState();
   }
 
   // ==========================================================================
-  // 🆕 V4.1 시스템 건강성 모니터링
+  // 🔧 초기화 및 상태 동기화 - Clean Architecture
   // ==========================================================================
 
-  /// 🆕 시스템 헬스 모니터링 시작
+  /// 🔧 패턴 상태 초기화 (Provider 상태와 동기화)
+  void _initializePatternState() {
+    try {
+      // 🔧 Provider에서 현재 상태 가져오기
+      final currentPatternType = _ref.read(signalPatternTypeProvider);
+      final currentIndex = _ref.read(signalPatternIndexProvider);
+      final currentEnabled = _ref.read(signalPatternEnabledProvider(currentPatternType));
+      
+      // 🔧 UseCase를 통해 임계값 가져오기 (단방향 흐름)
+      final currentThreshold = _usecase.getPatternThreshold(currentPatternType);
+      
+      state = state.copyWith(
+        isPatternEnabled: currentEnabled,
+        threshold: currentThreshold,
+        currentPattern: currentPatternType,
+        selectedIndex: currentIndex,
+      );
+      
+      if (AppConfig.enableTradeLog) {
+        log.i('✅ Pattern state initialized: ${currentPatternType.displayName}, enabled: $currentEnabled, threshold: $currentThreshold');
+      }
+    } catch (e) {
+      if (AppConfig.enableTradeLog) {
+        log.w('⚠️ Pattern state initialization failed: $e');
+      }
+    }
+  }
+
+  // ==========================================================================
+  // 🆕 V4.1 시스템 건강성 모니터링 (통합 스위치 연동)
+  // ==========================================================================
+
+  /// 🆕 시스템 헬스 모니터링 시작 (통합 스위치 연동)
   void _startSystemHealthMonitoring() {
     _healthUpdateTimer = Timer.periodic(const Duration(seconds: 10), (_) {
+      final isAnyActive = _ref.read(isAnyPatternActiveProvider);
+      if (!isAnyActive) {
+        state = state.copyWith(
+          systemHealth: {'status': 'inactive', 'message': '모든 패턴이 비활성 상태입니다.'},
+          onlineMetricsHealth: {'status': 'inactive', 'message': '온라인 지표가 비활성 상태입니다.'},
+        );
+        return;
+      }
+      
       _updateSystemHealth();
       _updateOnlineMetricsHealth();
     });
   }
 
-  /// 🆕 시스템 헬스 업데이트
+  /// 🆕 시스템 헬스 업데이트 (UseCase 직접 호출)
   void _updateSystemHealth() async {
     try {
-      final controller = _ref.read(signalPatternController);
-      final health = await controller.getSystemHealth();
+      final health = await _usecase.getSystemHealth();
       
       state = state.copyWith(systemHealth: health);
       
@@ -141,11 +182,10 @@ class SignalController extends StateNotifier<SignalState> {
     }
   }
 
-  /// 🆕 온라인 지표 헬스 업데이트
+  /// 🆕 온라인 지표 헬스 업데이트 (UseCase 직접 호출)
   void _updateOnlineMetricsHealth() {
     try {
-      final controller = _ref.read(signalPatternController);
-      final health = controller.getOnlineMetricsHealth();
+      final health = _usecase.getOnlineMetricsHealth();
       
       state = state.copyWith(onlineMetricsHealth: health);
     } catch (e) {
@@ -156,10 +196,52 @@ class SignalController extends StateNotifier<SignalState> {
   }
 
   // ==========================================================================
-  // 기본 패턴 관리 (기존 + V4.1 개선)
+  // 🆕 통합 시스템 제어 (Clean Architecture)
   // ==========================================================================
 
-  /// 패턴 인덱스 변경 (슬라이더 이동) - V4.1 개선
+  /// 🆕 전체 시스템 ON/OFF 제어
+  void setSystemActive(bool active) {
+    try {
+      _usecase.setSystemActive(active);
+      
+      if (AppConfig.enableTradeLog) {
+        log.i('🎯 System ${active ? "activated" : "deactivated"} via Signal Controller');
+      }
+      
+      // 현재 패턴 상태 동기화
+      _initializePatternState();
+    } catch (e) {
+      if (AppConfig.enableTradeLog) {
+        log.e('❌ System activation toggle failed: $e');
+      }
+      
+      state = state.copyWith(
+        errorMessage: 'System toggle failed: ${e.toString()}'
+      );
+    }
+  }
+
+  /// 🆕 전체 시스템 활성 상태 조회
+  bool get isSystemActive => _ref.read(isAnyPatternActiveProvider);
+
+  /// 🆕 시스템 상태 요약 (UseCase 직접 호출)
+  Map<String, dynamic> getSystemStatus() {
+    try {
+      return _usecase.getSystemStatus();
+    } catch (e) {
+      return {
+        'isSystemActive': false,
+        'error': e.toString(),
+        'timestamp': DateTime.now().toIso8601String(),
+      };
+    }
+  }
+
+  // ==========================================================================
+  // 기본 패턴 관리 (Clean Architecture - 단방향 흐름)
+  // ==========================================================================
+
+  /// 패턴 인덱스 변경 (슬라이더 이동)
   void setPatternIndex(int index, List<String> markets) {
     if (index < 0 || index >= PatternType.values.length) {
       if (AppConfig.enableTradeLog) {
@@ -169,16 +251,20 @@ class SignalController extends StateNotifier<SignalState> {
     }
 
     final patternType = PatternType.values[index];
-    final defaultThreshold = patternType.defaultThreshold; // V4.1 기본값
 
-    // Provider 상태 업데이트
-    final controller = _ref.read(signalPatternController);
-    controller.updatePatternIndex(index);
+    // 🔧 Provider 상태 업데이트
+    _ref.read(signalPatternIndexProvider.notifier).state = index;
+    _ref.read(signalPatternTypeProvider.notifier).state = patternType;
+
+    // 🔧 UseCase에서 현재 상태 가져오기
+    final newEnabled = _usecase.isPatternEnabled(patternType);
+    final newThreshold = _usecase.getPatternThreshold(patternType);
 
     state = state.copyWith(
       currentPattern: patternType,
       selectedIndex: index,
-      threshold: defaultThreshold,
+      threshold: newThreshold,
+      isPatternEnabled: newEnabled,
       isLoading: true,
       errorMessage: null,
     );
@@ -187,19 +273,17 @@ class SignalController extends StateNotifier<SignalState> {
     _subscribeToPattern(patternType, markets);
     
     if (AppConfig.enableTradeLog) {
-      log.i('🎯 Pattern changed to: ${patternType.displayName} (V4.1)');
+      log.i('🎯 Pattern changed to: ${patternType.displayName} (V4.1) - enabled: $newEnabled, threshold: $newThreshold');
     }
   }
 
-  /// 현재 패턴의 임계값 변경 - V4.1 개선
+  /// 현재 패턴의 임계값 변경 (UseCase 직접 호출)
   void updateThreshold(double threshold) {
     try {
-      // UseCase를 통한 검증된 업데이트
+      // 🔧 UseCase를 통한 업데이트 (단방향 흐름)
       _usecase.updatePatternThreshold(state.currentPattern, threshold);
-      
-      final controller = _ref.read(signalPatternController);
-      controller.updateThreshold(threshold);
 
+      // 로컬 상태 업데이트
       state = state.copyWith(threshold: threshold);
       
       if (AppConfig.enableTradeLog) {
@@ -210,46 +294,142 @@ class SignalController extends StateNotifier<SignalState> {
         log.e('❌ Threshold update failed: $e');
       }
       
-      // 에러를 사용자에게 표시
       state = state.copyWith(
         errorMessage: 'Invalid threshold value: ${e.toString()}'
       );
     }
   }
 
-  /// 패턴 활성화/비활성화 토글 - V4.1 개선
+  /// 패턴 활성화/비활성화 토글 (Provider + UseCase 동기화)
   void togglePatternEnabled() {
     final newEnabled = !state.isPatternEnabled;
     
-    _usecase.setPatternEnabled(state.currentPattern, newEnabled);
-    
-    final controller = _ref.read(signalPatternController);
-    controller.setPatternEnabled(state.currentPattern, newEnabled);
+    try {
+      if (AppConfig.enableTradeLog) {
+        log.i('🎯 Toggle requested - Current: ${state.isPatternEnabled}, Pattern: ${state.currentPattern.displayName}');
+      }
+      
+      // 🔧 1. Provider 상태 업데이트
+      _ref.read(signalPatternEnabledProvider(state.currentPattern).notifier).state = newEnabled;
+      
+      // 🔧 2. UseCase 업데이트
+      _usecase.setPatternEnabled(state.currentPattern, newEnabled);
 
-    state = state.copyWith(isPatternEnabled: newEnabled);
-    
-    if (AppConfig.enableTradeLog) {
-      log.i('🔄 Pattern ${newEnabled ? "enabled" : "disabled"}: ${state.currentPattern.displayName}');
+      // 🔧 3. 로컬 상태 업데이트
+      state = state.copyWith(isPatternEnabled: newEnabled);
+      
+      if (AppConfig.enableTradeLog) {
+        log.i('🔄 Pattern ${newEnabled ? "enabled" : "disabled"}: ${state.currentPattern.displayName} ✅');
+      }
+    } catch (e) {
+      if (AppConfig.enableTradeLog) {
+        log.e('❌ Toggle pattern failed: $e');
+      }
+      
+      state = state.copyWith(
+        errorMessage: 'Failed to toggle pattern: ${e.toString()}'
+      );
     }
   }
 
-  /// 시그널 목록 초기화 - V4.1 개선
+  /// 시그널 목록 초기화 (UseCase 직접 호출)
   void clearSignals([PatternType? pattern]) {
-    final controller = _ref.read(signalPatternController);
-    controller.clearSignals(pattern);
+    try {
+      _usecase.clearSignals(pattern);
 
-    if (pattern == null || pattern == state.currentPattern) {
-      state = state.copyWith(signals: []);
-    }
-    
-    if (AppConfig.enableTradeLog) {
-      final patternName = pattern?.displayName ?? 'All patterns';
-      log.i('🧹 Signals cleared: $patternName');
+      if (pattern == null || pattern == state.currentPattern) {
+        state = state.copyWith(signals: []);
+      }
+      
+      if (AppConfig.enableTradeLog) {
+        final patternName = pattern?.displayName ?? 'All patterns';
+        log.i('🧹 Signals cleared: $patternName');
+      }
+    } catch (e) {
+      if (AppConfig.enableTradeLog) {
+        log.e('❌ Clear signals failed: $e');
+      }
+      
+      state = state.copyWith(
+        errorMessage: 'Failed to clear signals: ${e.toString()}'
+      );
     }
   }
 
   // ==========================================================================
-  // 🆕 V4.1 고급 패턴 설정
+  // 🆕 V4.1 모달용 메서드 4개 (Clean Architecture)
+  // ==========================================================================
+
+  /// 🆕 현재 임계값 조회 (모달에서 사용)
+  double getCurrentThresholdValue(String key) {
+    try {
+      return _usecase.getCurrentThresholdValue(state.currentPattern, key);
+    } catch (e) {
+      if (AppConfig.enableTradeLog) {
+        log.w('⚠️ getCurrentThresholdValue failed for $key: $e');
+      }
+      return 0.0;
+    }
+  }
+
+  /// 🆕 기본 임계값 조회 (모달에서 사용)
+  double getDefaultThresholdValue(String key) {
+    try {
+      return _usecase.getDefaultThresholdValue(state.currentPattern, key);
+    } catch (e) {
+      if (AppConfig.enableTradeLog) {
+        log.w('⚠️ getDefaultThresholdValue failed for $key: $e');
+      }
+      return 0.0;
+    }
+  }
+
+  /// 🆕 임계값 직접 업데이트 (모달에서 사용)
+  void updatePatternThresholdDirect(String key, double value) {
+    try {
+      _usecase.updateAdvancedPatternConfig(state.currentPattern, key, value);
+      
+      // 메인 threshold가 변경된 경우 로컬 상태도 업데이트
+      if (key == 'priceChangePercent' || key == 'zScoreThreshold' || key == 'consecutiveMin' || key == 'minTradeAmount' || key == 'cvThreshold' || key == 'priceRangeMin') {
+        state = state.copyWith(threshold: value);
+      }
+      
+      if (AppConfig.enableTradeLog) {
+        log.i('⚙️ Direct threshold updated: ${state.currentPattern.name}.$key = $value');
+      }
+    } catch (e) {
+      if (AppConfig.enableTradeLog) {
+        log.e('❌ Direct threshold update failed: $e');
+      }
+      
+      state = state.copyWith(
+        errorMessage: 'Threshold update failed: ${e.toString()}'
+      );
+    }
+  }
+
+  /// 🆕 임계값 기본값으로 리셋 (모달에서 사용)
+  void resetThresholdToDefault(String key) {
+    try {
+      final defaultValue = getDefaultThresholdValue(key);
+      updatePatternThresholdDirect(key, defaultValue);
+      
+      if (AppConfig.enableTradeLog) {
+        log.i('🔄 Threshold reset to default: ${state.currentPattern.name}.$key = $defaultValue');
+      }
+    } catch (e) {
+      if (AppConfig.enableTradeLog) {
+        log.e('❌ Reset threshold to default failed: $e');
+      }
+      
+      state = state.copyWith(
+        errorMessage: 'Reset to default failed: ${e.toString()}'
+      );
+    }
+  }
+
+  // ==========================================================================
+  // 🆕 V4.1 고급 패턴 설정 (UseCase 직접 호출)
   // ==========================================================================
 
   /// 🆕 고급 패턴 설정 업데이트
@@ -271,17 +451,22 @@ class SignalController extends StateNotifier<SignalState> {
     }
   }
 
-  /// 🆕 패턴 프리셋 적용
+  /// 🆕 패턴 프리셋 적용 (UseCase 직접 호출)
   void applyPreset(String presetName) {
     try {
       _usecase.applyPatternPreset(presetName);
       
       // 현재 패턴의 임계값도 업데이트
       final newThreshold = _usecase.getPatternThreshold(state.currentPattern);
-      state = state.copyWith(threshold: newThreshold);
+      final newEnabled = _usecase.isPatternEnabled(state.currentPattern);
+      
+      state = state.copyWith(
+        threshold: newThreshold,
+        isPatternEnabled: newEnabled,
+      );
       
       if (AppConfig.enableTradeLog) {
-        log.i('🎯 Preset applied: $presetName');
+        log.i('🎯 Preset applied: $presetName - threshold: $newThreshold, enabled: $newEnabled');
       }
     } catch (e) {
       if (AppConfig.enableTradeLog) {
@@ -294,25 +479,34 @@ class SignalController extends StateNotifier<SignalState> {
     }
   }
 
-  /// 🆕 온라인 지표 리셋
+  /// 🆕 온라인 지표 리셋 (UseCase 직접 호출)
   void resetOnlineMetrics([String? market]) {
-    final controller = _ref.read(signalPatternController);
-    controller.resetOnlineMetrics(market);
-    
-    // 헬스 상태 즉시 업데이트
-    _updateOnlineMetricsHealth();
-    
-    if (AppConfig.enableTradeLog) {
-      final target = market ?? 'all markets';
-      log.i('🔄 Online metrics reset: $target');
+    try {
+      _usecase.resetOnlineMetrics(market);
+      
+      // 헬스 상태 즉시 업데이트
+      _updateOnlineMetricsHealth();
+      
+      if (AppConfig.enableTradeLog) {
+        final target = market ?? 'all markets';
+        log.i('🔄 Online metrics reset: $target');
+      }
+    } catch (e) {
+      if (AppConfig.enableTradeLog) {
+        log.e('❌ Online metrics reset failed: $e');
+      }
+      
+      state = state.copyWith(
+        errorMessage: 'Online metrics reset failed: ${e.toString()}'
+      );
     }
   }
 
   // ==========================================================================
-  // 스트림 관리 (V4.1 개선)
+  // 스트림 관리 (V4.1 개선 - UseCase 직접 호출)
   // ==========================================================================
 
-  /// 패턴별 시그널 스트림 구독 - V4.1 개선
+  /// 패턴별 시그널 스트림 구독
   void _subscribeToPattern(PatternType patternType, List<String> markets) {
     _subscription?.cancel();
     
@@ -331,7 +525,6 @@ class SignalController extends StateNotifier<SignalState> {
   void _handleResult(Result<List<Signal>, AppException> result) {
     result.when(
       ok: (signals) {
-        // V4.1 정렬 적용
         final sortedSignals = _applySorting(signals);
         
         state = state.copyWith(
@@ -341,7 +534,6 @@ class SignalController extends StateNotifier<SignalState> {
           errorMessage: null,
         );
         
-        // 온라인 지표 통계 로깅
         if (AppConfig.enableTradeLog && signals.isNotEmpty) {
           final withOnlineMetrics = signals.where((s) => s.hasOnlineMetrics).length;
           final ratio = (withOnlineMetrics / signals.length * 100).toStringAsFixed(1);
@@ -362,17 +554,24 @@ class SignalController extends StateNotifier<SignalState> {
     );
   }
 
-  /// 재연결/새로고침 - V4.1 개선
+  /// 재연결/새로고침
   void refresh(List<String> markets) {
     if (AppConfig.enableTradeLog) {
       log.i('🔄 Signal refresh requested for ${markets.length} markets');
     }
     
-    // 온라인 지표 상태도 리셋
-    resetOnlineMetrics();
-    
-    // 패턴 재구독
-    setPatternIndex(state.selectedIndex, markets);
+    try {
+      resetOnlineMetrics();
+      setPatternIndex(state.selectedIndex, markets);
+    } catch (e) {
+      if (AppConfig.enableTradeLog) {
+        log.e('❌ Signal refresh failed: $e');
+      }
+      
+      state = state.copyWith(
+        errorMessage: 'Refresh failed: ${e.toString()}'
+      );
+    }
   }
 
   // ==========================================================================
@@ -439,7 +638,7 @@ class SignalController extends StateNotifier<SignalState> {
     return list;
   }
 
-  /// 🆕 고급 필터링 (V4.1)
+  /// 🆕 고급 필터링 (UseCase 직접 호출)
   List<Signal> filterSignals({
     String? marketFilter,
     double? minConfidence,
@@ -458,10 +657,10 @@ class SignalController extends StateNotifier<SignalState> {
   }
 
   // ==========================================================================
-  // 표시 텍스트 생성 (V4.1 개선)
+  // 표시 텍스트 생성 (V4.1 개선 - UseCase 직접 호출)
   // ==========================================================================
 
-  /// 현재 패턴 표시 텍스트 생성 - V4.1 개선
+  /// 현재 패턴 표시 텍스트 생성
   String getPatternDisplayText() {
     final pattern = state.currentPattern;
     return '${pattern.displayName}: ${pattern.description}';
@@ -472,32 +671,45 @@ class SignalController extends StateNotifier<SignalState> {
     return state.currentPattern.displayName;
   }
 
-  /// 임계값 표시 텍스트 - V4.1 개선
+  /// 임계값 표시 텍스트 (UseCase에서 실제 값 조회)
   String getThresholdDisplayText() {
-    final threshold = state.threshold;
     final pattern = state.currentPattern;
 
-    switch (pattern) {
-      case PatternType.surge:
-        return '${threshold.toStringAsFixed(1)}% 상승';
-      case PatternType.flashFire:
-        return '${threshold.toStringAsFixed(1)}배 급증';
-      case PatternType.stackUp:
-        return '${threshold.toInt()}연속 증가';
-      case PatternType.stealthIn:
-        final amountText = threshold >= 1000000 
-            ? '${(threshold / 1000000).toStringAsFixed(0)}백만원'
-            : '${threshold.toStringAsFixed(0)}원';
-        return '$amountText 이상';
-      case PatternType.blackHole:
-        return '${threshold.toStringAsFixed(1)}% 이하 변동';
-      case PatternType.reboundShot:
-        return '${threshold.toStringAsFixed(1)}% 급락 후 반등';
+    try {
+      switch (pattern) {
+        case PatternType.surge:
+          final value = _usecase.getCurrentThresholdValue(pattern, 'priceChangePercent');
+          return '${value.toStringAsFixed(1)}% 상승';
+        case PatternType.flashFire:
+          final value = _usecase.getCurrentThresholdValue(pattern, 'zScoreThreshold');
+          return '${value.toStringAsFixed(1)}배 급증';
+        case PatternType.stackUp:
+          final value = _usecase.getCurrentThresholdValue(pattern, 'consecutiveMin');
+          return '${value.toInt()}연속 증가';
+        case PatternType.stealthIn:
+          final value = _usecase.getCurrentThresholdValue(pattern, 'minTradeAmount');
+          final amountText = value >= 1000000 
+              ? '${(value / 1000000).toStringAsFixed(0)}백만원'
+              : '${value.toStringAsFixed(0)}원';
+          return '$amountText 이상';
+        case PatternType.blackHole:
+          final value = _usecase.getCurrentThresholdValue(pattern, 'cvThreshold');
+          return '${(value * 100).toStringAsFixed(1)}% 이하 변동';
+        case PatternType.reboundShot:
+          final value = _usecase.getCurrentThresholdValue(pattern, 'priceRangeMin');
+          return '${(value * 100).toStringAsFixed(1)}% 하락 반등';
+      }
+    } catch (e) {
+      if (AppConfig.enableTradeLog) {
+        log.w('⚠️ getThresholdDisplayText failed: $e');
+      }
+      return '설정 불러오기 실패';
     }
   }
 
   /// 🆕 시스템 상태 표시 텍스트
   String getSystemStatusText() {
+    if (!isSystemActive) return 'System: Inactive (All patterns disabled)';
     if (!state.hasOnlineMetrics) return 'Online metrics: Connecting...';
     
     final health = state.onlineMetricsHealth!;
@@ -523,7 +735,7 @@ class SignalController extends StateNotifier<SignalState> {
   }
 
   // ==========================================================================
-  // 🆕 V4.1 통계 및 분석
+  // 🆕 V4.1 통계 및 분석 (UseCase 직접 호출)
   // ==========================================================================
 
   /// 🆕 패턴별 성능 통계
@@ -582,20 +794,20 @@ class SignalController extends StateNotifier<SignalState> {
     return state.signalStats;
   }
 
-  /// 시그널 목록 적용 (정렬 등) - V4.1 개선
+  /// 시그널 목록 적용 (정렬 등)
   List<Signal> apply(List<Signal> signals) {
     return _applySorting(signals);
   }
 
-  /// 사용 가능한 패턴 목록 - V4.1 개선
+  /// 사용 가능한 패턴 목록
   List<String> get availablePatterns => 
       PatternType.values.map((p) => p.name).toList();
 
-  /// 패턴 표시명 목록 - V4.1 개선
+  /// 패턴 표시명 목록
   List<String> get patternDisplayNames => 
       PatternType.values.map((p) => p.displayName).toList();
 
-  /// 현재 패턴의 시간 윈도우 - V4.1 개선
+  /// 현재 패턴의 시간 윈도우
   int get currentTimeWindow => state.currentPattern.timeWindowMinutes;
 
   /// 🆕 V4.1 현재 패턴의 기본 신뢰도
@@ -605,20 +817,25 @@ class SignalController extends StateNotifier<SignalState> {
   int get currentPatternCooldownSeconds => state.currentPattern.defaultCooldownSeconds;
 
   // ==========================================================================
-  // 🆕 V4.1 설정 관리
+  // 🆕 V4.1 설정 관리 (UseCase 직접 호출)
   // ==========================================================================
 
   /// 🆕 현재 설정 내보내기
   Map<String, dynamic> exportConfiguration() {
-    final controller = _ref.read(signalPatternController);
-    return controller.exportConfiguration();
+    try {
+      return _usecase.exportCurrentConfiguration();
+    } catch (e) {
+      if (AppConfig.enableTradeLog) {
+        log.e('❌ Export configuration failed: $e');
+      }
+      return {'error': e.toString()};
+    }
   }
 
   /// 🆕 설정 가져오기
   void importConfiguration(Map<String, dynamic> config) {
     try {
-      final controller = _ref.read(signalPatternController);
-      controller.importConfiguration(config);
+      _usecase.importSignalConfiguration(config);
       
       // 현재 상태 새로고침
       final newThreshold = _usecase.getPatternThreshold(state.currentPattern);
@@ -659,22 +876,33 @@ class SignalController extends StateNotifier<SignalState> {
     _healthUpdateTimer?.cancel();
     
     if (AppConfig.enableTradeLog) {
-      log.i('🔥 Signal Controller V4.1 disposed');
+      log.i('🔥 Signal Controller V4.1 disposed - Clean Architecture');
     }
     
     super.dispose();
   }
 }
 
-/// Provider 선언 - V4.1
+/// Provider 선언 - V4.1 Clean Architecture
 final signalControllerProvider =
     StateNotifierProvider<SignalController, SignalState>((ref) {
   final usecase = ref.read(signalUsecaseProvider);
   return SignalController(usecase, ref);
 });
 
-/// 🆕 V4.1 확장 - 시스템 모니터링 Provider
+/// 🆕 V4.1 확장 - 시스템 모니터링 Provider (통합 스위치 연동)
 final signalSystemMonitorProvider = StreamProvider.autoDispose<Map<String, dynamic>>((ref) async* {
+  final isAnyActive = ref.watch(isAnyPatternActiveProvider);
+  if (!isAnyActive) {
+    yield {
+      'status': 'inactive',
+      'message': '시스템 모니터링이 비활성 상태입니다.',
+      'timestamp': DateTime.now().toIso8601String(),
+      'version': 'V4.1-Clean-Architecture-Inactive',
+    };
+    return;
+  }
+  
   final controller = ref.watch(signalControllerProvider.notifier);
   
   yield* Stream.periodic(const Duration(seconds: 15), (_) async {
@@ -687,7 +915,8 @@ final signalSystemMonitorProvider = StreamProvider.autoDispose<Map<String, dynam
       'performance': performance,
       'systemHealth': systemHealth,
       'signalStats': signalStats,
-      'version': 'V4.1-Online',
+      'version': 'V4.1-Clean-Architecture',
+      'isSystemActive': true,
     };
   }).asyncMap((event) => event);
 });

@@ -1,12 +1,12 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/di/surge_provider.dart';
-import '../../core/common/time_frame_manager.dart'; // 🔥 공통 TimeFrame 시스템 추가
-import '../../core/common/time_frame_types.dart';   // 🔥 공통 타입 추가
+import '../../core/common/time_frame_manager.dart'; // 🔥 간소화된 TimeFrame 시스템 사용
+import '../../core/common/time_frame_types.dart';   // 🔥 공통 타입 사용
 import '../../domain/entities/surge.dart';
 import '../../shared/utils/rank_tracker.dart';
 import '../../shared/utils/rank_hot_mixin.dart';
 
-/// 🎯 완전 수정된 SurgeController - 공통 TimeFrame 시스템 연동
+/// 🎯 간소화된 SurgeController - Trade 스타일
 class SurgeController extends StateNotifier<SurgeControllerState> with RankHotMixin {
   final Ref _ref;
   
@@ -190,15 +190,15 @@ class SurgeController extends StateNotifier<SurgeControllerState> with RankHotMi
     }
   }
 
-  /// 🔥 시간대 변경 - 공통 globalTimeFrameControllerProvider 사용
+  /// 🔥 시간대 변경 - Trade 스타일 (직접 Provider 조작)
   void setTimeFrame(TimeFrame timeFrame) {
-    _ref.read(globalTimeFrameControllerProvider).setSurgeTimeFrame(timeFrame);
+    _ref.read(surgeSelectedTimeFrameProvider.notifier).state = timeFrame;
     // 🎯 상태 초기화 제거 - 각 시간대가 독립적으로 유지됨
   }
 
   /// 🔥 시간대 변경 (인덱스 기반) - 호환성 유지
   void setTimeFrameByIndex(int index) {
-    final availableTimeFrames = TimeFrame.fromAppConfig();
+    final availableTimeFrames = this.availableTimeFrames;
     if (index >= 0 && index < availableTimeFrames.length) {
       setTimeFrame(availableTimeFrames[index]);
     }
@@ -256,38 +256,32 @@ class SurgeController extends StateNotifier<SurgeControllerState> with RankHotMi
     };
   }
 
-  /// 🔥 TimeFrame 관련 메서드들 - 공통 Provider 사용
+  /// 🔥 TimeFrame 관련 메서드들 - 간소화된 구조
   TimeFrame get currentTimeFrame => _ref.read(surgeSelectedTimeFrameProvider);
   
   int get currentIndex {
-    final controller = _ref.read(globalTimeFrameControllerProvider);
-    return controller.getSurgeTimeFrameIndex();
+    final availableTimeFrames = this.availableTimeFrames;
+    return availableTimeFrames.indexOf(currentTimeFrame);
   }
   
-  List<TimeFrame> get availableTimeFrames {
-    final controller = _ref.read(globalTimeFrameControllerProvider);
-    return controller.availableTimeFrames;
-  }
+  List<TimeFrame> get availableTimeFrames => TimeFrame.fromAppConfig();
 
-  String getTimeFrameName(TimeFrame timeFrame) {
-    final controller = _ref.read(globalTimeFrameControllerProvider);
-    return controller.getTimeFrameName(timeFrame);
-  }
+  String getTimeFrameName(TimeFrame timeFrame) => timeFrame.displayName;
 
-  /// 🔥 리셋 메서드들 - 공통 GlobalTimeFrameController 사용
+  /// 🔥 리셋 메서드들 - 간소화된 Manager 직접 사용
   void resetCurrentTimeFrame() {
     final currentTimeFrame = this.currentTimeFrame;
-    _ref.read(globalTimeFrameControllerProvider).resetTimeFrame(currentTimeFrame);
+    GlobalTimeFrameManager().resetTimeFrame(currentTimeFrame);
   }
 
   void resetAllTimeFrames() {
-    _ref.read(globalTimeFrameControllerProvider).resetAllTimeFrames();
+    GlobalTimeFrameManager().resetAll();
   }
 
-  /// 🔥 완벽한 타이머 동기화 - 공통 GlobalTimeFrameController 사용
+  /// 🔥 완벽한 타이머 동기화 - 간소화된 Manager 직접 사용
   DateTime? getNextResetTime() {
     final currentTimeFrame = this.currentTimeFrame;
-    return _ref.read(globalTimeFrameControllerProvider).getNextResetTime(currentTimeFrame);
+    return GlobalTimeFrameManager().getNextResetTime(currentTimeFrame);
   }
 
   /// ✅ 디버깅용 메서드들

@@ -1,11 +1,12 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/di/sector_provider.dart';
-import '../../core/common/time_frame_types.dart'; // 🔥 공통 타입 추가
+import '../../core/common/time_frame_manager.dart'; // 🔥 간소화된 TimeFrame 시스템 사용
+import '../../core/common/time_frame_types.dart';   // 🔥 공통 타입 사용
 import '../../domain/entities/volume.dart';
 import '../../shared/utils/rank_tracker.dart';
 import '../../shared/utils/rank_hot_mixin.dart';
 
-/// 🎯 완전 수정된 SectorController - 공통 TimeFrame 시스템 연동
+/// 🎯 간소화된 SectorController - Trade 스타일
 class SectorController extends StateNotifier<SectorControllerState> with RankHotMixin {
   final Ref _ref;
   
@@ -126,15 +127,15 @@ class SectorController extends StateNotifier<SectorControllerState> with RankHot
     _blinkStatesByTimeFrame[timeFrame]?.clear();
   }
 
-  /// 🔥 시간대 변경 - sectorTimeFrameController 사용 (기존 유지)
+  /// 🔥 시간대 변경 - Trade 스타일 (직접 Provider 조작)
   void setTimeFrame(TimeFrame timeFrame) {
-    _ref.read(sectorTimeFrameController).setTimeFrame(timeFrame);
+    _ref.read(selectedSectorTimeFrameProvider.notifier).state = timeFrame;
     // 🎯 상태 초기화 제거 - 각 시간대가 독립적으로 유지됨
   }
 
   /// 🔥 시간대 변경 (인덱스 기반) - 호환성 유지
   void setTimeFrameByIndex(int index) {
-    final availableTimeFrames = TimeFrame.fromAppConfig();
+    final availableTimeFrames = this.availableTimeFrames;
     if (index >= 0 && index < availableTimeFrames.length) {
       setTimeFrame(availableTimeFrames[index]);
     }
@@ -142,7 +143,7 @@ class SectorController extends StateNotifier<SectorControllerState> with RankHot
 
   /// 🚀 섹터 분류 토글 - 섹터만의 고유 기능
   void toggleSectorClassification() {
-    _ref.read(sectorTimeFrameController).toggleSectorClassification();
+    _ref.read(sectorClassificationProvider.notifier).toggleClassificationType();
   }
 
   /// ✅ HOT 상태 조회 (String key 사용 - Mixin 호환)
@@ -168,55 +169,59 @@ class SectorController extends StateNotifier<SectorControllerState> with RankHot
     }
   }
 
-  /// ✅ TimeFrame 관련 메서드들 - sectorTimeFrameController 사용 (기존 유지)
-  TimeFrame get currentTimeFrame => _ref.read(sectorTimeFrameController).currentTimeFrame;
+  /// 🔥 TimeFrame 관련 메서드들 - 간소화된 구조
+  TimeFrame get currentTimeFrame => _ref.read(selectedSectorTimeFrameProvider);
   
-  int get currentIndex => _ref.read(sectorTimeFrameController).currentIndex;
-  
-  List<TimeFrame> get availableTimeFrames => _ref.read(sectorTimeFrameController).availableTimeFrames;
-
-  String getTimeFrameName(TimeFrame timeFrame) {
-    return _ref.read(sectorTimeFrameController).getTimeFrameName(timeFrame);
+  int get currentIndex {
+    final availableTimeFrames = this.availableTimeFrames;
+    return availableTimeFrames.indexOf(currentTimeFrame);
   }
+  
+  List<TimeFrame> get availableTimeFrames => TimeFrame.fromAppConfig();
 
+  String getTimeFrameName(TimeFrame timeFrame) => timeFrame.displayName;
+
+  /// 🔥 리셋 메서드들 - 간소화된 Manager 직접 사용
   void resetCurrentTimeFrame() {
-    _ref.read(sectorTimeFrameController).resetCurrentTimeFrame();
+    final currentTimeFrame = this.currentTimeFrame;
+    GlobalTimeFrameManager().resetTimeFrame(currentTimeFrame);
   }
 
   void resetAllTimeFrames() {
-    _ref.read(sectorTimeFrameController).resetAllTimeFrames();
+    GlobalTimeFrameManager().resetAll();
   }
 
-  /// 🔥 완벽한 타이머 동기화 - sectorTimeFrameController 사용 (기존 유지)
+  /// 🔥 완벽한 타이머 동기화 - 간소화된 Manager 직접 사용
   DateTime? getNextResetTime() {
-    return _ref.read(sectorTimeFrameController).getNextResetTime();
+    final currentTimeFrame = this.currentTimeFrame;
+    return GlobalTimeFrameManager().getNextResetTime(currentTimeFrame);
   }
 
-  /// 🚀 섹터 고유 기능들 (기존 유지)
+  /// 🚀 섹터 고유 기능들 - 직접 Provider 접근
   String get currentSectorClassificationName {
-    return _ref.read(sectorTimeFrameController).currentSectorClassificationName;
+    return _ref.read(sectorClassificationProvider).currentClassificationName;
   }
 
   bool get isDetailedClassification {
-    return _ref.read(sectorTimeFrameController).isDetailedClassification;
+    return _ref.read(sectorClassificationProvider).isDetailedClassification;
   }
 
   int get totalSectors {
-    return _ref.read(sectorTimeFrameController).totalSectors;
+    return _ref.read(sectorClassificationProvider).currentSectors.length;
   }
 
   Map<String, int> getSectorSizes() {
-    return _ref.read(sectorTimeFrameController).getSectorSizes();
+    return _ref.read(sectorClassificationProvider).sectorSizes;
   }
 
   /// ✅ 특정 섹터의 코인들 조회
   List<String> getCoinsInSector(String sectorName) {
-    return _ref.read(sectorTimeFrameController).getCoinsInSector(sectorName);
+    return _ref.read(sectorClassificationProvider).getCoinsInSector(sectorName);
   }
 
   /// ✅ 특정 코인이 속한 섹터들 조회
   List<String> getSectorsForCoin(String ticker) {
-    return _ref.read(sectorTimeFrameController).getSectorsForCoin(ticker);
+    return _ref.read(sectorClassificationProvider).getSectorsForCoin(ticker);
   }
 
   /// ✅ 디버깅용 메서드들

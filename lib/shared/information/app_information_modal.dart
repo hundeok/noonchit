@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:package_info_plus/package_info_plus.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 class AppInformationModal {
   /// 앱 정보 모달 표시
@@ -162,6 +163,24 @@ class _AppInformationContentState extends State<_AppInformationContent> {
             title: '빌드 날짜',
             value: _getBuildDate(),
           ),
+          const SizedBox(height: 12),
+          
+          // 서비스 이용약관 카드
+          _buildLinkCard(
+            icon: Icons.description,
+            title: '서비스 이용약관',
+            emoji: '📄',
+            url: 'https://noonchit.com/terms',
+          ),
+          const SizedBox(height: 12),
+          
+          // 개인정보처리방침 카드
+          _buildLinkCard(
+            icon: Icons.privacy_tip,
+            title: '개인정보처리방침',
+            emoji: '🔒',
+            url: 'https://noonchit.com/privacy',
+          ),
         ],
       ),
     );
@@ -279,6 +298,54 @@ Widget _buildAppIcon() {
     );
   }
 
+  /// 링크 카드 위젯
+  Widget _buildLinkCard({
+    required IconData icon,
+    required String title,
+    required String emoji,
+    required String url,
+  }) {
+    return Card(
+      elevation: 1,
+      child: InkWell(
+        onTap: () => _openUrl(url),
+        borderRadius: BorderRadius.circular(8),
+        child: Padding(
+          padding: const EdgeInsets.all(12),
+          child: Row(
+            children: [
+              Icon(icon, color: Colors.orange, size: 20),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      title,
+                      style: const TextStyle(
+                        fontSize: 12,
+                        color: Colors.grey,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      emoji,
+                      style: const TextStyle(
+                        fontSize: 20,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   /// 푸터 (저작권 정보만)
   Widget _buildFooter(BuildContext context) {
     return Container(
@@ -303,5 +370,13 @@ Widget _buildAppIcon() {
         behavior: SnackBarBehavior.floating,
       ),
     );
+  }
+
+  /// URL 열기
+  Future<void> _openUrl(String url) async {
+    final Uri uri = Uri.parse(url);
+    if (await canLaunchUrl(uri)) {
+      await launchUrl(uri, mode: LaunchMode.externalApplication);
+    }
   }
 }

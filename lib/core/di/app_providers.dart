@@ -40,9 +40,7 @@ export '../common/time_frame_manager.dart'
         timeFrameResetStreamProvider,
         volumeSelectedTimeFrameProvider,
         surgeSelectedTimeFrameProvider,
-        commonProcessingConfigProvider,
-        globalTimeFrameControllerProvider,
-        GlobalTimeFrameController;
+        commonProcessingConfigProvider;
 
 export '../common/time_frame_types.dart'
     show
@@ -62,9 +60,7 @@ export 'volume_provider.dart'
         volumeTimeFrameControllersProvider,
         volumeStreamBinderProvider,
         volumeDataProvider,
-        currentVolumeListProvider,
-        volumeTimeFrameControllerProvider,
-        VolumeTimeFrameController;
+        currentVolumeListProvider;
 
 /// ▶ Surge DI & streams (공통 시스템 연동)
 export 'surge_provider.dart'
@@ -72,9 +68,7 @@ export 'surge_provider.dart'
         surgeTimeFrameControllersProvider,
         surgeStreamBinderProvider,
         surgeDataProvider,
-        currentSurgeListProvider,
-        surgeTimeFrameControllerProvider,
-        SurgeTimeFrameController;
+        currentSurgeListProvider;
 
 /// ▶ Sector DI & streams (기존 구조 유지)
 export 'sector_provider.dart'
@@ -82,9 +76,7 @@ export 'sector_provider.dart'
         sectorClassificationProvider,
         selectedSectorTimeFrameProvider,
         sectorVolumeDataProvider,
-        currentSectorVolumeListProvider,
-        sectorTimeFrameController,
-        SectorTimeFrameController;
+        currentSectorVolumeListProvider;
 
 /// ▶ Signal DI & streams (V4.1 Online)
 export 'signal_provider.dart'
@@ -92,27 +84,18 @@ export 'signal_provider.dart'
         // 🔥 V4.1 의존성 주입
         advancedMetricsProvider,
         patternConfigProvider,
-        patternDetectorProvider,
         signalRepoProvider,
         signalUsecaseProvider,
         // 🎯 상태 관리
         signalPatternIndexProvider,
         signalPatternTypeProvider,
-        signalThresholdProvider,
         signalPatternEnabledProvider,
         // 🔥 스트림 (온라인 지표 연동)
         signalListProvider,
         allSignalsProvider,
         // 🆕 V4.1 모니터링
         onlineMetricsHealthProvider,
-        systemPerformanceProvider,
-        // 🎮 V4.1 컨트롤러
-        signalPatternController,
-        SignalPatternControllerV4,
-        // 🛠️ StateNotifier
-        PatternConfigNotifier,
-        // 🔍 디버깅
-        debugSystemStatusProvider;
+        systemPerformanceProvider;
 
 /// ▶ Market Mood DI & streams
 export 'market_mood_provider.dart'

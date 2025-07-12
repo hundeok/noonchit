@@ -1,5 +1,3 @@
-// lib/shared/widgets/sector_classification.dart
-
 import 'package:flutter/foundation.dart';
 
 /// 섹터 분류 관리 전용 Provider (공유 위젯 레이어)
@@ -87,7 +85,7 @@ class SectorClassificationProvider extends ChangeNotifier {
    '월렛/메세징': ['SAFE', 'MASK', 'WCT', 'SNT'],
  };
 
- /// 기본 분류 (18개 섹터) - 🆕 신규상장 섹터 4개 추가
+ /// 기본 분류 (18개 섹터) - 🆕 신규상장 섹터 5개 추가
  static const Map<String, List<String>> _basicSectors = {
    '메이저 코인': [
      'BTC', 'ETH', 'XRP', 'ADA', 'SOL', 'DOT', 'AVAX', 'MATIC', 'POL', 'NEAR',
@@ -172,7 +170,7 @@ class SectorClassificationProvider extends ChangeNotifier {
      'POKT', 'STMX', 'BLAST'
    ],
 
-   // 🆕 신규상장 섹터 4개 추가
+   // 🆕 신규상장 섹터
    '2023년 신규상장': [
      'SHIB', 'MASK', 'EGLD', 'SUI', 'GRT', 'BLUR', 'IMX', 'SEI', 'MINA', 'CTC', 'ASTR'
    ],
@@ -186,7 +184,10 @@ class SectorClassificationProvider extends ChangeNotifier {
    '2025년 상반기 신규상장': [
      'SONIC', 'VTHO', 'ANIME', 'VIRTUAL', 'BERA', 'LAYER', 'TRUMP', 'JTO', 'COW', 'KAITO', 
      'ARKM', 'ORCA', 'WAL', 'COMP', 'FIL', 'WCT', 'DEEP', 'SIGN', 'TIA', 'PENGU', 
-     'NXPC', 'OM', 'SOPH', 'LPT', 'POKT', 'RVN', 'AXL', 'ALT', 'RAY', 'NEWT', 'SAHARA', 'MOODENG'
+     'NXPC', 'OM', 'SOPH', 'LPT', 'POKT', 'RVN', 'AXL', 'ALT', 'RAY', 'NEWT', 'SAHARA'
+   ],
+   '2025년 하반기 신규상장': [
+     'MOODENG', 'HYPER', 'BABY', 'ENA' 
    ],
  };
 

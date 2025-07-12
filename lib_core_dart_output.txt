@@ -1,160 +1,44 @@
 \n\n// ====== lib/core/di/trade_provider.dart ======\n
+import 'dart:async';
+import 'dart:collection';
+import 'dart:math' as math;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:rxdart/rxdart.dart';
 
 import '../config/app_config.dart';
-import '../services/hive_service.dart';          // 🎯 NEW
+import '../services/hive_service.dart';
 import '../network/api_client.dart';
 import '../utils/logger.dart';
+import '../common/time_frame_types.dart'; // 🔥 공통 타입 시스템 사용
 import 'app_providers.dart' show signalBusProvider;
-import 'websocket_provider.dart' show wsClientProvider; // 🆕 WebSocket import
+import 'websocket_provider.dart' show wsClientProvider;
 import '../../data/datasources/trade_cache_ds.dart';
 import '../../data/datasources/trade_remote_ds.dart';
 import '../../data/repositories/trade_repository_impl.dart';
 import '../../domain/entities/trade.dart';
 import '../../domain/usecases/trade_usecase.dart';
+import '../../data/processors/trade_aggregator.dart';
 
-/// 🆕 마켓 정보 클래스
-class MarketInfo {
-  final String market;      // KRW-BTC
-  final String koreanName;  // 비트코인
-  final String englishName; // Bitcoin
+// ══════════════════════════════════════════════════════════════════════════════
+// 🔥 타입 정의 제거 - 공통 time_frame_types.dart 사용
+// ══════════════════════════════════════════════════════════════════════════════
 
-  const MarketInfo({
-    required this.market,
-    required this.koreanName,
-    required this.englishName,
-  });
+// TradeFilter enum → time_frame_types.dart로 이관 ✅
+// TradeMode enum → time_frame_types.dart로 이관 ✅  
+// TradeConfig class → time_frame_types.dart로 이관 ✅
+// MarketInfo class → time_frame_types.dart로 이관 ✅
 
-  factory MarketInfo.fromJson(Map<String, dynamic> json) {
-    return MarketInfo(
-      market: json['market'] ?? '',
-      koreanName: json['korean_name'] ?? '',
-      englishName: json['english_name'] ?? '',
-    );
-  }
-}
+// ══════════════════════════════════════════════════════════════════════════════
+// 🏗️ Infrastructure Layer
+// ══════════════════════════════════════════════════════════════════════════════
 
-/// 0) REST API client
 final apiClientProvider = Provider<ApiClient>((ref) => ApiClient(
       apiKey: AppConfig.apiKey,
       apiSecret: AppConfig.apiSecret,
     ));
 
-/// 🎯 HiveService Provider (main.dart에서 override)
 final hiveServiceProvider = Provider<HiveService>((ref) {
   throw UnimplementedError('HiveService must be provided via main.dart override');
-});
-
-/// 🆕 마켓 정보 Provider (1시간 캐시 + market_warning 필터링)
-final marketInfoProvider = FutureProvider<Map<String, MarketInfo>>((ref) async {
-  final client = ref.read(apiClientProvider);
-  
-  try {
-    final result = await client.request<List<dynamic>>(
-      method: 'GET',
-      path: '${AppConfig.upbitRestBase}/market/all',
-      cacheDur: const Duration(hours: 1), // 1시간 캐시
-    );
-    
-    return result.when(
-      ok: (markets) {
-        final Map<String, MarketInfo> marketMap = {};
-        int filteredCount = 0;
-        
-        for (final market in markets) {
-          if (market is Map<String, dynamic>) {
-            // 🔒 market_warning 필터링 (업비트 백서 준수)
-            final warning = market['market_warning'] as String?;
-            if (warning == 'CAUTION') {
-              filteredCount++;
-              if (AppConfig.enableTradeLog) {
-                log.d('Filtered CAUTION market: ${market['market']}');
-              }
-              continue; // CAUTION 종목은 건너뛰기
-            }
-            
-            final info = MarketInfo.fromJson(market);
-            marketMap[info.market] = info;
-          }
-        }
-        
-        if (AppConfig.enableTradeLog) {
-          log.i('마켓 정보 로드됨: ${marketMap.length}개 (CAUTION 필터링: $filteredCount개)');
-        }
-        return marketMap;
-      },
-      err: (error) {
-        log.w('마켓 정보 로드 실패: $error');
-        return <String, MarketInfo>{};
-      },
-    );
-  } catch (e) {
-    log.e('마켓 정보 로드 중 오류: $e');
-    return <String, MarketInfo>{};
-  }
-});
-
-/// 1) KRW market list (top 199 by volume + essentials) + market_warning 필터링
-final marketsProvider = FutureProvider<List<String>>((ref) async {
-  final client = ref.read(apiClientProvider);
-
-  // fetch all markets (cache 5 minutes)
-  final marketResult = await client.request<List<dynamic>>(
-    method: 'GET',
-    path: '${AppConfig.upbitRestBase}/market/all',
-    cacheDur: const Duration(minutes: 5),
-  );
-  final allMarkets =
-      marketResult.when(ok: (v) => v, err: (_) => <dynamic>[]);
-
-  // 🔒 filter KRW markets + market_warning 필터링 (업비트 백서 준수)
-  final krwMarkets = <String>[];
-  int cautionCount = 0;
-  
-  for (final market in allMarkets.whereType<Map<String, dynamic>>()) {
-    final marketCode = market['market'] as String?;
-    if (marketCode != null && marketCode.startsWith('KRW-')) {
-      // CAUTION 종목은 WebSocket 구독에서 제외
-      final warning = market['market_warning'] as String?;
-      if (warning == 'CAUTION') {
-        cautionCount++;
-        continue;
-      }
-      krwMarkets.add(marketCode);
-    }
-  }
-  
-  if (AppConfig.enableTradeLog && cautionCount > 0) {
-    log.i('CAUTION 종목 $cautionCount개 제외됨 (WebSocket 구독 안전성)');
-  }
-
-  // pick top by 24h volume (or acc_trade_price when outside 9–10am)
-  final now = DateTime.now();
-  final isEarly = now.hour >= 9 && now.hour < 10;
-  final key = isEarly ? 'acc_trade_price_24h' : 'acc_trade_price';
-
-  // real-time ticker lookup (no cache)
-  final tickerResult = await client.request<List<dynamic>>(
-    method: 'GET',
-    path: '${AppConfig.upbitRestBase}/ticker',
-    query: {'markets': krwMarkets.join(',')},
-    cacheDur: null,
-  );
-  final tickers = tickerResult
-      .when(ok: (v) => v, err: (_) => <dynamic>[])  
-      .whereType<Map<String, dynamic>>()
-      .toList()
-    ..sort((a, b) =>
-        ((b[key] as num?) ?? 0).compareTo((a[key] as num?) ?? 0));
-
-  // ─── WS 구독 종목 슬라이싱 로직 (essentials 우선 + 중복 제거 후 상위 199개) ───
-  const essentials = ['KRW-BTC', 'KRW-ETH', 'KRW-XRP', 'KRW-SOL'];
-  final sortedMarkets = tickers.map((e) => e['market'] as String).toList();
-  final combined = [
-    ...essentials.where((market) => krwMarkets.contains(market)), // 🔒 essentials도 CAUTION 체크
-    ...sortedMarkets.where((m) => !essentials.contains(m)),
-  ];
-  return combined.take(199).toList();
 });
 
 final cacheDSProvider = Provider<TradeCacheDataSource>((ref) {
@@ -163,7 +47,7 @@ final cacheDSProvider = Provider<TradeCacheDataSource>((ref) {
 });
 
 final remoteDSProvider = Provider((ref) => TradeRemoteDataSource(
-      ref.read(wsClientProvider), // 🔄 websocket_provider에서 import
+      ref.read(wsClientProvider),
       ref.read(signalBusProvider),
       useTestData: AppConfig.useTestDataInDev,
     ));
@@ -175,76 +59,363 @@ final repoProvider = Provider((ref) => TradeRepositoryImpl(
 
 final usecaseProvider = Provider((ref) => TradeUsecase(ref.read(repoProvider)));
 
-/// 3) Filter state
+// ══════════════════════════════════════════════════════════════════════════════
+// 📊 Market Data Layer
+// ══════════════════════════════════════════════════════════════════════════════
+
+final marketInfoProvider = FutureProvider<Map<String, MarketInfo>>((ref) async {
+  final client = ref.read(apiClientProvider);
+  
+  try {
+    final result = await client.request<List<dynamic>>(
+      method: 'GET',
+      path: '${AppConfig.upbitRestBase}/market/all',
+      cacheDur: const Duration(hours: 1),
+    );
+    
+    return result.when(
+      ok: (markets) {
+        final Map<String, MarketInfo> marketMap = {};
+        
+        for (final market in markets) {
+          if (market is Map<String, dynamic>) {
+            final warning = market['market_warning'] as String?;
+            if (warning == 'CAUTION') {
+              continue;
+            }
+            
+            final info = MarketInfo.fromJson(market);
+            marketMap[info.market] = info;
+          }
+        }
+        
+        return marketMap;
+      },
+      err: (error) {
+        log.e('Market info failed: $error');
+        return <String, MarketInfo>{};
+      },
+    );
+  } catch (e, stackTrace) {
+    log.e('Market info error: $e', e, stackTrace);
+    return <String, MarketInfo>{};
+  }
+});
+
+final marketsProvider = FutureProvider<List<String>>((ref) async {
+  final client = ref.read(apiClientProvider);
+  final marketInfoMap = await ref.watch(marketInfoProvider.future);
+  
+  final krwMarkets = marketInfoMap.keys
+      .where((market) => market.startsWith('KRW-'))
+      .toList();
+
+  final now = DateTime.now();
+  final isEarly = now.hour >= 9 && now.hour < 10;
+  final key = isEarly ? 'acc_trade_price_24h' : 'acc_trade_price';
+
+  final tickerResult = await client.request<List<dynamic>>(
+    method: 'GET',
+    path: '${AppConfig.upbitRestBase}/ticker',
+    query: {'markets': krwMarkets.join(',')},
+    cacheDur: null,
+  );
+  
+  final tickers = tickerResult
+      .when(ok: (v) => v, err: (_) => <dynamic>[])  
+      .whereType<Map<String, dynamic>>()
+      .toList()
+    ..sort((a, b) =>
+        ((b[key] as num?) ?? 0).compareTo((a[key] as num?) ?? 0));
+
+  const essentials = ['KRW-BTC', 'KRW-ETH', 'KRW-XRP', 'KRW-SOL'];
+  final sortedMarkets = tickers.map((e) => e['market'] as String).toList();
+  final combined = [
+    ...essentials.where((market) => krwMarkets.contains(market)),
+    ...sortedMarkets.where((m) => !essentials.contains(m)),
+  ];
+  
+  return combined.take(199).toList();
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ⚙️ Settings Layer
+// ══════════════════════════════════════════════════════════════════════════════
+
 final tradeFilterIndexProvider = StateProvider<int>((_) => 0);
-final tradeFilterThresholdProvider = StateProvider<double>((ref) =>
-    AppConfig.tradeFilters.firstWhere(
-      (f) => f >= 20000000,
-      orElse: () => AppConfig.tradeFilters.last,
-    ));
 
-/// 4) Filtered trades stream
-final tradeListProvider = StreamProvider.autoDispose<List<Trade>>((ref) async* {
-  // Prevent immediate dispose on loss of listeners
-  ref.keepAlive();
+final tradeFilterThresholdProvider = StateProvider<TradeFilter>((ref) => TradeFilter.min20M);
 
-  // 현재 threshold 값과 markets를 읽어 스트림 구독
-  final threshold = ref.watch(tradeFilterThresholdProvider);
-  final markets = await ref.watch(marketsProvider.future);
-  final repository = ref.read(repoProvider);
+final tradeModeProvider = StateProvider<TradeMode>((ref) => TradeMode.accumulated);
 
-  // threshold 변경 시 Repository에도 업데이트
-  ref.listen<double>(tradeFilterThresholdProvider, (prev, next) {
-    if (prev != null && prev != next) {
-      if (AppConfig.enableTradeLog) {
-        log.i(
-          'Threshold changed: ${prev.toStringAsFixed(0)} → ${next.toStringAsFixed(0)}',
-        );
-      }
-      repository.updateThreshold(next);
+// ══════════════════════════════════════════════════════════════════════════════
+// 🎯 State Management Layer
+// ══════════════════════════════════════════════════════════════════════════════
+
+final tradeFilterCacheProvider = StateNotifierProvider<TradeFilterNotifier, Map<TradeFilter, List<Trade>>>((ref) {
+  return TradeFilterNotifier();
+});
+
+class TradeFilterNotifier extends StateNotifier<Map<TradeFilter, List<Trade>>> {
+  TradeFilterNotifier() : super({}) {
+    final initialState = <TradeFilter, List<Trade>>{};
+    for (final filter in TradeConfig.supportedFilters) {
+      initialState[filter] = <Trade>[];
     }
+    state = initialState;
+  }
+
+  void addTrade(Trade trade) {
+    final total = trade.total;
+    final newState = Map<TradeFilter, List<Trade>>.from(state);
+
+    for (final filter in TradeConfig.supportedFilters) {
+      if (total >= filter.value) {
+        final list = List<Trade>.from(newState[filter] ?? <Trade>[]);
+        list.add(trade);
+
+        if (list.length > TradeConfig.maxTradesPerFilter) {
+          list.removeAt(0);
+        }
+
+        newState[filter] = list;
+      } else {
+        break;
+      }
+    }
+
+    state = newState;
+  }
+
+  void clearAll() {
+    final newState = <TradeFilter, List<Trade>>{};
+    for (final filter in TradeConfig.supportedFilters) {
+      newState[filter] = <Trade>[];
+    }
+    state = newState;
+  }
+}
+
+final tradeSeenIdsProvider = StateNotifierProvider<TradeSeenIdsNotifier, Set<String>>((ref) {
+  return TradeSeenIdsNotifier();
+});
+
+class TradeSeenIdsNotifier extends StateNotifier<Set<String>> {
+  final LinkedHashSet<String> _orderedIds = LinkedHashSet<String>();
+
+  TradeSeenIdsNotifier() : super(<String>{});
+
+  bool addId(String id) {
+    if (_orderedIds.contains(id)) return false;
+
+    _orderedIds.add(id);
+
+    if (_orderedIds.length > TradeConfig.maxCacheSize) {
+      final removeCount = (_orderedIds.length / 4).ceil();
+      final oldestIds = _orderedIds.take(removeCount).toList();
+      
+      for (final oldId in oldestIds) {
+        _orderedIds.remove(oldId);
+      }
+    }
+
+    state = Set<String>.from(_orderedIds);
+    return true;
+  }
+
+  void clear() {
+    _orderedIds.clear();
+    state = <String>{};
+  }
+}
+
+final tradeAggregatorProvider = Provider<TradeAggregator>((ref) {
+  return TradeAggregator();
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 🔄 Master Stream Layer (Single WS Connection for All Modules)
+// ══════════════════════════════════════════════════════════════════════════════
+
+/// 🎯 Master Trade Stream - 모든 모듈이 공유하는 단일 데이터 소스
+final masterTradeStreamProvider = FutureProvider.autoDispose<Stream<Trade>>((ref) async {
+  final markets = await ref.watch(marketsProvider.future); // watch로 새 코인 자동 감지
+  final repo = ref.read(repoProvider);
+  
+  // 연결 유지 (백그라운드에서도 WS 끊어지지 않음)
+  ref.keepAlive();
+  
+  if (AppConfig.isDebugMode) {
+    // log.d('Master trade stream started (${markets.length} markets)');
+  }
+  
+  // 단일 WS 연결 + 브로드캐스트로 모든 모듈에서 재사용
+  return repo.watchTrades(markets)
+    .distinct((prev, next) => 
+      prev.sequentialId == next.sequentialId && 
+      prev.market == next.market)
+    .shareReplay(maxSize: 1); // 재연결 방지
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 🔄 Processing Layer (Master Stream 기반)
+// ══════════════════════════════════════════════════════════════════════════════
+
+final tradeProcessingTimerProvider = StreamProvider((ref) {
+  return Stream.periodic(AppConfig.globalResetInterval, (i) => i);
+});
+
+final rawTradeProcessingProvider = StreamProvider<Trade>((ref) async* {
+  final masterStream = await ref.read(masterTradeStreamProvider.future);
+  final aggregator = ref.read(tradeAggregatorProvider);
+  final seenIdsNotifier = ref.read(tradeSeenIdsProvider.notifier);
+  final filterCacheNotifier = ref.read(tradeFilterCacheProvider.notifier);
+
+  ref.listen(tradeProcessingTimerProvider, (previous, next) {
+    next.whenData((value) {
+      aggregator.flushTrades(onTradeProcessed: (processedTrade) {
+        final trade = Trade(
+          market: processedTrade['market'] as String,
+          price: processedTrade['price'] as double,
+          volume: processedTrade['volume'] as double,
+          side: (processedTrade['isBuy'] as bool) ? 'BID' : 'ASK',
+          changePrice: 0.0,
+          changeState: 'EVEN',
+          timestampMs: processedTrade['timestamp'] as int,
+          sequentialId: processedTrade['sequential_id'] as String,
+        );
+        filterCacheNotifier.addTrade(trade);
+      });
+    });
   });
 
-  // 실제 필터된 거래 스트림 방출
-  yield* repository.watchFilteredTrades(threshold, markets);
+  yield* masterStream.where((trade) {
+    final key = '${trade.market}/${trade.sequentialId}';
+    if (!seenIdsNotifier.addId(key)) return false;
+
+    aggregator.processTrade(
+      {
+        'market': trade.market,
+        'price': trade.price,
+        'volume': trade.volume,
+        'timestamp': trade.timestampMs,
+        'isBuy': trade.isBuy,
+        'sequential_id': trade.sequentialId,
+      },
+      onTradeProcessed: (processedTrade) {
+        final aggregatedTrade = Trade(
+          market: processedTrade['market'] as String,
+          price: processedTrade['price'] as double,
+          volume: processedTrade['volume'] as double,
+          side: (processedTrade['isBuy'] as bool) ? 'BID' : 'ASK',
+          changePrice: 0.0,
+          changeState: 'EVEN',
+          timestampMs: processedTrade['timestamp'] as int,
+          sequentialId: processedTrade['sequential_id'] as String,
+        );
+        filterCacheNotifier.addTrade(aggregatedTrade);
+      },
+    );
+
+    return true;
+  });
 });
 
-/// 5) Aggregated trades stream
-final aggregatedTradeProvider = StreamProvider.autoDispose<Trade>((ref) {
-  // Prevent dispose on background
-  ref.keepAlive();
-  final repository = ref.read(repoProvider);
-  return repository.watchAggregatedTrades();
+// ══════════════════════════════════════════════════════════════════════════════
+// 🔵 AsyncNotifier 기반 Public API Layer
+// ══════════════════════════════════════════════════════════════════════════════
+
+class TradeListNotifier extends AsyncNotifier<List<Trade>> {
+  @override
+  FutureOr<List<Trade>> build() async {
+    final initialTrades = _calculateTrades();
+    _setupStateListeners();
+    return initialTrades;
+  }
+
+  void _setupStateListeners() {
+    ref.listen(rawTradeProcessingProvider, (previous, next) {
+      next.when(
+        data: (trade) => {},
+        loading: () => {},
+        error: (error, stack) => log.e('Trade processing error: $error'),
+      );
+    });
+
+    ref.listen(tradeFilterCacheProvider, (previous, next) {
+      _updateTrades();
+    });
+
+    ref.listen<TradeFilter>(tradeFilterThresholdProvider, (prev, next) {
+      if (prev != null && prev != next) {
+        _updateTrades();
+      }
+    });
+
+    ref.listen<TradeMode>(tradeModeProvider, (prev, next) {
+      if (prev != null && prev != next) {
+        _updateTrades();
+      }
+    });
+  }
+
+  void _updateTrades() {
+    final newTrades = _calculateTrades();
+    state = AsyncValue.data(newTrades);
+  }
+
+  List<Trade> _calculateTrades() {
+    final filterThreshold = ref.read(tradeFilterThresholdProvider);
+    final tradeMode = ref.read(tradeModeProvider);
+    final usecase = ref.read(usecaseProvider);
+    final filterCache = ref.read(tradeFilterCacheProvider);
+    
+    return usecase.calculateFilteredTrades(
+      filterCache,
+      filterThreshold,
+      tradeMode.isRange,
+    );
+  }
+}
+
+final tradeListProvider = AsyncNotifierProvider<TradeListNotifier, List<Trade>>(() {
+  return TradeListNotifier();
 });
 
-/// 6) Helper to change threshold & index
+// ⭐ 불필요한 aggregatedTradeProvider 제거!
+// 기존: final aggregatedTradeProvider = StreamProvider<Trade>((ref) { ... });
+// 변경: rawTradeProcessingProvider를 직접 사용하세요!
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 🎛️ Controller Helper
+// ══════════════════════════════════════════════════════════════════════════════
+
 final tradeThresholdController = Provider((ref) => TradeThresholdController(ref));
 
 class TradeThresholdController {
   final Ref ref;
   TradeThresholdController(this.ref);
 
-  void updateThreshold(double threshold, int index) {
-    final options =
-        AppConfig.tradeFilters.where((f) => f >= 20000000).toList();
+  void updateThreshold(TradeFilter filter, int index) {
+    final options = TradeConfig.supportedFilters;
     if (index < 0 || index >= options.length) {
-      if (AppConfig.enableTradeLog) log.w('Invalid threshold index: $index');
       return;
     }
-    ref.read(tradeFilterThresholdProvider.notifier).state = threshold;
+    
+    ref.read(tradeFilterThresholdProvider.notifier).state = filter;
     ref.read(tradeFilterIndexProvider.notifier).state = index;
-    AppConfig.updateFilters(options);
-    if (AppConfig.enableTradeLog) {
-      log.i(
-        'Threshold updated: ${threshold.toStringAsFixed(0)} (index: $index)',
-      );
-    }
   }
 
-  double get currentThreshold => ref.read(tradeFilterThresholdProvider);
+  void updateMode(TradeMode mode) {
+    ref.read(tradeModeProvider.notifier).state = mode;
+  }
+
+  TradeFilter get currentFilter => ref.read(tradeFilterThresholdProvider);
+  TradeMode get currentMode => ref.read(tradeModeProvider);
   int get currentIndex => ref.read(tradeFilterIndexProvider);
-  List<double> get availableThresholds =>
-      AppConfig.tradeFilters.where((f) => f >= 20000000).toList();
+  List<TradeFilter> get availableFilters => TradeConfig.supportedFilters;
+  
+  bool get isRangeMode => currentMode.isRange;
 }\n\n// ====== lib/core/di/websocket_provider.dart ======\n
 // lib/core/di/websocket_provider.dart
 
@@ -261,7 +432,7 @@ class WebSocketStats {
   final DateTime? connectTime;
   final int reconnectCount;
   final int totalSessions;
-  final Duration cumulativeConnectTime;
+  final Duration _storedCumulativeTime;
   final int connectionAttempts;
   final DateTime? lastStateChangeTime;
   
@@ -269,10 +440,10 @@ class WebSocketStats {
     this.connectTime,
     this.reconnectCount = 0,
     this.totalSessions = 0,
-    this.cumulativeConnectTime = Duration.zero,
+    Duration cumulativeConnectTime = Duration.zero,
     this.connectionAttempts = 0,
     this.lastStateChangeTime,
-  });
+  }) : _storedCumulativeTime = cumulativeConnectTime;
 
   /// 연결 지속 시간 계산
   Duration? get uptime {
@@ -280,7 +451,19 @@ class WebSocketStats {
     return DateTime.now().difference(connectTime!);
   }
 
-  /// 평균 연결 지속 시간
+  /// 실시간 누적 연결 시간
+  Duration get cumulativeConnectTime {
+    Duration total = _storedCumulativeTime;
+    
+    // 현재 연결 중이면 현재 세션 시간도 포함
+    if (connectTime != null) {
+      total += DateTime.now().difference(connectTime!);
+    }
+    
+    return total;
+  }
+
+  /// 실시간 평균 연결 지속 시간
   Duration get averageSessionDuration {
     if (totalSessions == 0) return Duration.zero;
     return Duration(
@@ -384,7 +567,8 @@ final wsClientProvider = Provider<TradeWsClient>((ref) {
       }
     },
   );
-});\n\n// ====== lib/core/di/signal_provider.dart ======\n
+});\n\n// ====== lib/core/di/component_provider.dart ======\n
+\n\n// ====== lib/core/di/signal_provider.dart ======\n
 // lib/core/di/signal_provider.dart
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -945,93 +1129,141 @@ final signalRepositoryDisposeProvider = Provider.autoDispose<SignalRepository>((
   
   return repository;
 });\n\n// ====== lib/core/di/sector_provider.dart ======\n
-// lib/core/di/sector_provider.dart
-
+import 'dart:async';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+
 import '../config/app_config.dart';
 import '../utils/logger.dart';
-import 'volume_provider.dart' show volumeUsecaseProvider;
-import 'trade_provider.dart' show marketsProvider;
+import '../common/time_frame_manager.dart'; // 🔥 간소화된 TimeFrame 시스템 사용
+import '../common/time_frame_types.dart';   // 🔥 공통 타입 사용
+import 'volume_provider.dart';
 import '../../domain/entities/volume.dart';
 import '../../shared/widgets/sector_classification.dart';
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// 🆕 SECTOR 전용 Provider들 (SectorClassificationProvider 연동)
-// ═══════════════════════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════════
+// 📋 섹터 이벤트 클래스 (기존 유지)
+// ══════════════════════════════════════════════════════════════════════════════
 
-/// 🆕 섹터 분류 Provider (SectorClassificationProvider 연동)
+@immutable
+class SectorVolumeEvent {
+  final List<Volume> volumes;
+  final TimeFrame timeFrame;
+  final bool isReset;
+  final DateTime? resetTime;
+  final DateTime eventTime;
+
+  const SectorVolumeEvent({
+    required this.volumes,
+    required this.timeFrame,
+    this.isReset = false,
+    this.resetTime,
+    required this.eventTime,
+  });
+
+  factory SectorVolumeEvent.data({
+    required List<Volume> volumes,
+    required TimeFrame timeFrame,
+  }) {
+    return SectorVolumeEvent(
+      volumes: volumes,
+      timeFrame: timeFrame,
+      eventTime: DateTime.now(),
+    );
+  }
+
+  factory SectorVolumeEvent.reset({
+    required TimeFrame timeFrame,
+    DateTime? resetTime,
+  }) {
+    final now = resetTime ?? DateTime.now();
+    return SectorVolumeEvent(
+      volumes: const [],
+      timeFrame: timeFrame,
+      isReset: true,
+      resetTime: now,
+      eventTime: now,
+    );
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 🔧 기본 Provider들
+// ══════════════════════════════════════════════════════════════════════════════
+
+/// 섹터 분류 Provider (기존 유지)
 final sectorClassificationProvider = ChangeNotifierProvider<SectorClassificationProvider>(
   (ref) => SectorClassificationProvider(),
 );
 
-/// 🆕 섹터 시간대 상태 (볼륨과 독립적으로 관리)
-final sectorTimeFrameIndexProvider = StateProvider<int>((ref) => 0);
+/// 🔥 섹터 전용 시간대 Provider (Volume과 독립)
+final selectedSectorTimeFrameProvider = StateProvider<TimeFrame>((ref) => TimeFrame.min1);
 
-final sectorTimeFrameProvider = StateProvider<String>((ref) {
-  final index = ref.watch(sectorTimeFrameIndexProvider);
-  final timeFrames = AppConfig.timeFrames.map((tf) => '${tf}m').toList();
-  if (index >= 0 && index < timeFrames.length) {
-    return timeFrames[index];
-  }
-  return '1m';
-});
+// ══════════════════════════════════════════════════════════════════════════════
+// 🎯 메인 섹터 볼륨 Provider - 간소화된 시스템 연동
+// ══════════════════════════════════════════════════════════════════════════════
 
-/// 🆕 섹터별 거래대금 데이터 스트림 (SectorClassificationProvider 활용)
-final sectorVolumeDataProvider = StreamProvider.autoDispose<List<Volume>>((ref) async* {
+/// 섹터 볼륨 데이터 Provider (간소화된 TimeFrame 시스템 연동)
+final sectorVolumeDataProvider = StreamProvider<SectorVolumeEvent>((ref) async* {
   ref.keepAlive();
-
-  try {
-    final timeFrame = ref.watch(sectorTimeFrameProvider);
-    final usecase = ref.read(volumeUsecaseProvider);
-    
-    // markets AsyncValue 처리
-    final marketsAsync = ref.watch(marketsProvider);
-    final markets = marketsAsync.when(
-      data: (data) => data,
-      loading: () => <String>[],
-      error: (_, __) => <String>[],
-    );
-
-    if (markets.isEmpty) {
-      yield <Volume>[];
-      return;
-    }
-
+  
+  // 🔥 섹터 전용 시간대 Provider 사용 (Volume과 독립)
+  final selectedTimeFrame = ref.watch(selectedSectorTimeFrameProvider);
+  final sectorClassification = ref.watch(sectorClassificationProvider);
+  
+  // 🔥 간소화된 Volume 시간대별 컨트롤러에서 직접 받기
+  final controllers = ref.read(volumeTimeFrameControllersProvider);
+  final controller = controllers[selectedTimeFrame];
+  
+  if (controller == null) {
     if (AppConfig.enableTradeLog) {
-      log.i('Sector volume stream started: $timeFrame, ${markets.length} markets');
+      log.e('💥 Sector: Volume controller not found for $selectedTimeFrame');
     }
-
-    // 개별 코인 볼륨을 섹터별로 변환
-    yield* usecase.getVolumeRanking(timeFrame, markets).map((result) {
-      return result.when(
-        ok: (coinVolumes) {
-          // SectorClassificationProvider에서 현재 섹터 매핑 가져오기
-          final sectorProvider = ref.read(sectorClassificationProvider);
-          final sectorMapping = sectorProvider.currentSectors;
-          
-          final sectorVolumes = _aggregateVolumesBySector(coinVolumes, sectorMapping);
-          
-          if (AppConfig.enableTradeLog) {
-            log.d('Sector volumes aggregated: ${sectorVolumes.length} sectors from ${coinVolumes.length} coins');
-          }
-          
-          return sectorVolumes;
-        },
-        err: (error) {
-          log.e('Sector Volume error: ${error.message}');
-          return <Volume>[];
-        },
+    return;
+  }
+  
+  // Volume 스트림 바인더 활성화
+  await ref.read(volumeStreamBinderProvider);
+  
+  if (AppConfig.enableTradeLog) {
+    log.i('🔥 Sector stream started: $selectedTimeFrame');
+  }
+  
+  await for (final volumeEvent in controller.stream) {
+    if (volumeEvent.isReset) {
+      yield SectorVolumeEvent.reset(
+        timeFrame: volumeEvent.timeFrame,
+        resetTime: volumeEvent.resetTime,
       );
-    });
-    
-  } catch (e, stackTrace) {
-    log.e('Sector volume stream error: $e', e, stackTrace);
-    yield <Volume>[];
+    } else {
+      // 섹터별 집계
+      final sectorVolumes = _aggregateVolumesBySector(
+        volumeEvent.volumes,
+        sectorClassification.currentSectors,
+      );
+      
+      yield SectorVolumeEvent.data(
+        volumes: sectorVolumes,
+        timeFrame: volumeEvent.timeFrame,
+      );
+    }
   }
 });
 
-/// 🎯 핵심 로직: 개별 코인 볼륨을 섹터별로 합산
-List<Volume> _aggregateVolumesBySector(List<Volume> coinVolumes, Map<String, List<String>> sectorMapping) {
+/// 현재 섹터 볼륨 리스트 (기존 유지)
+final currentSectorVolumeListProvider = Provider<List<Volume>>((ref) {
+  final sectorEvent = ref.watch(sectorVolumeDataProvider).valueOrNull;
+  return sectorEvent?.volumes ?? [];
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 🔄 섹터별 집계 로직 (기존 유지)
+// ══════════════════════════════════════════════════════════════════════════════
+
+List<Volume> _aggregateVolumesBySector(
+  List<Volume> coinVolumes,
+  Map<String, List<String>> sectorMapping,
+) {
   if (coinVolumes.isEmpty) return [];
   
   final Map<String, double> sectorVolumeMap = {};
@@ -1040,20 +1272,20 @@ List<Volume> _aggregateVolumesBySector(List<Volume> coinVolumes, Map<String, Lis
   // 각 코인을 해당 섹터에 합산
   for (final coinVolume in coinVolumes) {
     final ticker = coinVolume.market.replaceFirst('KRW-', '');
-    final sectors = _findSectorsForCoin(ticker, sectorMapping);
     
-    for (final sector in sectors) {
-      sectorVolumeMap[sector] = (sectorVolumeMap[sector] ?? 0.0) + coinVolume.totalVolume;
-    }
+    sectorMapping.forEach((sectorName, coins) {
+      if (coins.contains(ticker)) {
+        sectorVolumeMap[sectorName] = 
+          (sectorVolumeMap[sectorName] ?? 0.0) + coinVolume.totalVolume;
+      }
+    });
   }
   
-  // 볼륨이 0인 섹터 제거
-  sectorVolumeMap.removeWhere((key, value) => value <= 0);
-  
-  // Volume 객체로 변환
+  // 볼륨이 0인 섹터 제거하고 Volume 객체로 변환
   final sectorVolumes = sectorVolumeMap.entries
+      .where((entry) => entry.value > 0)
       .map((entry) => Volume(
-            market: 'SECTOR-${entry.key}', // 섹터 구분용 prefix
+            market: 'SECTOR-${entry.key}',
             totalVolume: entry.value,
             lastUpdatedMs: sampleVolume.lastUpdatedMs,
             timeFrame: sampleVolume.timeFrame,
@@ -1061,133 +1293,10 @@ List<Volume> _aggregateVolumesBySector(List<Volume> coinVolumes, Map<String, Lis
           ))
       .toList();
   
-  // 볼륨 순 정렬 (높은 순)
+  // 볼륨 순 정렬
   sectorVolumes.sort((a, b) => b.totalVolume.compareTo(a.totalVolume));
+  
   return sectorVolumes;
-}
-
-/// 🎯 특정 코인이 속한 섹터들 찾기
-List<String> _findSectorsForCoin(String ticker, Map<String, List<String>> sectorMapping) {
-  final sectors = <String>[];
-  sectorMapping.forEach((sectorName, coins) {
-    if (coins.contains(ticker)) {
-      sectors.add(sectorName);
-    }
-  });
-  return sectors;
-}
-
-/// 🆕 섹터 컨트롤러
-final sectorTimeFrameController = Provider((ref) => SectorTimeFrameController(ref));
-
-class SectorTimeFrameController {
-  final Ref ref;
-  SectorTimeFrameController(this.ref);
-
-  /// 시간대 변경
-  void updateTimeFrame(String timeFrame, int index) {
-    final timeFrames = AppConfig.timeFrames.map((tf) => '${tf}m').toList();
-    if (index < 0 || index >= timeFrames.length) {
-      if (AppConfig.enableTradeLog) log.w('Invalid sector timeFrame index: $index');
-      return;
-    }
-    
-    ref.read(sectorTimeFrameProvider.notifier).state = timeFrame;
-    ref.read(sectorTimeFrameIndexProvider.notifier).state = index;
-    
-    if (AppConfig.enableTradeLog) {
-      log.i('Sector TimeFrame updated: $timeFrame (index: $index)');
-    }
-  }
-
-  /// 🆕 섹터 분류 토글 (SectorClassificationProvider 연동)
-  void toggleSectorClassification() {
-    ref.read(sectorClassificationProvider.notifier).toggleClassificationType();
-    
-    if (AppConfig.enableTradeLog) {
-      final currentName = ref.read(sectorClassificationProvider).currentClassificationName;
-      log.i('Sector classification toggled: $currentName');
-    }
-  }
-
-  /// 현재 시간대 정보
-  String get currentTimeFrame => ref.read(sectorTimeFrameProvider);
-  int get currentIndex => ref.read(sectorTimeFrameIndexProvider);
-  
-  /// 현재 섹터 분류 정보 (SectorClassificationProvider 연동)
-  bool get isDetailedClassification => ref.read(sectorClassificationProvider).isDetailedClassification;
-  String get currentSectorClassificationName => ref.read(sectorClassificationProvider).currentClassificationName;
-  int get totalSectors => ref.read(sectorClassificationProvider).currentSectors.length;
-  
-  /// 기본 정보
-  List<String> get availableTimeFrames => AppConfig.timeFrames.map((tf) => '${tf}m').toList();
-  
-  String getTimeFrameName(String timeFrame) {
-    final minutes = int.tryParse(timeFrame.replaceAll('m', ''));
-    return AppConfig.timeFrameNames[minutes] ?? timeFrame;
-  }
-
-  /// 🆕 섹터 관련 유틸리티 (SectorClassificationProvider 연동)
-  Map<String, int> getSectorSizes() {
-    return ref.read(sectorClassificationProvider).sectorSizes;
-  }
-
-  List<String> getCoinsInSector(String sectorName) {
-    return ref.read(sectorClassificationProvider).getCoinsInSector(sectorName);
-  }
-
-  List<String> getSectorsForCoin(String ticker) {
-    return ref.read(sectorClassificationProvider).getSectorsForCoin(ticker);
-  }
-
-  /// 수동 리셋 메서드들 (볼륨 UseCase 재사용)
-  void resetCurrentTimeFrame() {
-    final usecase = ref.read(volumeUsecaseProvider);
-    final timeFrame = ref.read(sectorTimeFrameProvider);
-    
-    final result = usecase.resetTimeFrame(timeFrame);
-    result.when(
-      ok: (_) {
-        if (AppConfig.enableTradeLog) {
-          log.i('Sector volume reset: $timeFrame');
-        }
-      },
-      err: (error) {
-        log.e('Sector volume reset failed: ${error.message}');
-      },
-    );
-  }
-
-  void resetAllTimeFrames() {
-    final usecase = ref.read(volumeUsecaseProvider);
-    
-    final result = usecase.resetAllTimeFrames();
-    result.when(
-      ok: (_) {
-        if (AppConfig.enableTradeLog) {
-          log.i('Sector volume reset: all timeframes');
-        }
-      },
-      err: (error) {
-        log.e('Sector volume reset all failed: ${error.message}');
-      },
-    );
-  }
-
-  /// 다음 리셋 시간 조회
-  DateTime? getNextResetTime() {
-    final usecase = ref.read(volumeUsecaseProvider);
-    final timeFrame = ref.read(sectorTimeFrameProvider);
-    
-    final result = usecase.getNextResetTime(timeFrame);
-    return result.when(
-      ok: (resetTime) => resetTime,
-      err: (error) {
-        log.e('Get sector reset time failed: ${error.message}');
-        return null;
-      },
-    );
-  }
 }\n\n// ====== lib/core/di/app_providers.dart ======\n
 // lib/core/di/app_providers.dart
 import 'package:flutter/material.dart';
@@ -1224,25 +1333,58 @@ export 'websocket_provider.dart'
 /// ▶ Trade DI & streams
 export 'trade_provider.dart';
 
-/// ▶ Volume DI & streams
+/// ▶ 🔥 공통 TimeFrame + Trade 타입 시스템
+export '../common/time_frame_manager.dart'
+    show
+        globalTimeFrameManagerProvider,
+        timeFrameResetStreamProvider,
+        volumeSelectedTimeFrameProvider,
+        surgeSelectedTimeFrameProvider,
+        commonProcessingConfigProvider,
+        globalTimeFrameControllerProvider,
+        GlobalTimeFrameController;
+
+export '../common/time_frame_types.dart'
+    show
+        TimeFrame,
+        TimeFrameResetEvent,
+        ProcessingConfig,
+        TradeFilter,
+        TradeMode,
+        TradeConfig,
+        MarketInfo;
+
+/// ▶ Volume DI & streams (공통 시스템 연동)
 export 'volume_provider.dart'
     show
-        volumeRemoteDSProvider,
         volumeRepositoryProvider,
         volumeUsecaseProvider,
-        volumeTimeFrameIndexProvider,
-        volumeTimeFrameProvider,
+        volumeTimeFrameControllersProvider,
+        volumeStreamBinderProvider,
         volumeDataProvider,
-        volumeTimeFrameController;
+        currentVolumeListProvider,
+        volumeTimeFrameControllerProvider,
+        VolumeTimeFrameController;
 
-/// ▶ Sector DI & streams
+/// ▶ Surge DI & streams (공통 시스템 연동)
+export 'surge_provider.dart'
+    show
+        surgeTimeFrameControllersProvider,
+        surgeStreamBinderProvider,
+        surgeDataProvider,
+        currentSurgeListProvider,
+        surgeTimeFrameControllerProvider,
+        SurgeTimeFrameController;
+
+/// ▶ Sector DI & streams (기존 구조 유지)
 export 'sector_provider.dart'
     show
         sectorClassificationProvider,
-        sectorTimeFrameIndexProvider,
-        sectorTimeFrameProvider,
+        selectedSectorTimeFrameProvider,
         sectorVolumeDataProvider,
-        sectorTimeFrameController;
+        currentSectorVolumeListProvider,
+        sectorTimeFrameController,
+        SectorTimeFrameController;
 
 /// ▶ Signal DI & streams (V4.1 Online)
 export 'signal_provider.dart'
@@ -1253,28 +1395,22 @@ export 'signal_provider.dart'
         patternDetectorProvider,
         signalRepoProvider,
         signalUsecaseProvider,
-        
         // 🎯 상태 관리
         signalPatternIndexProvider,
         signalPatternTypeProvider,
         signalThresholdProvider,
         signalPatternEnabledProvider,
-        
         // 🔥 스트림 (온라인 지표 연동)
         signalListProvider,
         allSignalsProvider,
-        
         // 🆕 V4.1 모니터링
         onlineMetricsHealthProvider,
         systemPerformanceProvider,
-        
         // 🎮 V4.1 컨트롤러
         signalPatternController,
         SignalPatternControllerV4,
-        
         // 🛠️ StateNotifier
         PatternConfigNotifier,
-        
         // 🔍 디버깅
         debugSystemStatusProvider;
 
@@ -1585,345 +1721,769 @@ class NotificationService {
     return ref.read(unreadNotificationCountProvider);
   }
 }\n\n// ====== lib/core/di/volume_provider.dart ======\n
-// lib/core/di/volume_provider.dart
-
+import 'dart:async';
+import 'dart:collection';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+
 import '../config/app_config.dart';
 import '../utils/logger.dart';
-import 'app_providers.dart' show signalBusProvider;
-import 'websocket_provider.dart' show wsClientProvider;
-import 'trade_provider.dart' show marketsProvider; // 🎯 마켓 리스트 재사용
-import '../../data/datasources/trade_remote_ds.dart';
-import '../../data/repositories/volume_repository_impl.dart';
+import '../common/time_frame_manager.dart'; // 🔥 간소화된 TimeFrame 시스템 사용
+import '../common/time_frame_types.dart';   // 🔥 공통 타입 사용
+import 'trade_provider.dart' show masterTradeStreamProvider, repoProvider;
+import '../../domain/entities/volume.dart';
+import '../../domain/entities/trade.dart';
+import '../../domain/usecases/volume_usecase.dart';
 import '../../domain/repositories/volume_repository.dart';
-import '../../domain/usecases/volume_usecase.dart'; // 🆕 UseCase import
-import '../../domain/entities/volume.dart'; // 🆕 Volume 엔티티 import 추가!
+import '../../data/repositories/volume_repository_impl.dart';
 
+// ══════════════════════════════════════════════════════════════════════════════
+// 💎 Volume Event Types (기존 유지)
+// ══════════════════════════════════════════════════════════════════════════════
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// 🆕 VOLUME 전용 Provider들 (브로드캐스트 스트림 기반)
-// ═══════════════════════════════════════════════════════════════════════════════
+/// 볼륨 이벤트 (완전히 개선된 설계)
+@immutable
+class VolumeEvent {
+  final List<Volume> volumes;
+  final TimeFrame timeFrame;
+  final bool isReset;
+  final DateTime? resetTime;
+  final DateTime eventTime;
 
-/// 🎯 볼륨 전용 RemoteDataSource (TradeRemoteDataSource와 동일한 인스턴스)
-final volumeRemoteDSProvider = Provider<TradeRemoteDataSource>((ref) {
- return TradeRemoteDataSource(
-   ref.read(wsClientProvider),
-   ref.read(signalBusProvider),
-   useTestData: AppConfig.useTestDataInDev,
- );
-});
+  const VolumeEvent({
+    required this.volumes,
+    required this.timeFrame,
+    this.isReset = false,
+    this.resetTime,
+    required this.eventTime,
+  });
 
-/// 🆕 VolumeRepository
-final volumeRepositoryProvider = Provider<VolumeRepository>((ref) {
- return VolumeRepositoryImpl(
-   ref.read(volumeRemoteDSProvider),
- );
-});
-
-/// 🆕 VolumeUsecase
-final volumeUsecaseProvider = Provider<VolumeUsecase>((ref) {
- return VolumeUsecase(
-   ref.read(volumeRepositoryProvider),
- );
-});
-
-/// 🆕 볼륨 시간대 상태 (기본값: 1분)
-final volumeTimeFrameIndexProvider = StateProvider<int>((_) => 0); // 1분이 기본 (0:1m, 1:5m, 2:15m)
-
-final volumeTimeFrameProvider = StateProvider<String>((ref) {
- final index = ref.watch(volumeTimeFrameIndexProvider);
- final timeFrames = AppConfig.timeFrames.map((tf) => '${tf}m').toList();
- if (index >= 0 && index < timeFrames.length) {
-   return timeFrames[index];
- }
- return '1m'; // fallback (기본값 1분)
-});
-
-/// 🚀 볼륨 데이터 스트림 (100ms 배치 업데이트)
-final volumeDataProvider = StreamProvider.autoDispose<List<Volume>>((ref) async* {
- // Prevent immediate dispose on loss of listeners
- ref.keepAlive();
-
- try {
-   // 현재 시간대와 markets를 읽어서 스트림 구독
-   final timeFrame = ref.watch(volumeTimeFrameProvider);
-   final markets = await ref.watch(marketsProvider.future);
-   final usecase = ref.read(volumeUsecaseProvider); // 🆕 UseCase 사용
-
-   if (AppConfig.enableTradeLog) {
-     log.i('Volume stream started: $timeFrame, ${markets.length} markets');
-   }
-
-   // 🚀 배치 처리된 볼륨 데이터 스트림 방출 (UseCase를 통해)
-   yield* usecase.getVolumeRanking(timeFrame, markets).map((result) {
-     return result.when(
-       ok: (volumes) => volumes,
-       err: (error) {
-         log.e('Volume UseCase error: ${error.message}');
-         return <Volume>[]; // 에러 시 빈 리스트
-       },
-     );
-   });
-   
- } catch (e, stackTrace) {
-   log.e('Volume stream error: $e', e, stackTrace);
-   
-   // 에러 시 빈 리스트 방출
-   yield <Volume>[];
- }
-});
-
-/// 🆕 볼륨 시간대 컨트롤러
-final volumeTimeFrameController = Provider((ref) => VolumeTimeFrameController(ref));
-
-class VolumeTimeFrameController {
- final Ref ref;
- VolumeTimeFrameController(this.ref);
-
- void updateTimeFrame(String timeFrame, int index) {
-   final timeFrames = AppConfig.timeFrames.map((tf) => '${tf}m').toList();
-   if (index < 0 || index >= timeFrames.length) {
-     if (AppConfig.enableTradeLog) log.w('Invalid timeFrame index: $index');
-     return;
-   }
-   
-   ref.read(volumeTimeFrameProvider.notifier).state = timeFrame;
-   ref.read(volumeTimeFrameIndexProvider.notifier).state = index;
-   
-   if (AppConfig.enableTradeLog) {
-     log.i('Volume TimeFrame updated: $timeFrame (index: $index)');
-   }
- }
-
- /// 수동 리셋 메서드들 (UseCase를 통해)
- void resetCurrentTimeFrame() {
-   final usecase = ref.read(volumeUsecaseProvider);
-   final timeFrame = ref.read(volumeTimeFrameProvider);
-   
-   final result = usecase.resetTimeFrame(timeFrame);
-   result.when(
-     ok: (_) {
-       if (AppConfig.enableTradeLog) {
-         log.i('Volume reset: $timeFrame');
-       }
-     },
-     err: (error) {
-       log.e('Volume reset failed: ${error.message}');
-     },
-   );
- }
-
- void resetAllTimeFrames() {
-   final usecase = ref.read(volumeUsecaseProvider);
-   
-   final result = usecase.resetAllTimeFrames();
-   result.when(
-     ok: (_) {
-       if (AppConfig.enableTradeLog) {
-         log.i('Volume reset: all timeframes');
-       }
-     },
-     err: (error) {
-       log.e('Volume reset all failed: ${error.message}');
-     },
-   );
- }
-
- /// 다음 리셋 시간 조회 (UseCase를 통해)
- DateTime? getNextResetTime() {
-   final usecase = ref.read(volumeUsecaseProvider);
-   final timeFrame = ref.read(volumeTimeFrameProvider);
-   
-   final result = usecase.getNextResetTime(timeFrame);
-   return result.when(
-     ok: (resetTime) => resetTime,
-     err: (error) {
-       log.e('Get reset time failed: ${error.message}');
-       return null;
-     },
-   );
- }
-
- /// Getters
- String get currentTimeFrame => ref.read(volumeTimeFrameProvider);
- int get currentIndex => ref.read(volumeTimeFrameIndexProvider);
- List<String> get availableTimeFrames => AppConfig.timeFrames.map((tf) => '${tf}m').toList();
- 
- /// 시간대 한국어 이름
- String getTimeFrameName(String timeFrame) {
-   final minutes = int.tryParse(timeFrame.replaceAll('m', ''));
-   return AppConfig.timeFrameNames[minutes] ?? timeFrame;
- }
-}\n\n// ====== lib/core/di/market_mood_provider copy.dart ======\n
-\n\n// ====== lib/core/di/surge_provider.dart ======\n
-// lib/core/di/surge_provider.dart
-import 'package:flutter_riverpod/flutter_riverpod.dart';
-import '../config/app_config.dart';
-import '../utils/logger.dart';
-import 'app_providers.dart' show signalBusProvider;
-import 'websocket_provider.dart' show wsClientProvider;
-import 'trade_provider.dart' show marketsProvider; // 🎯 마켓 리스트 재사용
-import '../../data/datasources/trade_remote_ds.dart';
-import '../../data/repositories/surge_repository_impl.dart';
-import '../../domain/repositories/surge_repository.dart';
-import '../../domain/usecases/surge_usecase.dart'; // 🆕 UseCase import
-import '../../domain/entities/surge.dart'; // 🆕 Surge 엔티티 import 추가!
-
-// ═══════════════════════════════════════════════════════════════════════════════
-// 🚀 SURGE 전용 Provider들 (브로드캐스트 스트림 기반)
-// ═══════════════════════════════════════════════════════════════════════════════
-
-/// 🎯 급등/급락 전용 RemoteDataSource (TradeRemoteDataSource와 동일한 인스턴스)
-final surgeRemoteDSProvider = Provider<TradeRemoteDataSource>((ref) {
-  return TradeRemoteDataSource(
-    ref.read(wsClientProvider),
-    ref.read(signalBusProvider),
-    useTestData: AppConfig.useTestDataInDev,
-  );
-});
-
-/// 🚀 SurgeRepository
-final surgeRepositoryProvider = Provider<SurgeRepository>((ref) {
-  return SurgeRepositoryImpl(
-    ref.read(surgeRemoteDSProvider),
-  );
-});
-
-/// 🚀 SurgeUsecase
-final surgeUsecaseProvider = Provider<SurgeUsecase>((ref) {
-  return SurgeUsecase(
-    ref.read(surgeRepositoryProvider),
-  );
-});
-
-/// 🚀 급등/급락 시간대 상태 (기본값: 1분)
-final surgeTimeFrameIndexProvider = StateProvider<int>((_) => 0); // 1분이 기본 (0:1m, 1:5m, 2:15m)
-
-final surgeTimeFrameProvider = StateProvider<String>((ref) {
-  final index = ref.watch(surgeTimeFrameIndexProvider);
-  final timeFrames = AppConfig.timeFrames.map((tf) => '${tf}m').toList();
-  if (index >= 0 && index < timeFrames.length) {
-    return timeFrames[index];
+  /// 일반 데이터 이벤트 생성
+  factory VolumeEvent.data({
+    required List<Volume> volumes,
+    required TimeFrame timeFrame,
+  }) {
+    return VolumeEvent(
+      volumes: volumes,
+      timeFrame: timeFrame,
+      isReset: false,
+      eventTime: DateTime.now(),
+    );
   }
-  return '1m'; // fallback (기본값 1분)
-});
 
-/// 🚀 급등/급락 데이터 스트림 (실시간 즉시 업데이트)
-final surgeDataProvider = StreamProvider.autoDispose<List<Surge>>((ref) async* {
-  // Prevent immediate dispose on loss of listeners
-  ref.keepAlive();
+  /// 리셋 이벤트 생성
+  factory VolumeEvent.reset({
+    required TimeFrame timeFrame,
+    DateTime? resetTime,
+  }) {
+    final now = resetTime ?? DateTime.now();
+    return VolumeEvent(
+      volumes: const [],
+      timeFrame: timeFrame,
+      isReset: true,
+      resetTime: now,
+      eventTime: now,
+    );
+  }
+}
 
-  try {
-    // 현재 시간대와 markets를 읽어서 스트림 구독
-    final timeFrame = ref.watch(surgeTimeFrameProvider);
-    final markets = await ref.watch(marketsProvider.future);
-    final usecase = ref.read(surgeUsecaseProvider); // 🚀 UseCase 사용
+/// 볼륨 데이터 (불변)
+@immutable
+class VolumeData {
+  final double totalVolume;
+  final DateTime lastUpdated;
 
-    if (AppConfig.enableTradeLog) {
-      log.i('Surge stream started: $timeFrame, ${markets.length} markets');
+  const VolumeData({
+    required this.totalVolume,
+    required this.lastUpdated,
+  });
+
+  factory VolumeData.initial() {
+    return VolumeData(
+      totalVolume: 0.0,
+      lastUpdated: DateTime.now(),
+    );
+  }
+
+  VolumeData addVolume(double volume) {
+    return VolumeData(
+      totalVolume: totalVolume + volume,
+      lastUpdated: DateTime.now(),
+    );
+  }
+
+  VolumeData reset() {
+    return VolumeData(
+      totalVolume: 0.0,
+      lastUpdated: DateTime.now(),
+    );
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 🧠 Core Logic: VolumeTransformer (간소화된 TimeFrame 연동)
+// ══════════════════════════════════════════════════════════════════════════════
+
+/// 완전히 순수한 함수형 변환기 + 간소화된 TimeFrame 연동
+class VolumeTransformer extends StreamTransformerBase<Trade, VolumeEvent> {
+  final TimeFrame timeFrame;
+  final ProcessingConfig config; // 🔥 공통 ProcessingConfig 사용
+  
+  // 최적화된 메모리 관리
+  LinkedHashSet<String> _seenIds = LinkedHashSet<String>();
+  final Map<String, VolumeData> _volumeData = <String, VolumeData>{};
+  
+  // 배치 처리를 위한 버퍼와 타이머
+  final List<Trade> _batchBuffer = [];
+  Timer? _batchTimer;
+  
+  // 🔥 워밍업 모드 - 초기 CPU 스파이크 완화
+  bool _warmupMode = true;
+  final DateTime _warmupStartTime = DateTime.now();
+
+  VolumeTransformer(
+    this.timeFrame, {
+    required this.config, // 🔥 공통 설정 주입
+  });
+
+  @override
+  Stream<VolumeEvent> bind(Stream<Trade> stream) {
+    late StreamController<VolumeEvent> controller;
+    StreamSubscription<Trade>? subscription;
+    StreamSubscription<TimeFrameResetEvent>? resetSubscription;
+    
+    // 🔥 배치 플러시 - 최적화된 처리
+    void flushBatch() {
+      if (_batchBuffer.isEmpty || controller.isClosed) return;
+      
+      // 버퍼에 쌓인 모든 거래를 한 번에 처리
+      for (final trade in _batchBuffer) {
+        _processTrade(trade);
+      }
+      _batchBuffer.clear();
+
+      // 모든 처리 후, 최종 결과물 이벤트를 한 번만 발생
+      final volumes = _calculateVolumes();
+      if (!controller.isClosed) {
+        controller.add(VolumeEvent.data(
+          volumes: volumes,
+          timeFrame: timeFrame,
+        ));
+      }
     }
 
-    // 🚀 실시간 급등/급락 데이터 스트림 방출 (UseCase를 통해)
-    yield* usecase.getSurgeRanking(timeFrame, markets).map((result) {
-      return result.when(
-        ok: (surges) => surges,
-        err: (error) {
-          log.e('Surge UseCase error: ${error.message}');
-          return <Surge>[]; // 에러 시 빈 리스트
-        },
-      );
+    // 🔥 적응형 배치 타이머 리셋 + 워밍업 모드
+    void resetBatchTimer() {
+      _batchTimer?.cancel();
+      
+      // 워밍업 모드: 300ms로 천천히, 정상 모드: 적응형 간격
+      final interval = _warmupMode
+        ? config.warmupBatchInterval  // 🔥 공통 설정 사용
+        : config.calculateBatchInterval(_batchBuffer.length);
+      
+      _batchTimer = Timer(interval, () {
+        // 3초 후 워밍업 모드 해제
+        if (_warmupMode && DateTime.now().difference(_warmupStartTime).inSeconds >= 3) {
+          _warmupMode = false;
+          if (AppConfig.enableTradeLog) {
+            // log.d('Volume warmup completed for ${timeFrame.displayName}');
+          }
+        }
+        
+        flushBatch();
+        resetBatchTimer();
+      });
+    }
+    
+    controller = StreamController<VolumeEvent>(
+      onListen: () {
+        // 🔥 간소화된 TimeFrame 리셋 이벤트 구독
+        resetSubscription = GlobalTimeFrameManager()
+            .getResetStream(timeFrame)
+            .listen((resetEvent) {
+          _resetData();
+          if (!controller.isClosed) {
+            controller.add(VolumeEvent.reset(
+              timeFrame: timeFrame,
+              resetTime: resetEvent.resetTime,
+            ));
+          }
+        });
+        
+        // 배치 타이머 시작
+        resetBatchTimer();
+
+        // 거래 데이터 구독
+        subscription = stream.listen(
+          (trade) {
+            // 즉시 처리하지 않고 버퍼에 추가만
+            _batchBuffer.add(trade);
+          },
+          onError: controller.addError,
+          onDone: () {
+            // 🔥 타이머 누수 방지
+            resetSubscription?.cancel();
+            _batchTimer?.cancel();
+            flushBatch(); // 마지막 배치 처리
+            controller.close();
+          },
+        );
+      },
+      onCancel: () {
+        // 모든 타이머와 구독 취소
+        resetSubscription?.cancel();
+        _batchTimer?.cancel();
+        subscription?.cancel();
+      },
+    );
+    
+    return controller.stream;
+  }
+
+  bool _processTrade(Trade trade) {
+    // 🔥 최적화된 중복 필터링 (LinkedHashSet + skip)
+    final key = '${trade.market}/${trade.sequentialId}';
+    if (_seenIds.contains(key)) return false;
+    
+    if (_seenIds.length >= config.maxCacheSize) {
+      // 🔥 GC 최적화: skip() 사용으로 임시 리스트 생성 제거
+      final removeCount = _seenIds.length ~/ 4;
+      _seenIds = LinkedHashSet<String>.from(_seenIds.skip(removeCount));
+    }
+    _seenIds.add(key);
+
+    // 볼륨 데이터 업데이트
+    final existing = _volumeData[trade.market];
+    if (existing != null) {
+      _volumeData[trade.market] = existing.addVolume(trade.total);
+    } else {
+      _volumeData[trade.market] = VolumeData.initial().addVolume(trade.total);
+    }
+
+    // 메모리 관리
+    if (_volumeData.length > config.maxMarketsPerTimeFrame) {
+      final sorted = _volumeData.entries.toList()
+        ..sort((a, b) => b.value.totalVolume.compareTo(a.value.totalVolume));
+      
+      _volumeData.clear();
+      _volumeData.addAll(Map.fromEntries(sorted.take(config.maxMarketsPerTimeFrame)));
+    }
+
+    return true;
+  }
+
+  void _resetData() {
+    for (final entry in _volumeData.entries) {
+      _volumeData[entry.key] = entry.value.reset();
+    }
+  }
+
+  List<Volume> _calculateVolumes() {
+    final now = DateTime.now();
+    final manager = GlobalTimeFrameManager();
+    final lastResetTime = manager.getLastResetTime(timeFrame) ?? now;
+    
+    final volumes = _volumeData.entries
+        .map((e) => Volume(
+              market: e.key,
+              totalVolume: e.value.totalVolume,
+              lastUpdatedMs: now.millisecondsSinceEpoch,
+              timeFrame: timeFrame.key,
+              timeFrameStartMs: lastResetTime.millisecondsSinceEpoch,
+            ))
+        .where((volume) => volume.totalVolume > 0)
+        .toList();
+
+    // 볼륨 내림차순 정렬
+    volumes.sort((a, b) => b.totalVolume.compareTo(a.totalVolume));
+    
+    return volumes;
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 🎯 Providers (간소화된 구조)
+// ══════════════════════════════════════════════════════════════════════════════
+
+/// 시간대별 StreamController 관리 (멀티스트림)
+final volumeTimeFrameControllersProvider = Provider<Map<TimeFrame, StreamController<VolumeEvent>>>((ref) {
+  final controllers = <TimeFrame, StreamController<VolumeEvent>>{};
+  final availableTimeFrames = TimeFrame.fromAppConfig();
+  
+  for (final timeFrame in availableTimeFrames) {
+    controllers[timeFrame] = StreamController<VolumeEvent>.broadcast();
+  }
+
+  ref.onDispose(() {
+    for (final controller in controllers.values) {
+      if (!controller.isClosed) {
+        controller.close();
+      }
+    }
+    controllers.clear();
+    
+    if (AppConfig.enableTradeLog) {
+      log.i('🛑 Volume TimeFrame controllers disposed');
+    }
+  });
+
+  return controllers;
+});
+
+/// 🔥 Master Stream 기반 팬-아웃 (간소화된 TimeFrame 연동)
+final volumeStreamBinderProvider = Provider((ref) async {
+  // ✅ Master Trade Stream 사용 (Trade와 동일한 WS 연결 공유)
+  final masterStream = await ref.read(masterTradeStreamProvider.future);
+  final controllers = ref.read(volumeTimeFrameControllersProvider);
+  final availableTimeFrames = TimeFrame.fromAppConfig();
+  final config = ref.read(commonProcessingConfigProvider); // 🔥 공통 설정 사용
+  
+  // 🔥 각 시간대별로 마스터 스트림을 팬-아웃
+  for (final timeFrame in availableTimeFrames) {
+    final controller = controllers[timeFrame];
+    if (controller != null) {
+      // 🔥 마스터 스트림 → 시간대별 독립 변환 → 각 컨트롤러로 전송
+      masterStream
+          .transform(VolumeTransformer(
+            timeFrame,
+            config: config, // 🔥 공통 설정 주입
+          ))
+          .listen(
+            controller.add,
+            onError: controller.addError,
+          );
+    }
+  }
+
+  if (AppConfig.enableTradeLog) {
+    log.i('🔥 Volume Fan-out stream binding completed: ${availableTimeFrames.length} timeframes');
+  }
+  
+  return controllers;
+});
+
+/// 메인 볼륨 데이터 스트림 (간소화된 Provider 사용)
+final volumeDataProvider = StreamProvider<VolumeEvent>((ref) async* {
+  ref.keepAlive();
+  
+  final selectedTimeFrame = ref.watch(volumeSelectedTimeFrameProvider); // 🔥 간소화된 Provider 사용
+  final controllers = ref.read(volumeTimeFrameControllersProvider);
+  
+  // 스트림 바인더 활성화
+  await ref.read(volumeStreamBinderProvider);
+  
+  final controller = controllers[selectedTimeFrame];
+  if (controller == null) {
+    log.e('💥 Volume Controller not found for $selectedTimeFrame');
+    return;
+  }
+
+  if (AppConfig.enableTradeLog) {
+    log.i('🔥 Volume stream started: $selectedTimeFrame');
+  }
+
+  yield* controller.stream;
+});
+
+/// 현재 시간대의 Volume 리스트 (UI용)
+final currentVolumeListProvider = Provider<List<Volume>>((ref) {
+  final volumeEvent = ref.watch(volumeDataProvider).valueOrNull;
+  return volumeEvent?.volumes ?? [];
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 🏗️ UseCase Layer (기존 유지)
+// ══════════════════════════════════════════════════════════════════════════════
+
+final volumeRepositoryProvider = Provider<VolumeRepository>((ref) {
+  return VolumeRepositoryImpl(ref.read(repoProvider));
+});
+
+final volumeUsecaseProvider = Provider<VolumeUsecase>((ref) {
+  return VolumeUsecase(ref.read(repoProvider));
+});\n\n// ====== lib/core/di/surge_provider.dart ======\n
+import 'dart:async';
+import 'dart:collection';
+import 'package:flutter/foundation.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+import '../config/app_config.dart';
+import '../utils/logger.dart';
+import '../common/time_frame_manager.dart'; // 🔥 간소화된 TimeFrame 시스템 사용
+import '../common/time_frame_types.dart';   // 🔥 공통 타입 사용
+import 'trade_provider.dart' show masterTradeStreamProvider;
+import '../../domain/entities/surge.dart';
+import '../../domain/entities/trade.dart';
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 💎 Surge Event Types (기존 유지)
+// ══════════════════════════════════════════════════════════════════════════════
+
+/// 급등/급락 이벤트 (완전히 개선된 설계)
+@immutable
+class SurgeEvent {
+  final List<Surge> surges;
+  final TimeFrame timeFrame;
+  final bool isReset;
+  final DateTime? resetTime;
+  final DateTime eventTime;
+
+  const SurgeEvent({
+    required this.surges,
+    required this.timeFrame,
+    this.isReset = false,
+    this.resetTime,
+    required this.eventTime,
+  });
+
+  /// 일반 데이터 이벤트 생성
+  factory SurgeEvent.data({
+    required List<Surge> surges,
+    required TimeFrame timeFrame,
+  }) {
+    return SurgeEvent(
+      surges: surges,
+      timeFrame: timeFrame,
+      isReset: false,
+      eventTime: DateTime.now(),
+    );
+  }
+
+  /// 리셋 이벤트 생성
+  factory SurgeEvent.reset({
+    required TimeFrame timeFrame,
+    DateTime? resetTime,
+  }) {
+    final now = resetTime ?? DateTime.now();
+    return SurgeEvent(
+      surges: const [],
+      timeFrame: timeFrame,
+      isReset: true,
+      resetTime: now,
+      eventTime: now,
+    );
+  }
+}
+
+/// 가격 데이터 (불변)
+@immutable
+class PriceData {
+  final double basePrice;
+  final double currentPrice;
+  final double changePercent;
+
+  const PriceData({
+    required this.basePrice,
+    required this.currentPrice,
+    required this.changePercent,
+  });
+
+  factory PriceData.initial(double price) {
+    return PriceData(
+      basePrice: price,
+      currentPrice: price,
+      changePercent: 0.0,
+    );
+  }
+
+  PriceData updatePrice(double newPrice) {
+    final percent = basePrice > 0
+        ? ((newPrice - basePrice) / basePrice) * 100
+        : 0.0;
+    return PriceData(
+      basePrice: basePrice,
+      currentPrice: newPrice,
+      changePercent: percent,
+    );
+  }
+
+  PriceData reset(double newPrice) {
+    return PriceData(
+      basePrice: newPrice,
+      currentPrice: newPrice,
+      changePercent: 0.0,
+    );
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 🧠 Core Logic: SurgeTransformer (간소화된 TimeFrame 연동)
+// ══════════════════════════════════════════════════════════════════════════════
+
+/// 완전히 순수한 함수형 변환기 + 간소화된 TimeFrame 연동
+class SurgeTransformer extends StreamTransformerBase<Trade, SurgeEvent> {
+  final TimeFrame timeFrame;
+  final ProcessingConfig config; // 🔥 공통 ProcessingConfig 사용
+  
+  // 최적화된 메모리 관리
+  LinkedHashSet<String> _seenIds = LinkedHashSet<String>();
+  final Map<String, PriceData> _priceData = <String, PriceData>{};
+  
+  // 배치 처리를 위한 버퍼와 타이머
+  final List<Trade> _batchBuffer = [];
+  Timer? _batchTimer;
+  
+  // 🔥 워밍업 모드 - 초기 CPU 스파이크 완화
+  bool _warmupMode = true;
+  final DateTime _warmupStartTime = DateTime.now();
+
+  SurgeTransformer(
+    this.timeFrame, {
+    required this.config, // 🔥 공통 설정 주입
+  });
+
+  @override
+  Stream<SurgeEvent> bind(Stream<Trade> stream) {
+    late StreamController<SurgeEvent> controller;
+    StreamSubscription<Trade>? subscription;
+    StreamSubscription<TimeFrameResetEvent>? resetSubscription;
+    
+    // 🔥 배치 플러시 - 최적화된 처리
+    void flushBatch() {
+      if (_batchBuffer.isEmpty || controller.isClosed) return;
+      
+      // 버퍼에 쌓인 모든 거래를 한 번에 처리
+      for (final trade in _batchBuffer) {
+        _processTrade(trade);
+      }
+      _batchBuffer.clear();
+
+      // 모든 처리 후, 최종 결과물 이벤트를 한 번만 발생
+      final surges = _calculateSurges();
+      if (!controller.isClosed) {
+        controller.add(SurgeEvent.data(
+          surges: surges,
+          timeFrame: timeFrame,
+        ));
+      }
+    }
+
+    // 🔥 적응형 배치 타이머 리셋 + 워밍업 모드
+    void resetBatchTimer() {
+      _batchTimer?.cancel();
+      
+      // 워밍업 모드: 300ms로 천천히, 정상 모드: 적응형 간격
+      final interval = _warmupMode
+        ? config.warmupBatchInterval  // 🔥 공통 설정 사용
+        : config.calculateBatchInterval(_batchBuffer.length);
+      
+      _batchTimer = Timer(interval, () {
+        // 3초 후 워밍업 모드 해제
+        if (_warmupMode && DateTime.now().difference(_warmupStartTime).inSeconds >= 3) {
+          _warmupMode = false;
+          if (AppConfig.enableTradeLog) {
+            // log.d('Surge warmup completed for ${timeFrame.displayName}');
+          }
+        }
+        
+        flushBatch();
+        resetBatchTimer();
+      });
+    }
+    
+    controller = StreamController<SurgeEvent>(
+      onListen: () {
+        // 🔥 간소화된 TimeFrame 리셋 이벤트 구독
+        resetSubscription = GlobalTimeFrameManager()
+            .getResetStream(timeFrame)
+            .listen((resetEvent) {
+          _resetData();
+          if (!controller.isClosed) {
+            controller.add(SurgeEvent.reset(
+              timeFrame: timeFrame,
+              resetTime: resetEvent.resetTime,
+            ));
+          }
+        });
+        
+        // 배치 타이머 시작
+        resetBatchTimer();
+
+        // 거래 데이터 구독
+        subscription = stream.listen(
+          (trade) {
+            // 즉시 처리하지 않고 버퍼에 추가만
+            _batchBuffer.add(trade);
+          },
+          onError: controller.addError,
+          onDone: () {
+            // 🔥 타이머 누수 방지
+            resetSubscription?.cancel();
+            _batchTimer?.cancel();
+            flushBatch(); // 마지막 배치 처리
+            controller.close();
+          },
+        );
+      },
+      onCancel: () {
+        // 모든 타이머와 구독 취소
+        resetSubscription?.cancel();
+        _batchTimer?.cancel();
+        subscription?.cancel();
+      },
+    );
+    
+    return controller.stream;
+  }
+
+  bool _processTrade(Trade trade) {
+    // 🔥 최적화된 중복 필터링 (LinkedHashSet + skip)
+    final key = '${trade.market}/${trade.sequentialId}';
+    if (_seenIds.contains(key)) return false;
+    
+    if (_seenIds.length >= config.maxCacheSize) {
+      // 🔥 GC 최적화: skip() 사용으로 임시 리스트 생성 제거
+      final removeCount = _seenIds.length ~/ 4;
+      _seenIds = LinkedHashSet<String>.from(_seenIds.skip(removeCount));
+    }
+    _seenIds.add(key);
+
+    // 가격 데이터 업데이트
+    final existing = _priceData[trade.market];
+    if (existing != null) {
+      _priceData[trade.market] = existing.updatePrice(trade.price);
+    } else {
+      _priceData[trade.market] = PriceData.initial(trade.price);
+    }
+
+    // 메모리 관리
+    if (_priceData.length > config.maxMarketsPerTimeFrame) {
+      final sorted = _priceData.entries.toList()
+        ..sort((a, b) => b.value.changePercent.abs().compareTo(a.value.changePercent.abs()));
+      
+      _priceData.clear();
+      _priceData.addAll(Map.fromEntries(sorted.take(config.maxMarketsPerTimeFrame)));
+    }
+
+    return true;
+  }
+
+  void _resetData() {
+    for (final entry in _priceData.entries) {
+      _priceData[entry.key] = entry.value.reset(entry.value.currentPrice);
+    }
+  }
+
+  List<Surge> _calculateSurges() {
+    final now = DateTime.now();
+    final manager = GlobalTimeFrameManager();
+    final lastResetTime = manager.getLastResetTime(timeFrame) ?? now;
+    
+    final surges = _priceData.entries
+        .map((e) => Surge(
+              market: e.key,
+              changePercent: e.value.changePercent,
+              basePrice: e.value.basePrice,
+              currentPrice: e.value.currentPrice,
+              lastUpdatedMs: now.millisecondsSinceEpoch,
+              timeFrame: timeFrame.key,
+              timeFrameStartMs: lastResetTime.millisecondsSinceEpoch,
+            ))
+        .where((surge) => surge.hasChange)
+        .toList();
+
+    // 완전한 정렬 로직: + 먼저, - 나중에 (절댓값 기준)
+    surges.sort((a, b) {
+      if (a.isRising && b.isFalling) return -1;
+      if (a.isFalling && b.isRising) return 1;
+      if (a.isRising && b.isRising) return b.changePercent.compareTo(a.changePercent);
+      if (a.isFalling && b.isFalling) return b.changePercent.compareTo(a.changePercent);
+      return 0;
     });
     
-  } catch (e, stackTrace) {
-    log.e('Surge stream error: $e', e, stackTrace);
-    
-    // 에러 시 빈 리스트 방출
-    yield <Surge>[];
+    return surges;
   }
-});
+}
 
-/// 🚀 급등/급락 시간대 컨트롤러
-final surgeTimeFrameController = Provider((ref) => SurgeTimeFrameController(ref));
+// ══════════════════════════════════════════════════════════════════════════════
+// 🎯 Providers (간소화된 구조)
+// ══════════════════════════════════════════════════════════════════════════════
 
-class SurgeTimeFrameController {
-  final Ref ref;
-  SurgeTimeFrameController(this.ref);
+/// 시간대별 StreamController 관리 (멀티스트림)
+final surgeTimeFrameControllersProvider = Provider<Map<TimeFrame, StreamController<SurgeEvent>>>((ref) {
+  final controllers = <TimeFrame, StreamController<SurgeEvent>>{};
+  final availableTimeFrames = TimeFrame.fromAppConfig();
+  
+  for (final timeFrame in availableTimeFrames) {
+    controllers[timeFrame] = StreamController<SurgeEvent>.broadcast();
+  }
 
-  void updateTimeFrame(String timeFrame, int index) {
-    final timeFrames = AppConfig.timeFrames.map((tf) => '${tf}m').toList();
-    if (index < 0 || index >= timeFrames.length) {
-      if (AppConfig.enableTradeLog) log.w('Invalid timeFrame index: $index');
-      return;
+  ref.onDispose(() {
+    for (final controller in controllers.values) {
+      if (!controller.isClosed) {
+        controller.close();
+      }
     }
-    
-    ref.read(surgeTimeFrameProvider.notifier).state = timeFrame;
-    ref.read(surgeTimeFrameIndexProvider.notifier).state = index;
+    controllers.clear();
     
     if (AppConfig.enableTradeLog) {
-      log.i('Surge TimeFrame updated: $timeFrame (index: $index)');
+      log.i('🛑 Surge TimeFrame controllers disposed');
+    }
+  });
+
+  return controllers;
+});
+
+/// 🔥 Master Stream 기반 팬-아웃 (간소화된 TimeFrame 연동)
+final surgeStreamBinderProvider = Provider((ref) async {
+  // ✅ Master Trade Stream 사용 (Trade/Volume과 동일한 WS 연결 공유)
+  final masterStream = await ref.read(masterTradeStreamProvider.future);
+  final controllers = ref.read(surgeTimeFrameControllersProvider);
+  final availableTimeFrames = TimeFrame.fromAppConfig();
+  final config = ref.read(commonProcessingConfigProvider); // 🔥 공통 설정 사용
+  
+  // 🔥 각 시간대별로 마스터 스트림을 팬-아웃
+  for (final timeFrame in availableTimeFrames) {
+    final controller = controllers[timeFrame];
+    if (controller != null) {
+      // 🔥 마스터 스트림 → 시간대별 독립 변환 → 각 컨트롤러로 전송
+      masterStream
+          .transform(SurgeTransformer(
+            timeFrame,
+            config: config, // 🔥 공통 설정 주입
+          ))
+          .listen(
+            controller.add,
+            onError: controller.addError,
+          );
     }
   }
 
-  /// 수동 리셋 메서드들 (UseCase를 통해)
-  void resetCurrentTimeFrame() {
-    final usecase = ref.read(surgeUsecaseProvider);
-    final timeFrame = ref.read(surgeTimeFrameProvider);
-    
-    final result = usecase.resetTimeFrame(timeFrame);
-    result.when(
-      ok: (_) {
-        if (AppConfig.enableTradeLog) {
-          log.i('Surge reset: $timeFrame');
-        }
-      },
-      err: (error) {
-        log.e('Surge reset failed: ${error.message}');
-      },
-    );
+  if (AppConfig.enableTradeLog) {
+    log.i('🔥 Surge Fan-out stream binding completed: ${availableTimeFrames.length} timeframes');
   }
-
-  void resetAllTimeFrames() {
-    final usecase = ref.read(surgeUsecaseProvider);
-    
-    final result = usecase.resetAllTimeFrames();
-    result.when(
-      ok: (_) {
-        if (AppConfig.enableTradeLog) {
-          log.i('Surge reset: all timeframes');
-        }
-      },
-      err: (error) {
-        log.e('Surge reset all failed: ${error.message}');
-      },
-    );
-  }
-
-  /// 다음 리셋 시간 조회 (UseCase를 통해)
-  DateTime? getNextResetTime() {
-    final usecase = ref.read(surgeUsecaseProvider);
-    final timeFrame = ref.read(surgeTimeFrameProvider);
-    
-    final result = usecase.getNextResetTime(timeFrame);
-    return result.when(
-      ok: (resetTime) => resetTime,
-      err: (error) {
-        log.e('Get reset time failed: ${error.message}');
-        return null;
-      },
-    );
-  }
-
-  /// Getters
-  String get currentTimeFrame => ref.read(surgeTimeFrameProvider);
-  int get currentIndex => ref.read(surgeTimeFrameIndexProvider);
-  List<String> get availableTimeFrames => AppConfig.timeFrames.map((tf) => '${tf}m').toList();
   
-  /// 시간대 한국어 이름
-  String getTimeFrameName(String timeFrame) {
-    final minutes = int.tryParse(timeFrame.replaceAll('m', ''));
-    return AppConfig.timeFrameNames[minutes] ?? timeFrame;
+  return controllers;
+});
+
+/// 메인 급등/급락 데이터 스트림 (간소화된 Provider 사용)
+final surgeDataProvider = StreamProvider<SurgeEvent>((ref) async* {
+  ref.keepAlive();
+  
+  final selectedTimeFrame = ref.watch(surgeSelectedTimeFrameProvider); // 🔥 간소화된 Provider 사용
+  final controllers = ref.read(surgeTimeFrameControllersProvider);
+  
+  // 스트림 바인더 활성화
+  await ref.read(surgeStreamBinderProvider);
+  
+  final controller = controllers[selectedTimeFrame];
+  if (controller == null) {
+    log.e('💥 Surge Controller not found for $selectedTimeFrame');
+    return;
   }
-}\n\n// ====== lib/core/di/market_mood_provider.dart ======\n
+
+  if (AppConfig.enableTradeLog) {
+    log.i('🔥 Surge stream started: $selectedTimeFrame');
+  }
+
+  yield* controller.stream;
+});
+
+/// 현재 시간대의 Surge 리스트 (UI용)
+final currentSurgeListProvider = Provider<List<Surge>>((ref) {
+  final surgeEvent = ref.watch(surgeDataProvider).valueOrNull;
+  return surgeEvent?.surges ?? [];
+});\n\n// ====== lib/core/di/market_mood_provider.dart ======\n
 // lib/core/di/market_mood_provider.dart
 // 🚀 Performance Optimized Provider - 메모이제이션, 배치처리, 선택적 무효화, 주기적 갱신 적용
 
@@ -1995,68 +2555,83 @@ final marketMoodProvider = StreamProvider<MarketMoodData>((ref) {
       .debounceTime(const Duration(milliseconds: 100));
 });
 
-/// 🚀 통합 계산 Provider - 주기적 갱신 및 포그라운드 복귀 시 자동 invalidate 적용
+/// 🚀 통합 계산 Provider - keepAlive 관리 개선
 final marketMoodComputedDataProvider = FutureProvider.autoDispose<MarketMoodComputedData>((ref) async {
   // 1) autoDispose 비활성화 링크 (keepAlive)
   final link = ref.keepAlive();
 
-  // 2) 15분마다 재계산
-  final timer = Timer.periodic(const Duration(minutes: 15), (_) {
+  // 2) 15분마다 재계산 (dispose 체크)
+  Timer? timer;
+  var isDisposed = false;
+  
+  timer = Timer.periodic(const Duration(minutes: 15), (_) {
+    if (isDisposed) {
+      timer?.cancel();
+      return;
+    }
     ref.invalidateSelf();
   });
 
   // 3) 앱 복귀 시 재계산
   ref.onResume(() {
-    ref.invalidateSelf();
+    if (!isDisposed) {
+      ref.invalidateSelf();
+    }
   });
 
-  // 4) 종료 시 정리
+  // 4) 종료 시 정리 (순서 중요!)
   ref.onDispose(() {
-    timer.cancel();
+    isDisposed = true;
+    timer?.cancel();
+    timer = null;
     link.close();
+    log.d('MarketMoodComputedData: 리소스 정리 완료');
   });
 
-  // 기존 로직
-  final moodAsync = ref.watch(marketMoodProvider);
-  final exchangeAsync = ref.watch(exchangeRateProvider);
-  final usecase = ref.read(marketMoodUsecaseProvider);
+  try {
+    // 기존 로직
+    final moodAsync = ref.watch(marketMoodProvider);
+    final exchangeAsync = ref.watch(exchangeRateProvider);
+    final usecase = ref.read(marketMoodUsecaseProvider);
 
-  return moodAsync.when(
-    data: (marketData) async {
-      final exchangeRate = exchangeAsync.asData?.value ?? 1400.0;
-      try {
-        final results = await Future.wait(
-          [
-            usecase.calculateCurrentMood(marketData.totalVolumeUsd),
-            usecase.calculateVolumeComparison(marketData.totalVolumeUsd),
-          ],
-          eagerError: false,
-        );
-        final currentMood = results[0] as MarketMood;
-        final volumeComparison = results[1] as ComparisonData;
-        final moodSummary = usecase.generateMoodSummary(currentMood);
+    return moodAsync.when(
+      data: (marketData) async {
+        final exchangeRate = exchangeAsync.asData?.value ?? 1400.0;
+        try {
+          final results = await Future.wait(
+            [
+              usecase.calculateCurrentMood(marketData.totalVolumeUsd),
+              usecase.calculateVolumeComparison(marketData.totalVolumeUsd),
+            ],
+            eagerError: false,
+          );
+          final currentMood = results[0] as MarketMood;
+          final volumeComparison = results[1] as ComparisonData;
+          final moodSummary = usecase.generateMoodSummary(currentMood);
 
-        return MarketMoodComputedData(
-          marketData: marketData,
-          currentMood: currentMood,
-          volumeComparison: volumeComparison,
-          moodSummary: moodSummary,
-          exchangeRate: exchangeRate,
-          computedAt: DateTime.now(),
-        );
-      } catch (e, st) {
-        // [수정됨] 이름 있는 파라미터(named parameter) 대신 위치 기반 파라미터(positional parameter) 사용
-        log.e('배치 계산 오류: $e', e, st);
+          return MarketMoodComputedData(
+            marketData: marketData,
+            currentMood: currentMood,
+            volumeComparison: volumeComparison,
+            moodSummary: moodSummary,
+            exchangeRate: exchangeRate,
+            computedAt: DateTime.now(),
+          );
+        } catch (e, st) {
+          log.e('배치 계산 오류: $e', e, st);
+          return MarketMoodComputedData.error();
+        }
+      },
+      loading: () async => MarketMoodComputedData.loading(),
+      error: (error, stack) async {
+        log.e('마켓무드 계산 오류: $error', error, stack);
         return MarketMoodComputedData.error();
-      }
-    },
-    loading: () async => MarketMoodComputedData.loading(),
-    error: (error, stack) async {
-      // [수정됨] 이름 있는 파라미터(named parameter) 대신 위치 기반 파라미터(positional parameter) 사용
-      log.e('마켓무드 계산 오류: $error', error, stack);
-      return MarketMoodComputedData.error();
-    },
-  );
+      },
+    );
+  } catch (e, st) {
+    log.e('MarketMoodComputedData Provider 오류: $e', e, st);
+    return MarketMoodComputedData.error();
+  }
 });
 
 /// 🎯 개별 데이터 접근 Provider들 - 메모이제이션된 결과에서 추출
@@ -2364,6 +2939,17 @@ class AppSettingsNotifier extends StateNotifier<AppSettings> {
     }
   }
 
+  /// 🔥 HOT 아이콘 설정 (블링크와 동일한 패턴)
+  Future<void> setHotEnabled(bool enabled) async {
+    try {
+      await _usecase.updateHotEnabled(enabled);
+      state = state.copyWith(hotEnabled: enabled);
+      log.i('🔥 HOT 아이콘: $enabled');
+    } catch (e, st) {
+      log.e('HOT 아이콘 설정 실패', e, st);
+    }
+  }
+
   /// 폰트 패밀리 변경
   Future<void> setFontFamily(FontFamily font) async {
     try {
@@ -2454,8 +3040,7 @@ class AppSettingsNotifier extends StateNotifier<AppSettings> {
   Future<void> refresh() async {
     await _loadSettings();
   }
-}\n\n// ====== lib/core/di/momentary_provider.dart ======\n
-\n\n// ====== lib/core/config/app_config.dart ======\n
+}\n\n// ====== lib/core/config/app_config.dart ======\n
 // lib/core/config/app_config.dart
 
 import 'dart:collection';
@@ -3181,11 +3766,37 @@ class BaseWsClient<T> {
     
     await _channel?.sink.close();
 
+    Timer? connectionTimer;
+    
     try {
       if (_symbols.length > AppConfig.wsMaxSubscriptionCount) {
         throw const WebSocketException('Subscribe limit exceeded');
       }
-      _channel = WebSocketChannel.connect(Uri.parse(url));
+      
+      // ✅ 핵심 수정: 타이머로 연결 타임아웃 구현
+      final completer = Completer<WebSocketChannel>();
+      
+      connectionTimer = Timer(const Duration(seconds: 15), () {
+        if (!completer.isCompleted) {
+          log.w('WebSocket connection timeout after 15s');
+          completer.completeError(
+            TimeoutException('WebSocket connection timeout', const Duration(seconds: 15))
+          );
+        }
+      });
+      
+      try {
+        final channel = WebSocketChannel.connect(Uri.parse(url));
+        completer.complete(channel);
+      } catch (e) {
+        if (!completer.isCompleted) {
+          completer.completeError(e);
+        }
+      }
+      
+      _channel = await completer.future;
+      connectionTimer.cancel();
+      
       _setupPing();
       _send(encodeSubscribe(_symbols));
 
@@ -3202,6 +3813,7 @@ class BaseWsClient<T> {
       _notify(WsStatus.connected);
       log.i('WS connected to $url (subscriptions: ${_symbols.length})');
     } catch (e, st) {
+      connectionTimer?.cancel();
       log.w('WS connect failed: $e', e, st);
       _backoffCalculator.recordFailure();
       _notify(WsStatus.failed);
@@ -3248,7 +3860,7 @@ class BaseWsClient<T> {
     _pongTimer?.cancel();
     _pingTimer =
         Timer.periodic(AppConfig.wsPingInterval, (_) {
-      _send(jsonEncode({'type': 'ping'}));
+     _send('PING');
       _pongTimer = Timer(AppConfig.wsPongTimeout, () {
         log.w('Pong timeout, reconnecting');
         _notify(WsStatus.pongTimeout);
@@ -4739,8 +5351,7 @@ final Logger log = Logger(
     printTime: true,     // 타임스탬프 포함
   ),
   level: AppConfig.logLevel, // 🔥 환경변수로 동적 조절 가능
-);\n\n// ====== lib/core/utils/pattern_detector copy.dart ======\n
-\n\n// ====== lib/core/utils/pattern_detector.dart ======\n
+);\n\n// ====== lib/core/utils/pattern_detector.dart ======\n
 import 'dart:math';
 import 'package:flutter/foundation.dart';
 import '../../domain/entities/signal.dart';
@@ -6021,7 +6632,8 @@ class DivergenceResult {
 typedef OnlineRSI = StreamAwareOnlineRSI;
 
 /// 온라인 MACD 계산기 (하위 호환성)
-typedef OnlineMACD = StreamAwareOnlineMACD;\n\n// ====== lib/core/utils/rolling_window.dart ======\n
+typedef OnlineMACD = StreamAwareOnlineMACD;\n\n// ====== lib/core/utils/cache_utils.dart ======\n
+\n\n// ====== lib/core/utils/rolling_window.dart ======\n
 import 'dart:collection';
 import 'dart:math' as math;
 
@@ -6324,7 +6936,9 @@ class RollingWindow<T extends num> {
     return 'RollingWindow(length: $length, span: ${span.inSeconds}s, '
            'mean: ${mean.toStringAsFixed(2)}, R²: ${rSquared.toStringAsFixed(3)})';
   }
-}\n\n// ====== lib/core/utils/streaming_market_buffer.dart ======\n
+}\n\n// ====== lib/core/utils/timeframe_utils.dart ======\n
+\n\n// ====== lib/core/utils/streaming_market_buffer.dart ======\n
+\n\n// ====== lib/core/utils/stream_utils.dart ======\n
 \n\n// ====== lib/core/utils/app_life_cycle_manager.dart ======\n
 // lib/core/utils/app_life_cycle_manager.dart
 import 'dart:async';
@@ -7232,7 +7846,405 @@ class Err<T, E extends AppException> extends Result<T, E> {
   final E error;
   const Err(this.error);
 }
-\n\n// ====== lib/core/error/app_exception.dart ======\n
+\n\n// ====== lib/core/common/time_frame_types.dart ======\n
+// lib/core/common/time_frame_types.dart
+import 'package:flutter/foundation.dart';
+import '../config/app_config.dart';
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 🕐 TimeFrame Types (기존)
+// ══════════════════════════════════════════════════════════════════════════════
+
+/// 시간대 Enum (완전한 타입 안전성)
+enum TimeFrame {
+  min1(1, '1분'),
+  min5(5, '5분'),
+  min15(15, '15분'),
+  min30(30, '30분'),
+  min60(60, '1시간'),
+  hour2(120, '2시간'),
+  hour4(240, '4시간'),
+  hour8(480, '8시간'),
+  hour12(720, '12시간'),
+  day1(1440, '1일');
+
+  const TimeFrame(this.minutes, this.displayName);
+  final int minutes;
+  final String displayName;
+  
+  Duration get duration => Duration(minutes: minutes);
+  String get key => '${minutes}m';
+  
+  /// AppConfig에서 TimeFrame 변환
+  static List<TimeFrame> fromAppConfig() {
+    return AppConfig.timeFrames.map((minutes) {
+      return TimeFrame.values.firstWhere(
+        (tf) => tf.minutes == minutes,
+        orElse: () => TimeFrame.min1,
+      );
+    }).toList();
+  }
+}
+
+/// 시간대 리셋 이벤트
+@immutable
+class TimeFrameResetEvent {
+  final TimeFrame timeFrame;
+  final DateTime resetTime;
+  final DateTime nextResetTime;
+
+  const TimeFrameResetEvent({
+    required this.timeFrame,
+    required this.resetTime,
+    required this.nextResetTime,
+  });
+
+  Duration get timeUntilNextReset => nextResetTime.difference(DateTime.now());
+  bool get isOverdue => DateTime.now().isAfter(nextResetTime);
+}
+
+/// 배치 처리 설정 (공통)
+@immutable
+class ProcessingConfig {
+  final int maxCacheSize;
+  final int maxMarketsPerTimeFrame;
+  final Duration minBatchInterval;
+  final Duration maxBatchInterval;
+  final Duration defaultBatchInterval;
+  final int highLoadThreshold;
+  final int lowLoadThreshold;
+
+  const ProcessingConfig({
+    this.maxCacheSize = 1000,
+    this.maxMarketsPerTimeFrame = 200,
+    this.minBatchInterval = const Duration(milliseconds: 50),
+    this.maxBatchInterval = const Duration(milliseconds: 200),
+    this.defaultBatchInterval = const Duration(milliseconds: 100),
+    this.highLoadThreshold = 50,
+    this.lowLoadThreshold = 10,
+  });
+
+  /// 적응형 배치 간격 계산
+  Duration calculateBatchInterval(int bufferSize) {
+    if (bufferSize > highLoadThreshold) return minBatchInterval;
+    if (bufferSize < lowLoadThreshold) return maxBatchInterval;
+    return defaultBatchInterval;
+  }
+
+  /// 워밍업 배치 간격
+  Duration get warmupBatchInterval => const Duration(milliseconds: 300);
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 💰 Trade Types (Trade Provider에서 이관)
+// ══════════════════════════════════════════════════════════════════════════════
+
+/// 거래 필터 Enum
+enum TradeFilter {
+  min20M(20000000, '2천만원'),
+  min50M(50000000, '5천만원'),
+  min100M(100000000, '1억원'),
+  min200M(200000000, '2억원'),
+  min300M(300000000, '3억원'),
+  min400M(400000000, '4억원'),
+  min500M(500000000, '5억원'),
+  min1B(1000000000, '10억원');
+  
+  const TradeFilter(this.value, this.displayName);
+  final double value;
+  final String displayName;
+  
+  static TradeFilter fromValue(double value) {
+    return values.firstWhere(
+      (filter) => filter.value == value,
+      orElse: () => TradeFilter.min20M,
+    );
+  }
+  
+  static List<TradeFilter> get available => values;
+}
+
+/// 거래 모드 Enum
+enum TradeMode {
+  accumulated('누적'),
+  range('구간');
+  
+  const TradeMode(this.displayName);
+  final String displayName;
+  
+  bool get isRange => this == TradeMode.range;
+  bool get isAccumulated => this == TradeMode.accumulated;
+}
+
+/// 거래 설정
+class TradeConfig {
+  static const int maxTradesPerFilter = 200;
+  static const int maxCacheSize = 250;
+  static const Duration batchInterval = Duration(milliseconds: 100);
+  
+  static List<TradeFilter> get supportedFilters => TradeFilter.available;
+}
+
+/// 마켓 정보 클래스
+@immutable
+class MarketInfo {
+  final String market;
+  final String koreanName;
+  final String englishName;
+
+  const MarketInfo({
+    required this.market,
+    required this.koreanName,
+    required this.englishName,
+  });
+
+  factory MarketInfo.fromJson(Map<String, dynamic> json) {
+    return MarketInfo(
+      market: json['market'] ?? '',
+      koreanName: json['korean_name'] ?? '',
+      englishName: json['english_name'] ?? '',
+    );
+  }
+}\n\n// ====== lib/core/common/time_frame_manager.dart ======\n
+// lib/core/common/time_frame_manager.dart
+
+import 'dart:async';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+import '../config/app_config.dart';
+import '../utils/logger.dart';
+import 'time_frame_types.dart';
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 🕐 Simplified Global TimeFrame Manager (타이머 전용)
+// ══════════════════════════════════════════════════════════════════════════════
+
+/// 글로벌 시간대 타이머 관리자 (싱글톤 패턴)
+/// 🎯 역할: 시간대별 자동 리셋 타이머만 담당
+/// ❌ UI 상태 관리는 각 모듈 Controller에서 처리
+class GlobalTimeFrameManager {
+  static final GlobalTimeFrameManager _instance = GlobalTimeFrameManager._internal();
+  factory GlobalTimeFrameManager() => _instance;
+  GlobalTimeFrameManager._internal();
+
+  // 각 TimeFrame별 타이머와 스트림 컨트롤러
+  final Map<TimeFrame, Timer> _timers = {};
+  final Map<TimeFrame, StreamController<TimeFrameResetEvent>> _controllers = {};
+  final Map<TimeFrame, DateTime> _lastResetTimes = {};
+
+  /// 🎯 특정 TimeFrame의 리셋 이벤트 스트림 구독
+  /// 각 모듈의 Transformer에서 호출
+  Stream<TimeFrameResetEvent> getResetStream(TimeFrame timeFrame) {
+    // 이미 존재하면 기존 스트림 반환
+    if (_controllers.containsKey(timeFrame)) {
+      return _controllers[timeFrame]!.stream;
+    }
+
+    // 새로운 스트림 컨트롤러 생성
+    final controller = StreamController<TimeFrameResetEvent>.broadcast();
+    _controllers[timeFrame] = controller;
+
+    // 초기 리셋 시간 설정
+    final now = DateTime.now();
+    _lastResetTimes[timeFrame] = now;
+
+    // 타이머 시작
+    _startTimer(timeFrame);
+
+    if (AppConfig.enableTradeLog) {
+      log.i('🕐 Timer started for ${timeFrame.displayName}');
+    }
+
+    return controller.stream;
+  }
+
+  /// 🎯 TimeFrame용 타이머 시작
+  void _startTimer(TimeFrame timeFrame) {
+    _scheduleNextReset(timeFrame);
+  }
+
+  /// 🎯 다음 리셋 스케줄링 (상대시간 기반)
+  void _scheduleNextReset(TimeFrame timeFrame) {
+    final now = DateTime.now();
+    final lastReset = _lastResetTimes[timeFrame] ?? now;
+    final nextReset = lastReset.add(timeFrame.duration);
+    final delay = nextReset.difference(now);
+
+    if (delay.isNegative) {
+      // 이미 지난 시간이면 즉시 리셋
+      _triggerReset(timeFrame);
+      _scheduleNextReset(timeFrame);
+    } else {
+      // 다음 리셋까지 대기
+      _timers[timeFrame] = Timer(delay, () {
+        _triggerReset(timeFrame);
+        _scheduleNextReset(timeFrame);
+      });
+    }
+  }
+
+  /// 🎯 리셋 이벤트 발생
+  void _triggerReset(TimeFrame timeFrame) {
+    final now = DateTime.now();
+    _lastResetTimes[timeFrame] = now;
+
+    final controller = _controllers[timeFrame];
+    if (controller != null && !controller.isClosed) {
+      final resetEvent = TimeFrameResetEvent(
+        timeFrame: timeFrame,
+        resetTime: now,
+        nextResetTime: now.add(timeFrame.duration),
+      );
+      controller.add(resetEvent);
+
+      if (AppConfig.enableTradeLog) {
+        log.i('🔄 Reset triggered: ${timeFrame.displayName}');
+      }
+    }
+  }
+
+  /// 🎯 수동 리셋 (모든 TimeFrame)
+  /// 각 모듈 Controller에서 호출 가능
+  void resetAll() {
+    final now = DateTime.now();
+    
+    for (final timeFrame in _controllers.keys) {
+      _lastResetTimes[timeFrame] = now;
+      final controller = _controllers[timeFrame];
+      
+      if (controller != null && !controller.isClosed) {
+        final resetEvent = TimeFrameResetEvent(
+          timeFrame: timeFrame,
+          resetTime: now,
+          nextResetTime: now.add(timeFrame.duration),
+        );
+        controller.add(resetEvent);
+      }
+    }
+
+    if (AppConfig.enableTradeLog) {
+      log.i('🔄 Manual reset: all timeframes');
+    }
+  }
+
+  /// 🎯 특정 TimeFrame 수동 리셋
+  /// 각 모듈 Controller에서 호출 가능
+  void resetTimeFrame(TimeFrame timeFrame) {
+    final now = DateTime.now();
+    _lastResetTimes[timeFrame] = now;
+
+    final controller = _controllers[timeFrame];
+    if (controller != null && !controller.isClosed) {
+      final resetEvent = TimeFrameResetEvent(
+        timeFrame: timeFrame,
+        resetTime: now,
+        nextResetTime: now.add(timeFrame.duration),
+      );
+      controller.add(resetEvent);
+
+      if (AppConfig.enableTradeLog) {
+        log.i('🔄 Manual reset: ${timeFrame.displayName}');
+      }
+    }
+  }
+
+  /// 🎯 다음 리셋 시간 조회
+  /// UI 카운트다운에서 사용
+  DateTime? getNextResetTime(TimeFrame timeFrame) {
+    final lastReset = _lastResetTimes[timeFrame];
+    if (lastReset == null) return null;
+    
+    return lastReset.add(timeFrame.duration);
+  }
+
+  /// 🎯 마지막 리셋 시간 조회
+  /// Transformer에서 시작 시간 계산용
+  DateTime? getLastResetTime(TimeFrame timeFrame) {
+    return _lastResetTimes[timeFrame];
+  }
+
+  /// 🎯 현재 활성 TimeFrame 목록 (디버그용)
+  List<TimeFrame> get activeTimeFrames => _controllers.keys.toList();
+
+  /// 🎯 디버그 정보
+  Map<String, dynamic> get debugInfo => {
+    'activeTimeFrames': activeTimeFrames.map((tf) => tf.displayName).toList(),
+    'activeTimers': _timers.length,
+    'lastResetTimes': _lastResetTimes.map(
+      (tf, time) => MapEntry(tf.displayName, time.toIso8601String()),
+    ),
+  };
+
+  /// 🎯 리소스 정리
+  void dispose() {
+    // 모든 타이머 정리
+    for (final timer in _timers.values) {
+      timer.cancel();
+    }
+    _timers.clear();
+
+    // 모든 스트림 컨트롤러 정리
+    for (final controller in _controllers.values) {
+      if (!controller.isClosed) {
+        controller.close();
+      }
+    }
+    _controllers.clear();
+    _lastResetTimes.clear();
+
+    if (AppConfig.enableTradeLog) {
+      log.i('🛑 TimeFrame Manager disposed');
+    }
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 🎯 Provider (타이머 관리용)
+// ══════════════════════════════════════════════════════════════════════════════
+
+/// 글로벌 TimeFrame 타이머 관리자 Provider
+final globalTimeFrameManagerProvider = Provider<GlobalTimeFrameManager>((ref) {
+  final manager = GlobalTimeFrameManager();
+  
+  ref.onDispose(() {
+    manager.dispose();
+  });
+  
+  return manager;
+});
+
+/// TimeFrame별 리셋 이벤트 스트림 Provider
+/// Transformer에서 사용
+final timeFrameResetStreamProvider = StreamProvider.family<TimeFrameResetEvent, TimeFrame>((ref, timeFrame) {
+  final manager = ref.read(globalTimeFrameManagerProvider);
+  return manager.getResetStream(timeFrame);
+});
+
+/// 공통 처리 설정 Provider
+final commonProcessingConfigProvider = Provider<ProcessingConfig>((ref) {
+  return const ProcessingConfig(
+    // 프로덕션 최적화 설정
+    maxCacheSize: 1000,
+    maxMarketsPerTimeFrame: 200,
+    minBatchInterval: Duration(milliseconds: 50),
+    maxBatchInterval: Duration(milliseconds: 200),
+    defaultBatchInterval: Duration(milliseconds: 100),
+    highLoadThreshold: 50,
+    lowLoadThreshold: 10,
+  );
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 🎯 각 모듈별 TimeFrame State Providers (UI 상태 관리)
+// ══════════════════════════════════════════════════════════════════════════════
+
+/// Volume 선택된 TimeFrame Provider
+/// VolumeController에서 직접 관리
+final volumeSelectedTimeFrameProvider = StateProvider<TimeFrame>((ref) => TimeFrame.min1);
+
+/// Surge 선택된 TimeFrame Provider  
+/// SurgeController에서 직접 관리
+final surgeSelectedTimeFrameProvider = StateProvider<TimeFrame>((ref) => TimeFrame.min1);\n\n// ====== lib/core/error/app_exception.dart ======\n
 // lib/core/error/app_exception.dart
 
 import 'package:dio/dio.dart';

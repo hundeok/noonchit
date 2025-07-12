@@ -11,8 +11,9 @@ import '../../domain/entities/app_settings.dart';
 import '../../domain/entities/signal.dart';
 import '../controllers/signal_controller.dart';
 import '../widgets/signal_tile.dart';
+import '../../shared/widgets/signal_widget.dart';  // 🆕 정교한 모달 위젯 import
 
-/// 🚀 Signal Page V4.1 - 온라인 지표 연동
+/// 🚀 Signal Page V4.1 - 온라인 지표 연동 + Family Provider
 class SignalPage extends ConsumerWidget {
   final ScrollController scrollController;
 
@@ -23,12 +24,24 @@ class SignalPage extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    // 🔽🔽🔽 백그라운드 워밍업: 활성화된 모든 패턴의 스트림을 미리 구독 🔽🔽🔽
+    for (final pattern in PatternType.values) {
+      if (ref.watch(signalPatternEnabledProvider(pattern))) {
+        // 백그라운드에서 해당 패턴의 독립적인 스트림을 미리 구독하여 '워밍업' 상태로 둔다.
+        // 이렇게 하면 사용자가 슬라이더를 해당 패턴으로 옮겼을 때 데이터를 즉시 볼 수 있다.
+        ref.watch(signalsByPatternProvider(pattern));
+      }
+    }
+
     // V4.1 Controller 기반 시스템
     final controller = ref.watch(signalControllerProvider.notifier);
     final state = ref.watch(signalControllerProvider);
 
-    // 시그널 스트림 (V4.1 온라인 지표 연동)
-    final signalsAsync = ref.watch(signalListProvider);
+    // 🔽🔽🔽 새로운 Family Provider 사용 🔽🔽🔽
+    // 1. 현재 선택된 패턴 타입을 가져옵니다.
+    final currentPattern = ref.watch(signalPatternTypeProvider);
+    // 2. 해당 패턴에 대한 독립적인 스트림 프로바이더를 구독합니다.
+    final signalsAsync = ref.watch(signalsByPatternProvider(currentPattern));
 
     // markets 정보
     final marketsAsync = ref.watch(marketsProvider);
@@ -69,6 +82,7 @@ class SignalPage extends ConsumerWidget {
       state,
       context,
       ref,
+      currentPattern, // 현재 패턴 정보 추가
     );
 
     return PrimaryScrollController(
@@ -182,20 +196,45 @@ class SignalPage extends ConsumerWidget {
           const SizedBox(height: 8),
 
           // 🎯 두 번째 줄: 임계값 + 신뢰도 정보
-          Row(
-            children: [
-              Text(
-                '임계값: ${controller.getThresholdDisplayText()}',
-                style: const TextStyle(fontSize: 12, color: Colors.grey),
+        Row(
+          children: [
+            // 🔧 임계값을 탭 가능하게 수정 (정교한 모달 호출)
+            GestureDetector(
+              onTap: () {
+                // 🆕 햅틱 피드백 추가
+                if (ref.read(appSettingsProvider).isHapticEnabled) {
+                  HapticFeedback.lightImpact();
+                }
+                _showThresholdModal(context, controller, state.currentPattern);
+              },
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                decoration: BoxDecoration(
+                  borderRadius: BorderRadius.circular(6),
+                  border: Border.all(color: Colors.grey.withValues(alpha: 0.3)),
+                  color: Colors.grey.withValues(alpha: 0.05),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.tune, size: 12, color: Colors.grey[600]),
+                    const SizedBox(width: 4),
+                    Text(
+                      '임계값: ${controller.getThresholdDisplayText()}',
+                      style: const TextStyle(fontSize: 12, color: Colors.grey),
+                    ),
+                  ],
+                ),
               ),
-              const Spacer(),
-              // 🆕 V4.1 신뢰도 정보
-              Text(
-                controller.getConfidenceStatusText(),
-                style: const TextStyle(fontSize: 10, color: Colors.grey),
-              ),
-            ],
-          ),
+            ),
+            const Spacer(),
+            // 🆕 V4.1 신뢰도 정보
+            Text(
+              controller.getConfidenceStatusText(),
+              style: const TextStyle(fontSize: 10, color: Colors.grey),
+            ),
+          ],
+        ),
 
           const SizedBox(height: 8),
 
@@ -224,7 +263,7 @@ class SignalPage extends ConsumerWidget {
               ),
 
               // 🆕 V4.1 정렬 버튼
-              _buildSortButton(state, controller),
+              _buildSortButton(state, controller, ref),
             ],
           ),
 
@@ -244,7 +283,7 @@ class SignalPage extends ConsumerWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
       decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(8),
+        borderRadius: BorderRadius.circular(6),
         color: color.withValues(alpha: 0.1),
         border: Border.all(color: color.withValues(alpha: 0.3), width: 0.5),
       ),
@@ -274,7 +313,7 @@ class SignalPage extends ConsumerWidget {
       child: Container(
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
         decoration: BoxDecoration(
-          borderRadius: BorderRadius.circular(12),
+          borderRadius: BorderRadius.circular(6),
           border: Border.all(
             color: Colors.orange,
             width: 1.5,
@@ -294,7 +333,7 @@ class SignalPage extends ConsumerWidget {
   }
 
   /// 🆕 V4.1 정렬 버튼
-  Widget _buildSortButton(SignalState state, SignalController controller) {
+  Widget _buildSortButton(SignalState state, SignalController controller, WidgetRef ref) {
     return PopupMenuButton<String>(
       icon: Icon(
         Icons.sort,
@@ -369,24 +408,25 @@ class SignalPage extends ConsumerWidget {
     SignalState state,
     BuildContext context,
     WidgetRef ref,
+    PatternType currentPattern, // 현재 패턴 정보 추가
   ) {
     return signalsAsync.when(
       data: (list) {
         final viewList = controller.apply(list);
 
         if (viewList.isEmpty) {
-          return _buildEmptyState(state, context, controller);
+          return _buildEmptyState(state, context, controller, currentPattern, ref);
         }
 
         return _buildSignalListView(viewList, scrollController, state, ref);
       },
-      loading: () => _buildLoadingState(context),
-      error: (e, _) => _buildErrorState(e, context, ref),
+      loading: () => _buildLoadingState(context, currentPattern),
+      error: (e, _) => _buildErrorState(e, context, ref, currentPattern),
     );
   }
 
   /// 🆕 V4.1 빈 상태 (온라인 지표 정보 포함)
-  Widget _buildEmptyState(SignalState state, BuildContext context, SignalController controller) {
+  Widget _buildEmptyState(SignalState state, BuildContext context, SignalController controller, PatternType currentPattern, WidgetRef ref) {
     return Center(
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
@@ -399,8 +439,8 @@ class SignalPage extends ConsumerWidget {
           const SizedBox(height: 16),
           Text(
             state.isPatternEnabled
-                ? '${state.currentPattern.displayName} 패턴이 감지되지 않았습니다.'
-                : '패턴 감지가 비활성화되어 있습니다.',
+                ? '${currentPattern.displayName} 패턴이 감지되지 않았습니다.'
+                : '${currentPattern.displayName} 패턴 감지가 비활성화되어 있습니다.',
             textAlign: TextAlign.center,
             style: TextStyle(
                 color: Theme.of(context).hintColor, fontSize: 16),
@@ -426,34 +466,125 @@ class SignalPage extends ConsumerWidget {
               ),
             ),
           ],
-          // 🆕 V4.1 빠른 액션 버튼들
+          // 🆕 V4.1 빠른 액션 버튼들 - 세로 정렬 + 토글 스타일
           const SizedBox(height: 24),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.center,
+          Column(
             children: [
-              // 온라인 지표 리셋 버튼
-              ElevatedButton.icon(
-                onPressed: () => controller.resetOnlineMetrics(),
-                icon: const Icon(Icons.refresh, size: 16),
-                label: const Text('지표 리셋'),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.blue,
-                  foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                  textStyle: const TextStyle(fontSize: 12),
+              // 임계값 조정 (1순위)
+              Container(
+                width: 120,
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                decoration: BoxDecoration(
+                  color: Colors.orange.withValues(alpha: 0.1),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(
+                    color: Colors.orange,
+                    width: 1.5,
+                  ),
+                ),
+                child: GestureDetector(
+                  onTap: () {
+                    if (ref.read(appSettingsProvider).isHapticEnabled) {
+                      HapticFeedback.lightImpact();
+                    }
+                    _showThresholdModal(context, controller, currentPattern);
+                  },
+                  child: const Row(
+                    mainAxisSize: MainAxisSize.min,
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(Icons.settings, size: 12, color: Colors.orange),
+                      SizedBox(width: 4),
+                      Text(
+                        '임계값조정',
+                        style: TextStyle(
+                          color: Colors.orange,
+                          fontSize: 10,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
               ),
-              const SizedBox(width: 12),
-              // 프리셋 적용 버튼
-              ElevatedButton.icon(
-                onPressed: () => _showPresetDialog(context, controller),
-                icon: const Icon(Icons.tune, size: 16),
-                label: const Text('프리셋'),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.green,
-                  foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                  textStyle: const TextStyle(fontSize: 12),
+              
+              const SizedBox(height: 8),
+              
+              // 프리셋 (2순위)
+              Container(
+                width: 120,
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                decoration: BoxDecoration(
+                  color: Colors.green.withValues(alpha: 0.1),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(
+                    color: Colors.green,
+                    width: 1.5,
+                  ),
+                ),
+                child: GestureDetector(
+                  onTap: () {
+                    if (ref.read(appSettingsProvider).isHapticEnabled) {
+                      HapticFeedback.lightImpact();
+                    }
+                    _showPresetDialog(context, controller);
+                  },
+                  child: const Row(
+                    mainAxisSize: MainAxisSize.min,
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(Icons.tune, size: 12, color: Colors.green),
+                      SizedBox(width: 4),
+                      Text(
+                        '프리셋',
+                        style: TextStyle(
+                          color: Colors.green,
+                          fontSize: 10,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              
+              const SizedBox(height: 8),
+              
+              // 지표 리셋 (3순위)
+              Container(
+                width: 120,
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                decoration: BoxDecoration(
+                  color: Colors.blue.withValues(alpha: 0.1),
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(
+                    color: Colors.blue,
+                    width: 1.5,
+                  ),
+                ),
+                child: GestureDetector(
+                  onTap: () {
+                    if (ref.read(appSettingsProvider).isHapticEnabled) {
+                      HapticFeedback.lightImpact();
+                    }
+                    controller.resetOnlineMetrics();
+                  },
+                  child: const Row(
+                    mainAxisSize: MainAxisSize.min,
+                    mainAxisAlignment: MainAxisAlignment.center,
+                    children: [
+                      Icon(Icons.refresh, size: 12, color: Colors.blue),
+                      SizedBox(width: 4),
+                      Text(
+                        '지표리셋',
+                        style: TextStyle(
+                          color: Colors.blue,
+                          fontSize: 10,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ],
@@ -463,8 +594,8 @@ class SignalPage extends ConsumerWidget {
     );
   }
 
-  /// 🆕 V4.1 로딩 상태 (개선된 디자인)
-  Widget _buildLoadingState(BuildContext context) {
+  /// 🆕 V4.1 로딩 상태 (패턴별 맞춤 메시지)
+  Widget _buildLoadingState(BuildContext context, PatternType currentPattern) {
     return Center(
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
@@ -472,10 +603,18 @@ class SignalPage extends ConsumerWidget {
           const CircularProgressIndicator(),
           const SizedBox(height: 16),
           Text(
-            '온라인 지표 연동 중...',
+            '${currentPattern.displayName} 패턴 분석 중...',
             style: TextStyle(
               color: Theme.of(context).hintColor,
               fontSize: 14,
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            '온라인 지표 연동 중...',
+            style: TextStyle(
+              color: Theme.of(context).hintColor.withValues(alpha: 0.7),
+              fontSize: 12,
             ),
           ),
         ],
@@ -483,8 +622,8 @@ class SignalPage extends ConsumerWidget {
     );
   }
 
-  /// 🆕 V4.1 에러 상태 (개선된 에러 처리)
-  Widget _buildErrorState(Object error, BuildContext context, WidgetRef ref) {
+  /// 🆕 V4.1 에러 상태 (패턴별 에러 처리)
+  Widget _buildErrorState(Object error, BuildContext context, WidgetRef ref, PatternType currentPattern) {
     return Center(
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
@@ -496,7 +635,7 @@ class SignalPage extends ConsumerWidget {
           ),
           const SizedBox(height: 16),
           Text(
-            '시그널 로드 중 오류가 발생했습니다.',
+            '${currentPattern.displayName} 시그널 로드 중 오류가 발생했습니다.',
             style: TextStyle(
               color: Theme.of(context).colorScheme.error,
               fontSize: 16,
@@ -518,7 +657,7 @@ class SignalPage extends ConsumerWidget {
             children: [
               ElevatedButton.icon(
                 onPressed: () {
-                  ref.invalidate(signalListProvider);
+                  ref.invalidate(signalsByPatternProvider(currentPattern));
                 },
                 icon: const Icon(Icons.refresh),
                 label: const Text('다시 시도'),
@@ -582,12 +721,12 @@ class SignalPage extends ConsumerWidget {
                 ),
               ),
               
-              // 구분선 (마지막 아이템 제외)
+              // 구분선 (마지막 아이템 제외) - 투명하게 변경
               if (index < viewList.length - 1)
-                Divider(
+                const Divider(
                   height: 1,
                   thickness: 0.5,
-                  color: Colors.grey[300],
+                  color: Colors.transparent, // 🔧 투명하게 변경
                   indent: 16,
                   endIndent: 16,
                 ),
@@ -601,6 +740,32 @@ class SignalPage extends ConsumerWidget {
   // ==========================================================================
   // 🆕 V4.1 대화상자들
   // ==========================================================================
+
+  /// 🔧 정교한 임계값 조정 모달 (우리가 만든 모달 사용)
+  void _showThresholdModal(BuildContext context, SignalController controller, PatternType currentPattern) {
+    showGeneralDialog(
+      context: context,
+      barrierDismissible: false,
+      barrierLabel: MaterialLocalizations.of(context).modalBarrierDismissLabel,
+      barrierColor: Colors.black.withValues(alpha: 0.5),
+      transitionDuration: const Duration(milliseconds: 300),
+      pageBuilder: (context, animation1, animation2) {
+        return Center(
+          child: ScaleTransition(
+            scale: CurvedAnimation(
+              parent: animation1,
+              curve: Curves.easeOutBack,
+            ),
+            child: ThresholdAdjustmentModal(
+              pattern: currentPattern,
+              controller: controller,
+              onClose: () => Navigator.pop(context),
+            ),
+          ),
+        );
+      },
+    );
+  }
 
   /// 🆕 프리셋 선택 대화상자
   void _showPresetDialog(BuildContext context, SignalController controller) {

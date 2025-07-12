@@ -1,91 +1,139 @@
 \n\n// ====== lib/core/di/sector_provider.dart ======\n
-// lib/core/di/sector_provider.dart
-
+import 'dart:async';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+
 import '../config/app_config.dart';
 import '../utils/logger.dart';
-import 'volume_provider.dart' show volumeUsecaseProvider;
-import 'trade_provider.dart' show marketsProvider;
+import '../common/time_frame_manager.dart'; // 🔥 간소화된 TimeFrame 시스템 사용
+import '../common/time_frame_types.dart';   // 🔥 공통 타입 사용
+import 'volume_provider.dart';
 import '../../domain/entities/volume.dart';
 import '../../shared/widgets/sector_classification.dart';
 
-// ═══════════════════════════════════════════════════════════════════════════════
-// 🆕 SECTOR 전용 Provider들 (SectorClassificationProvider 연동)
-// ═══════════════════════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════════
+// 📋 섹터 이벤트 클래스 (기존 유지)
+// ══════════════════════════════════════════════════════════════════════════════
 
-/// 🆕 섹터 분류 Provider (SectorClassificationProvider 연동)
+@immutable
+class SectorVolumeEvent {
+  final List<Volume> volumes;
+  final TimeFrame timeFrame;
+  final bool isReset;
+  final DateTime? resetTime;
+  final DateTime eventTime;
+
+  const SectorVolumeEvent({
+    required this.volumes,
+    required this.timeFrame,
+    this.isReset = false,
+    this.resetTime,
+    required this.eventTime,
+  });
+
+  factory SectorVolumeEvent.data({
+    required List<Volume> volumes,
+    required TimeFrame timeFrame,
+  }) {
+    return SectorVolumeEvent(
+      volumes: volumes,
+      timeFrame: timeFrame,
+      eventTime: DateTime.now(),
+    );
+  }
+
+  factory SectorVolumeEvent.reset({
+    required TimeFrame timeFrame,
+    DateTime? resetTime,
+  }) {
+    final now = resetTime ?? DateTime.now();
+    return SectorVolumeEvent(
+      volumes: const [],
+      timeFrame: timeFrame,
+      isReset: true,
+      resetTime: now,
+      eventTime: now,
+    );
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 🔧 기본 Provider들
+// ══════════════════════════════════════════════════════════════════════════════
+
+/// 섹터 분류 Provider (기존 유지)
 final sectorClassificationProvider = ChangeNotifierProvider<SectorClassificationProvider>(
   (ref) => SectorClassificationProvider(),
 );
 
-/// 🆕 섹터 시간대 상태 (볼륨과 독립적으로 관리)
-final sectorTimeFrameIndexProvider = StateProvider<int>((ref) => 0);
+/// 🔥 섹터 전용 시간대 Provider (Volume과 독립)
+final selectedSectorTimeFrameProvider = StateProvider<TimeFrame>((ref) => TimeFrame.min1);
 
-final sectorTimeFrameProvider = StateProvider<String>((ref) {
-  final index = ref.watch(sectorTimeFrameIndexProvider);
-  final timeFrames = AppConfig.timeFrames.map((tf) => '${tf}m').toList();
-  if (index >= 0 && index < timeFrames.length) {
-    return timeFrames[index];
-  }
-  return '1m';
-});
+// ══════════════════════════════════════════════════════════════════════════════
+// 🎯 메인 섹터 볼륨 Provider - 간소화된 시스템 연동
+// ══════════════════════════════════════════════════════════════════════════════
 
-/// 🆕 섹터별 거래대금 데이터 스트림 (SectorClassificationProvider 활용)
-final sectorVolumeDataProvider = StreamProvider.autoDispose<List<Volume>>((ref) async* {
+/// 섹터 볼륨 데이터 Provider (간소화된 TimeFrame 시스템 연동)
+final sectorVolumeDataProvider = StreamProvider<SectorVolumeEvent>((ref) async* {
   ref.keepAlive();
-
-  try {
-    final timeFrame = ref.watch(sectorTimeFrameProvider);
-    final usecase = ref.read(volumeUsecaseProvider);
-    
-    // markets AsyncValue 처리
-    final marketsAsync = ref.watch(marketsProvider);
-    final markets = marketsAsync.when(
-      data: (data) => data,
-      loading: () => <String>[],
-      error: (_, __) => <String>[],
-    );
-
-    if (markets.isEmpty) {
-      yield <Volume>[];
-      return;
-    }
-
+  
+  // 🔥 섹터 전용 시간대 Provider 사용 (Volume과 독립)
+  final selectedTimeFrame = ref.watch(selectedSectorTimeFrameProvider);
+  final sectorClassification = ref.watch(sectorClassificationProvider);
+  
+  // 🔥 간소화된 Volume 시간대별 컨트롤러에서 직접 받기
+  final controllers = ref.read(volumeTimeFrameControllersProvider);
+  final controller = controllers[selectedTimeFrame];
+  
+  if (controller == null) {
     if (AppConfig.enableTradeLog) {
-      log.i('Sector volume stream started: $timeFrame, ${markets.length} markets');
+      log.e('💥 Sector: Volume controller not found for $selectedTimeFrame');
     }
-
-    // 개별 코인 볼륨을 섹터별로 변환
-    yield* usecase.getVolumeRanking(timeFrame, markets).map((result) {
-      return result.when(
-        ok: (coinVolumes) {
-          // SectorClassificationProvider에서 현재 섹터 매핑 가져오기
-          final sectorProvider = ref.read(sectorClassificationProvider);
-          final sectorMapping = sectorProvider.currentSectors;
-          
-          final sectorVolumes = _aggregateVolumesBySector(coinVolumes, sectorMapping);
-          
-          if (AppConfig.enableTradeLog) {
-            log.d('Sector volumes aggregated: ${sectorVolumes.length} sectors from ${coinVolumes.length} coins');
-          }
-          
-          return sectorVolumes;
-        },
-        err: (error) {
-          log.e('Sector Volume error: ${error.message}');
-          return <Volume>[];
-        },
+    return;
+  }
+  
+  // Volume 스트림 바인더 활성화
+  await ref.read(volumeStreamBinderProvider);
+  
+  if (AppConfig.enableTradeLog) {
+    log.i('🔥 Sector stream started: $selectedTimeFrame');
+  }
+  
+  await for (final volumeEvent in controller.stream) {
+    if (volumeEvent.isReset) {
+      yield SectorVolumeEvent.reset(
+        timeFrame: volumeEvent.timeFrame,
+        resetTime: volumeEvent.resetTime,
       );
-    });
-    
-  } catch (e, stackTrace) {
-    log.e('Sector volume stream error: $e', e, stackTrace);
-    yield <Volume>[];
+    } else {
+      // 섹터별 집계
+      final sectorVolumes = _aggregateVolumesBySector(
+        volumeEvent.volumes,
+        sectorClassification.currentSectors,
+      );
+      
+      yield SectorVolumeEvent.data(
+        volumes: sectorVolumes,
+        timeFrame: volumeEvent.timeFrame,
+      );
+    }
   }
 });
 
-/// 🎯 핵심 로직: 개별 코인 볼륨을 섹터별로 합산
-List<Volume> _aggregateVolumesBySector(List<Volume> coinVolumes, Map<String, List<String>> sectorMapping) {
+/// 현재 섹터 볼륨 리스트 (기존 유지)
+final currentSectorVolumeListProvider = Provider<List<Volume>>((ref) {
+  final sectorEvent = ref.watch(sectorVolumeDataProvider).valueOrNull;
+  return sectorEvent?.volumes ?? [];
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 🔄 섹터별 집계 로직 (기존 유지)
+// ══════════════════════════════════════════════════════════════════════════════
+
+List<Volume> _aggregateVolumesBySector(
+  List<Volume> coinVolumes,
+  Map<String, List<String>> sectorMapping,
+) {
   if (coinVolumes.isEmpty) return [];
   
   final Map<String, double> sectorVolumeMap = {};
@@ -94,20 +142,20 @@ List<Volume> _aggregateVolumesBySector(List<Volume> coinVolumes, Map<String, Lis
   // 각 코인을 해당 섹터에 합산
   for (final coinVolume in coinVolumes) {
     final ticker = coinVolume.market.replaceFirst('KRW-', '');
-    final sectors = _findSectorsForCoin(ticker, sectorMapping);
     
-    for (final sector in sectors) {
-      sectorVolumeMap[sector] = (sectorVolumeMap[sector] ?? 0.0) + coinVolume.totalVolume;
-    }
+    sectorMapping.forEach((sectorName, coins) {
+      if (coins.contains(ticker)) {
+        sectorVolumeMap[sectorName] = 
+          (sectorVolumeMap[sectorName] ?? 0.0) + coinVolume.totalVolume;
+      }
+    });
   }
   
-  // 볼륨이 0인 섹터 제거
-  sectorVolumeMap.removeWhere((key, value) => value <= 0);
-  
-  // Volume 객체로 변환
+  // 볼륨이 0인 섹터 제거하고 Volume 객체로 변환
   final sectorVolumes = sectorVolumeMap.entries
+      .where((entry) => entry.value > 0)
       .map((entry) => Volume(
-            market: 'SECTOR-${entry.key}', // 섹터 구분용 prefix
+            market: 'SECTOR-${entry.key}',
             totalVolume: entry.value,
             lastUpdatedMs: sampleVolume.lastUpdatedMs,
             timeFrame: sampleVolume.timeFrame,
@@ -115,135 +163,11 @@ List<Volume> _aggregateVolumesBySector(List<Volume> coinVolumes, Map<String, Lis
           ))
       .toList();
   
-  // 볼륨 순 정렬 (높은 순)
+  // 볼륨 순 정렬
   sectorVolumes.sort((a, b) => b.totalVolume.compareTo(a.totalVolume));
+  
   return sectorVolumes;
-}
-
-/// 🎯 특정 코인이 속한 섹터들 찾기
-List<String> _findSectorsForCoin(String ticker, Map<String, List<String>> sectorMapping) {
-  final sectors = <String>[];
-  sectorMapping.forEach((sectorName, coins) {
-    if (coins.contains(ticker)) {
-      sectors.add(sectorName);
-    }
-  });
-  return sectors;
-}
-
-/// 🆕 섹터 컨트롤러
-final sectorTimeFrameController = Provider((ref) => SectorTimeFrameController(ref));
-
-class SectorTimeFrameController {
-  final Ref ref;
-  SectorTimeFrameController(this.ref);
-
-  /// 시간대 변경
-  void updateTimeFrame(String timeFrame, int index) {
-    final timeFrames = AppConfig.timeFrames.map((tf) => '${tf}m').toList();
-    if (index < 0 || index >= timeFrames.length) {
-      if (AppConfig.enableTradeLog) log.w('Invalid sector timeFrame index: $index');
-      return;
-    }
-    
-    ref.read(sectorTimeFrameProvider.notifier).state = timeFrame;
-    ref.read(sectorTimeFrameIndexProvider.notifier).state = index;
-    
-    if (AppConfig.enableTradeLog) {
-      log.i('Sector TimeFrame updated: $timeFrame (index: $index)');
-    }
-  }
-
-  /// 🆕 섹터 분류 토글 (SectorClassificationProvider 연동)
-  void toggleSectorClassification() {
-    ref.read(sectorClassificationProvider.notifier).toggleClassificationType();
-    
-    if (AppConfig.enableTradeLog) {
-      final currentName = ref.read(sectorClassificationProvider).currentClassificationName;
-      log.i('Sector classification toggled: $currentName');
-    }
-  }
-
-  /// 현재 시간대 정보
-  String get currentTimeFrame => ref.read(sectorTimeFrameProvider);
-  int get currentIndex => ref.read(sectorTimeFrameIndexProvider);
-  
-  /// 현재 섹터 분류 정보 (SectorClassificationProvider 연동)
-  bool get isDetailedClassification => ref.read(sectorClassificationProvider).isDetailedClassification;
-  String get currentSectorClassificationName => ref.read(sectorClassificationProvider).currentClassificationName;
-  int get totalSectors => ref.read(sectorClassificationProvider).currentSectors.length;
-  
-  /// 기본 정보
-  List<String> get availableTimeFrames => AppConfig.timeFrames.map((tf) => '${tf}m').toList();
-  
-  String getTimeFrameName(String timeFrame) {
-    final minutes = int.tryParse(timeFrame.replaceAll('m', ''));
-    return AppConfig.timeFrameNames[minutes] ?? timeFrame;
-  }
-
-  /// 🆕 섹터 관련 유틸리티 (SectorClassificationProvider 연동)
-  Map<String, int> getSectorSizes() {
-    return ref.read(sectorClassificationProvider).sectorSizes;
-  }
-
-  List<String> getCoinsInSector(String sectorName) {
-    return ref.read(sectorClassificationProvider).getCoinsInSector(sectorName);
-  }
-
-  List<String> getSectorsForCoin(String ticker) {
-    return ref.read(sectorClassificationProvider).getSectorsForCoin(ticker);
-  }
-
-  /// 수동 리셋 메서드들 (볼륨 UseCase 재사용)
-  void resetCurrentTimeFrame() {
-    final usecase = ref.read(volumeUsecaseProvider);
-    final timeFrame = ref.read(sectorTimeFrameProvider);
-    
-    final result = usecase.resetTimeFrame(timeFrame);
-    result.when(
-      ok: (_) {
-        if (AppConfig.enableTradeLog) {
-          log.i('Sector volume reset: $timeFrame');
-        }
-      },
-      err: (error) {
-        log.e('Sector volume reset failed: ${error.message}');
-      },
-    );
-  }
-
-  void resetAllTimeFrames() {
-    final usecase = ref.read(volumeUsecaseProvider);
-    
-    final result = usecase.resetAllTimeFrames();
-    result.when(
-      ok: (_) {
-        if (AppConfig.enableTradeLog) {
-          log.i('Sector volume reset: all timeframes');
-        }
-      },
-      err: (error) {
-        log.e('Sector volume reset all failed: ${error.message}');
-      },
-    );
-  }
-
-  /// 다음 리셋 시간 조회
-  DateTime? getNextResetTime() {
-    final usecase = ref.read(volumeUsecaseProvider);
-    final timeFrame = ref.read(sectorTimeFrameProvider);
-    
-    final result = usecase.getNextResetTime(timeFrame);
-    return result.when(
-      ok: (resetTime) => resetTime,
-      err: (error) {
-        log.e('Get sector reset time failed: ${error.message}');
-        return null;
-      },
-    );
-  }
 }\n\n// ====== lib/shared/widgets/sector_logo_provider.dart ======\n
-// lib/shared/widgets/sector_logo_provider.dart
 // 🚀 캐시 시스템이 적용된 섹터 로고 프로바이더
 
 import 'package:flutter/material.dart';
@@ -330,9 +254,10 @@ class SectorLogoProvider {
     return _widgetCache.length;
   }
 
-  /// 🎯 섹터 번호 유효성 검사
+  /// 🎯 섹터 번호 유효성 검사 (✅ 수정된 부분)
   static bool isValidSectorNumber(int sectorNumber) {
-    return sectorNumber >= 1 && sectorNumber <= 46;
+    // 46을 47로 변경하여 새로운 섹터 번호를 유효한 범위에 포함시킵니다.
+    return sectorNumber >= 1 && sectorNumber <= 47;
   }
 
   /// 🔧 디버깅용: 캐시 상태 정보
@@ -345,7 +270,6 @@ class SectorLogoProvider {
     };
   }
 }\n\n// ====== lib/shared/widgets/sector_names.dart ======\n
-// lib/shared/widgets/sector_names.dart
 // 🆕 실제 섹터 분류에 맞춘 네이밍 매핑
 
 import '../../domain/entities/app_settings.dart';
@@ -512,7 +436,7 @@ class SectorNames {
     },
   };
 
-  // 🎯 기본 분류 (18개 섹터) 네이밍 매핑 - 🆕 신규상장 4개 섹터 추가
+  // 🎯 기본 분류 (18개 섹터) 네이밍 매핑 - 🆕 신규상장 5개 섹터 추가
   static const Map<String, Map<String, String>> basicSectorNaming = {
     '메이저 코인': {
       'ticker': 'MAJOR',
@@ -535,9 +459,9 @@ class SectorNames {
       'english': 'Layer 1 Blockchain',
     },
     '고 시총': {
-      'ticker': 'HIGH-CAP',
+      'ticker': 'LARGE-CAP',
       'korean': '고 시총',
-      'english': 'High Market Cap',
+      'english': 'Large Market Cap',
     },
     '중 시총': {
       'ticker': 'MID-CAP',
@@ -545,9 +469,9 @@ class SectorNames {
       'english': 'Mid Market Cap',
     },
     '저 시총': {
-      'ticker': 'LOW-CAP',
+      'ticker': 'SMALL-CAP',
       'korean': '저 시총',
-      'english': 'Low Market Cap',
+      'english': 'Small Market Cap',
     },
     '마이너 알트코인': {
       'ticker': 'MINOR-ALT',
@@ -585,7 +509,7 @@ class SectorNames {
       'english': 'AI/Tech Tokens',
     },
 
-    // 🆕 신규상장 섹터 4개 추가
+    // 🆕 신규상장 섹터
     '2023년 신규상장': {
       'ticker': 'NEW-23',
       'korean': '2023년 신규상장',
@@ -605,6 +529,11 @@ class SectorNames {
       'ticker': 'NEW-25H1',
       'korean': '2025년 상반기 신규상장',
       'english': '2025 H1 New Listings',
+    },
+    '2025년 하반기 신규상장': {
+      'ticker': 'NEW-25H2',
+      'korean': '2025년 하반기 신규상장',
+      'english': '2025 H2 New Listings',
     },
   };
 
@@ -682,8 +611,6 @@ extension SectorDisplayExtension on String {
     return SectorNames.getDisplayName(this, displayMode, isDetailed: isDetailed);
   }
 }\n\n// ====== lib/shared/widgets/sector_classification.dart ======\n
-// lib/shared/widgets/sector_classification.dart
-
 import 'package:flutter/foundation.dart';
 
 /// 섹터 분류 관리 전용 Provider (공유 위젯 레이어)
@@ -763,7 +690,7 @@ class SectorClassificationProvider extends ChangeNotifier {
    // ==================== 소셜 & 커뮤니티 ====================
    '소셜/DAO': ['G', 'UXLINK', 'STEEM', 'CBK'],
    '팬토큰': ['CHZ'],
-   '밈': ['DOGE', 'SHIB', 'PEPE', 'TRUMP', 'BONK', 'MEW'],
+   '밈': ['DOGE', 'SHIB', 'PEPE', 'TRUMP', 'BONK', 'MEW', 'PENGU', 'MOODENG'],
 
    // ==================== 특수 용도 ====================
    'DID': ['ENS', 'ID', 'CVC'],
@@ -771,7 +698,7 @@ class SectorClassificationProvider extends ChangeNotifier {
    '월렛/메세징': ['SAFE', 'MASK', 'WCT', 'SNT'],
  };
 
- /// 기본 분류 (18개 섹터) - 🆕 신규상장 섹터 4개 추가
+ /// 기본 분류 (18개 섹터) - 🆕 신규상장 섹터 5개 추가
  static const Map<String, List<String>> _basicSectors = {
    '메이저 코인': [
      'BTC', 'ETH', 'XRP', 'ADA', 'SOL', 'DOT', 'AVAX', 'MATIC', 'POL', 'NEAR',
@@ -856,7 +783,7 @@ class SectorClassificationProvider extends ChangeNotifier {
      'POKT', 'STMX', 'BLAST'
    ],
 
-   // 🆕 신규상장 섹터 4개 추가
+   // 🆕 신규상장 섹터
    '2023년 신규상장': [
      'SHIB', 'MASK', 'EGLD', 'SUI', 'GRT', 'BLUR', 'IMX', 'SEI', 'MINA', 'CTC', 'ASTR'
    ],
@@ -870,7 +797,10 @@ class SectorClassificationProvider extends ChangeNotifier {
    '2025년 상반기 신규상장': [
      'SONIC', 'VTHO', 'ANIME', 'VIRTUAL', 'BERA', 'LAYER', 'TRUMP', 'JTO', 'COW', 'KAITO', 
      'ARKM', 'ORCA', 'WAL', 'COMP', 'FIL', 'WCT', 'DEEP', 'SIGN', 'TIA', 'PENGU', 
-     'NXPC', 'OM', 'SOPH', 'LPT', 'POKT', 'RVN', 'AXL', 'ALT'
+     'NXPC', 'OM', 'SOPH', 'LPT', 'POKT', 'RVN', 'AXL', 'ALT', 'RAY', 'NEWT', 'SAHARA'
+   ],
+   '2025년 하반기 신규상장': [
+     'MOODENG', 'HYPER', 'BABY'
    ],
  };
 
@@ -963,264 +893,312 @@ class SectorClassificationProvider extends ChangeNotifier {
    };
  }
 }\n\n// ====== lib/presentation/controllers/sector_controller.dart ======\n
-// lib/presentation/controllers/sector_controller.dart
-
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/di/sector_provider.dart';
+import '../../core/common/time_frame_manager.dart'; // 🔥 간소화된 TimeFrame 시스템 사용
+import '../../core/common/time_frame_types.dart';   // 🔥 공통 타입 사용
 import '../../domain/entities/volume.dart';
+import '../../shared/utils/rank_tracker.dart';
+import '../../shared/utils/rank_hot_mixin.dart';
 
-/// 섹터 화면 상태를 캡슐화하는 immutable 모델
-class SectorState {
-  final List<Volume> sectorVolumes;
-  final bool isLoading;
-  final bool isDetailedClassification;
-  final String timeFrame;
-  final int selectedTimeFrameIndex;
-  final String? errorMessage;
-
-  const SectorState({
-    this.sectorVolumes = const [],
-    this.isLoading = false,
-    this.isDetailedClassification = true,
-    this.timeFrame = '1m',
-    this.selectedTimeFrameIndex = 0,
-    this.errorMessage,
-  });
-
-  SectorState copyWith({
-    List<Volume>? sectorVolumes,
-    bool? isLoading,
-    bool? isDetailedClassification,
-    String? timeFrame,
-    int? selectedTimeFrameIndex,
-    String? errorMessage,
-  }) {
-    return SectorState(
-      sectorVolumes: sectorVolumes ?? this.sectorVolumes,
-      isLoading: isLoading ?? this.isLoading,
-      isDetailedClassification: isDetailedClassification ?? this.isDetailedClassification,
-      timeFrame: timeFrame ?? this.timeFrame,
-      selectedTimeFrameIndex: selectedTimeFrameIndex ?? this.selectedTimeFrameIndex,
-      errorMessage: errorMessage,
-    );
-  }
-}
-
-/// Sector 화면 전용 ViewModel
-class SectorController extends StateNotifier<SectorState> {
+/// 🎯 간소화된 SectorController - Trade 스타일
+class SectorController extends StateNotifier<SectorControllerState> with RankHotMixin {
   final Ref _ref;
-  ProviderSubscription<AsyncValue<List<Volume>>>? _subscription;
+  
+  // ✅ 순위 추적기 (블링크용)
+  final RankTracker _rankTracker = RankTracker();
+  
+  // ✅ 시간대별 블링크 상태 관리 (TimeFrame enum 기반)
+  final Map<TimeFrame, Map<String, bool>> _blinkStatesByTimeFrame = {};
+  
+  // ✅ Provider 구독 관리
+  final List<ProviderSubscription> _subscriptions = [];
 
-  SectorController(this._ref) : super(const SectorState()) {
-    _initializeStream();
+  SectorController(this._ref) : super(const SectorControllerState()) {
+    _initializeAllStates();
+    _initializeDataSubscription();
   }
 
-  /// 섹터 볼륨 스트림 구독 초기화
-  void _initializeStream() {
-    _subscription?.close();
-    
-    final controller = _ref.read(sectorTimeFrameController);
-    
-    state = state.copyWith(
-      isLoading: true,
-      isDetailedClassification: controller.isDetailedClassification,
-      timeFrame: controller.currentTimeFrame,
-      selectedTimeFrameIndex: controller.currentIndex,
-      errorMessage: null,
-    );
+  /// ✅ 모든 상태 초기화
+  void _initializeAllStates() {
+    clearAllHot();
+    _rankTracker.clearAll();
+    _blinkStatesByTimeFrame.clear();
+  }
 
-    // AsyncValue 직접 구독
-    _subscription = _ref.listen(sectorVolumeDataProvider, (previous, next) {
-      next.when(
-        data: (volumes) {
-          state = state.copyWith(
-            sectorVolumes: volumes,
-            isLoading: false,
-            errorMessage: null,
-          );
-        },
-        loading: () {
-          state = state.copyWith(
-            isLoading: true,
-            errorMessage: null,
-          );
-        },
-        error: (error, stackTrace) {
-          state = state.copyWith(
-            isLoading: false,
+  /// 🔥 통합 데이터 구독 초기화
+  void _initializeDataSubscription() {
+    final subscription = _ref.listen(
+      sectorVolumeDataProvider,
+      (previous, next) {
+        next.when(
+          data: (event) {
+            // 🚀 데이터 처리
+            _processSectorData(event.volumes);
+            
+            // 🔥 리셋 정보 처리 (새로운 SectorVolumeEvent 구조)
+            if (event.isReset) {
+              clearTimeFrameHot(event.timeFrame.key);
+              _clearTimeFrameBlinkStates(event.timeFrame);
+            }
+          },
+          loading: () => state = state.copyWith(isLoading: true),
+          error: (error, _) => state = state.copyWith(
             errorMessage: error.toString(),
-          );
-        },
-      );
-    });
+            isLoading: false,
+          ),
+        );
+      },
+    );
+    _subscriptions.add(subscription);
   }
 
-  /// 시간대 변경
-  void setTimeFrame(String timeFrame, int index) {
-    final controller = _ref.read(sectorTimeFrameController);
-    controller.updateTimeFrame(timeFrame, index);
+  /// ✅ 섹터 데이터 처리
+  void _processSectorData(List<Volume> volumes) {
+    // ✅ Provider에서 이미 정렬된 데이터 그대로 사용
+    final processedVolumes = volumes;
     
+    // ✅ 모든 상태 미리 계산
+    _calculateAllStates(processedVolumes);
+    
+    // ✅ 상태 업데이트
     state = state.copyWith(
-      timeFrame: timeFrame,
-      selectedTimeFrameIndex: index,
-      isLoading: true,
+      sectorVolumes: processedVolumes,
+      isLoading: false,
       errorMessage: null,
     );
-    
-    // 스트림 재구독
-    _initializeStream();
   }
 
-  /// 섹터 분류 토글 (상세 ↔ 기본)
-  void toggleSectorClassification() {
-    final controller = _ref.read(sectorTimeFrameController);
-    controller.toggleSectorClassification();
+  /// ✅ 모든 아이템의 상태 미리 계산 - TimeFrame enum 기반
+  void _calculateAllStates(List<Volume> volumes) {
+    final currentTimeFrame = this.currentTimeFrame;
+    final currentTimeFrameKey = currentTimeFrame.key; // TimeFrame → String
     
-    state = state.copyWith(
-      isDetailedClassification: !state.isDetailedClassification,
-      isLoading: true,
-      errorMessage: null,
-    );
+    // ✅ 시간대 초기화 (String key 사용 - Mixin 호환)
+    initializeTimeFrame(currentTimeFrameKey);
+    _rankTracker.initializeTimeFrame(currentTimeFrameKey);
     
-    // 스트림 재구독 (새로운 분류로)
-    _initializeStream();
-  }
-
-  /// 새로고침
-  void refresh() {
-    _initializeStream();
-  }
-
-  /// 섹터 목록 필터링 (섹터명으로)
-  List<Volume> filterBySector(String? sectorFilter) {
-    if (sectorFilter == null || sectorFilter.isEmpty) {
-      return state.sectorVolumes;
-    }
-    final upper = sectorFilter.toUpperCase();
-    return state.sectorVolumes.where((volume) {
+    // ✅ 현재 시간대 블링크 상태 초기화 (TimeFrame enum 사용)
+    _initializeTimeFrameBlinkStates(currentTimeFrame);
+    
+    for (int i = 0; i < volumes.length; i++) {
+      final volume = volumes[i];
       final sectorName = volume.market.replaceFirst('SECTOR-', '');
-      return sectorName.contains(upper);
-    }).toList();
+      final currentRank = i + 1;
+      
+      // ✅ HOT 상태는 Mixin에서 직접 관리 (String key 사용)
+      checkIfHot(
+        key: sectorName,
+        currentRank: currentRank,
+        timeFrame: currentTimeFrameKey,
+        menuType: 'sector',
+      );
+      
+      // ✅ 블링크 상태 계산 (Sector 전용 메서드 사용)
+      final blinkStates = _blinkStatesByTimeFrame[currentTimeFrame]!;
+      
+      // 섹터 순위 변화 체크 (순위 + 실제 볼륨 값 기준)
+      final isRankChange = _rankTracker.checkRankChangeWithValue(
+        key: sectorName,
+        currentRank: currentRank,
+        currentValue: volume.totalVolume,
+        timeFrame: currentTimeFrameKey,
+      );
+      
+      // 의미있는 변화가 있을 때만 블링크
+      blinkStates[sectorName] = isRankChange;
+    }
   }
 
-  /// 섹터 목록 정렬
-  void sortSectors(String field, bool ascending) {
-    final list = [...state.sectorVolumes];
-    list.sort((a, b) {
-      dynamic aValue;
-      dynamic bValue;
-      switch (field) {
-        case 'sector':
-          aValue = a.market.replaceFirst('SECTOR-', '');
-          bValue = b.market.replaceFirst('SECTOR-', '');
-          break;
-        case 'volume':
-          aValue = a.totalVolume;
-          bValue = b.totalVolume;
-          break;
-        case 'timestamp':
-          aValue = a.lastUpdatedMs;
-          bValue = b.lastUpdatedMs;
-          break;
-        default:
-          aValue = a.totalVolume;
-          bValue = b.totalVolume;
-      }
-      final cmp = aValue is Comparable && bValue is Comparable
-          ? aValue.compareTo(bValue)
-          : 0;
-      return ascending ? cmp : -cmp;
-    });
-    state = state.copyWith(sectorVolumes: list);
+  /// ✅ 시간대별 블링크 상태 초기화 (TimeFrame enum)
+  void _initializeTimeFrameBlinkStates(TimeFrame timeFrame) {
+    if (!_blinkStatesByTimeFrame.containsKey(timeFrame)) {
+      _blinkStatesByTimeFrame[timeFrame] = <String, bool>{};
+    }
   }
 
-  /// 섹터 볼륨 데이터 정렬 적용 (기본: 볼륨 내림차순)
-  List<Volume> applySorting(List<Volume> volumes) {
-    final sorted = [...volumes];
-    sorted.sort((a, b) => b.totalVolume.compareTo(a.totalVolume));
-    return sorted;
+  /// ✅ 특정 시간대 블링크 상태 초기화 (TimeFrame enum)
+  void _clearTimeFrameBlinkStates(TimeFrame timeFrame) {
+    _blinkStatesByTimeFrame[timeFrame]?.clear();
   }
 
-  /// 수동 리셋 메서드들
+  /// 🔥 시간대 변경 - Trade 스타일 (직접 Provider 조작)
+  void setTimeFrame(TimeFrame timeFrame) {
+    _ref.read(selectedSectorTimeFrameProvider.notifier).state = timeFrame;
+    // 🎯 상태 초기화 제거 - 각 시간대가 독립적으로 유지됨
+  }
+
+  /// 🔥 시간대 변경 (인덱스 기반) - 호환성 유지
+  void setTimeFrameByIndex(int index) {
+    final availableTimeFrames = this.availableTimeFrames;
+    if (index >= 0 && index < availableTimeFrames.length) {
+      setTimeFrame(availableTimeFrames[index]);
+    }
+  }
+
+  /// 🚀 섹터 분류 토글 - 섹터만의 고유 기능
+  void toggleSectorClassification() {
+    _ref.read(sectorClassificationProvider.notifier).toggleClassificationType();
+  }
+
+  /// ✅ HOT 상태 조회 (String key 사용 - Mixin 호환)
+  bool isHot(String sectorName) {
+    final hotItems = getHotItems(currentTimeFrame.key);
+    return hotItems.contains(sectorName);
+  }
+
+  /// ✅ 블링크 상태 조회 - TimeFrame enum 기반
+  bool shouldBlink(String sectorName) {
+    final currentTimeFrame = this.currentTimeFrame;
+    final blinkStates = _blinkStatesByTimeFrame[currentTimeFrame];
+    return blinkStates?[sectorName] ?? false;
+  }
+
+  /// ✅ 블링크 상태 초기화 - 강제 notify 문제 해결
+  void clearBlinkState(String sectorName) {
+    final currentTimeFrame = this.currentTimeFrame;
+    final blinkStates = _blinkStatesByTimeFrame[currentTimeFrame];
+    if (blinkStates != null) {
+      blinkStates[sectorName] = false;
+      // ✅ 실제 변화가 있을 때만 notify (불필요한 copyWith 제거)
+    }
+  }
+
+  /// 🔥 TimeFrame 관련 메서드들 - 간소화된 구조
+  TimeFrame get currentTimeFrame => _ref.read(selectedSectorTimeFrameProvider);
+  
+  int get currentIndex {
+    final availableTimeFrames = this.availableTimeFrames;
+    return availableTimeFrames.indexOf(currentTimeFrame);
+  }
+  
+  List<TimeFrame> get availableTimeFrames => TimeFrame.fromAppConfig();
+
+  String getTimeFrameName(TimeFrame timeFrame) => timeFrame.displayName;
+
+  /// 🔥 리셋 메서드들 - 간소화된 Manager 직접 사용
   void resetCurrentTimeFrame() {
-    final controller = _ref.read(sectorTimeFrameController);
-    controller.resetCurrentTimeFrame();
-    refresh();
+    final currentTimeFrame = this.currentTimeFrame;
+    GlobalTimeFrameManager().resetTimeFrame(currentTimeFrame);
   }
 
   void resetAllTimeFrames() {
-    final controller = _ref.read(sectorTimeFrameController);
-    controller.resetAllTimeFrames();
-    refresh();
+    GlobalTimeFrameManager().resetAll();
   }
 
-  /// 다음 리셋 시간 조회
+  /// 🔥 완벽한 타이머 동기화 - 간소화된 Manager 직접 사용
   DateTime? getNextResetTime() {
-    final controller = _ref.read(sectorTimeFrameController);
-    return controller.getNextResetTime();
+    final currentTimeFrame = this.currentTimeFrame;
+    return GlobalTimeFrameManager().getNextResetTime(currentTimeFrame);
   }
 
-  /// 유틸리티 Getters
-  List<String> get availableTimeFrames {
-    final controller = _ref.read(sectorTimeFrameController);
-    return controller.availableTimeFrames;
-  }
-
-  String getTimeFrameName(String timeFrame) {
-    final controller = _ref.read(sectorTimeFrameController);
-    return controller.getTimeFrameName(timeFrame);
-  }
-
+  /// 🚀 섹터 고유 기능들 - 직접 Provider 접근
   String get currentSectorClassificationName {
-    final controller = _ref.read(sectorTimeFrameController);
-    return controller.currentSectorClassificationName;
+    return _ref.read(sectorClassificationProvider).currentClassificationName;
+  }
+
+  bool get isDetailedClassification {
+    return _ref.read(sectorClassificationProvider).isDetailedClassification;
   }
 
   int get totalSectors {
-    final controller = _ref.read(sectorTimeFrameController);
-    return controller.totalSectors;
+    return _ref.read(sectorClassificationProvider).currentSectors.length;
   }
 
-  /// 특정 섹터의 코인들 조회
+  Map<String, int> getSectorSizes() {
+    return _ref.read(sectorClassificationProvider).sectorSizes;
+  }
+
+  /// ✅ 특정 섹터의 코인들 조회
   List<String> getCoinsInSector(String sectorName) {
-    final controller = _ref.read(sectorTimeFrameController);
-    return controller.getCoinsInSector(sectorName);
+    return _ref.read(sectorClassificationProvider).getCoinsInSector(sectorName);
   }
 
-  /// 특정 코인이 속한 섹터들 조회
+  /// ✅ 특정 코인이 속한 섹터들 조회
   List<String> getSectorsForCoin(String ticker) {
-    final controller = _ref.read(sectorTimeFrameController);
-    return controller.getSectorsForCoin(ticker);
+    return _ref.read(sectorClassificationProvider).getSectorsForCoin(ticker);
   }
 
+  /// ✅ 디버깅용 메서드들
+  Map<String, int> getBlinkDebugInfo() {
+    return _rankTracker.getDebugInfo();
+  }
+
+  /// ✅ 메모리 정리
+  void cleanupExpiredStates() {
+    cleanupExpiredHotStates();
+    _cleanupOldBlinkStates();
+  }
+
+  /// ✅ 오래된 블링크 상태 정리 (TimeFrame enum 기반)
+  void _cleanupOldBlinkStates() {
+    final currentTimeFrame = this.currentTimeFrame;
+    final availableTimeFrames = this.availableTimeFrames.toSet();
+    
+    _blinkStatesByTimeFrame.removeWhere((timeFrame, _) => 
+      timeFrame != currentTimeFrame && !availableTimeFrames.contains(timeFrame)
+    );
+  }
+
+  /// ✅ 리소스 정리
   @override
   void dispose() {
-    _subscription?.close();
+    // Provider 구독 해제
+    for (final subscription in _subscriptions) {
+      subscription.close();
+    }
+    _subscriptions.clear();
+    
+    // ✅ 모든 리소스 정리
+    disposeHot();
+    _rankTracker.dispose();
+    _blinkStatesByTimeFrame.clear();
+    
     super.dispose();
   }
 }
 
-/// Provider 선언
-final sectorControllerProvider =
-    StateNotifierProvider<SectorController, SectorState>((ref) {
-  return SectorController(ref);
-});\n\n// ====== lib/presentation/pages/sector_page.dart ======\n
-// lib/presentation/pages/sector_page.dart
+/// ✅ 상태 클래스 (변경 없음)
+class SectorControllerState {
+  final List<Volume> sectorVolumes;        // 정렬된 섹터 볼륨 데이터
+  final bool isLoading;                   // 로딩 상태
+  final String? errorMessage;             // 에러 메시지
 
+  const SectorControllerState({
+    this.sectorVolumes = const [],
+    this.isLoading = false,
+    this.errorMessage,
+  });
+
+  SectorControllerState copyWith({
+    List<Volume>? sectorVolumes,
+    bool? isLoading,
+    String? errorMessage,
+  }) {
+    return SectorControllerState(
+      sectorVolumes: sectorVolumes ?? this.sectorVolumes,
+      isLoading: isLoading ?? this.isLoading,
+      errorMessage: errorMessage ?? this.errorMessage,
+    );
+  }
+}
+
+/// Provider 선언 - UI용 SectorController
+final sectorControllerProvider = StateNotifierProvider<SectorController, SectorControllerState>(
+  (ref) => SectorController(ref),
+);\n\n// ====== lib/presentation/pages/sector_page.dart ======\n
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:flutter/services.dart'; // HapticFeedback용
-import '../../core/config/app_config.dart';
-import '../../core/di/sector_provider.dart';
-import '../../core/di/settings_provider.dart';
-import '../../domain/entities/app_settings.dart';
-import '../../domain/entities/volume.dart';
+import '../../core/di/app_providers.dart';
+import '../../core/common/time_frame_types.dart';
+import '../../core/common/time_frame_manager.dart';
+import '../../shared/widgets/slider_widget.dart';
 import '../controllers/sector_controller.dart';
 import '../widgets/sector_tile.dart';
 
 class SectorPage extends ConsumerWidget {
   final ScrollController scrollController;
-  
+
   const SectorPage({
     Key? key,
     required this.scrollController,
@@ -1228,329 +1206,152 @@ class SectorPage extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    // 1) TimeFrame 상태 및 컨트롤러
-    final timeFrames = AppConfig.timeFrames.map((tf) => '${tf}m').toList();
-    final index = ref.watch(sectorTimeFrameIndexProvider);
-    final timeFrameCtrl = ref.read(sectorTimeFrameController);
+    // ✅ Controller state watch (데이터 + UI 상태)
+    final state = ref.watch(sectorControllerProvider);
+    final controller = ref.read(sectorControllerProvider.notifier);
     
-    // 2) 섹터 스트림
-    final sectorsAsync = ref.watch(sectorVolumeDataProvider);
+    // 🔥 핵심 수정: ref.watch로 실시간 상태 감지
+    final currentTimeFrame = ref.watch(selectedSectorTimeFrameProvider);
+    final availableTimeFrames = controller.availableTimeFrames;
+    final currentIndex = availableTimeFrames.indexOf(currentTimeFrame);
     
-    // 3) UI 상태 컨트롤러
-    final uiController = ref.watch(sectorControllerProvider.notifier);
-    
-    // 4) 슬라이더 위치 설정 읽기
+    // ✅ UI 설정
     final sliderPosition = ref.watch(appSettingsProvider).sliderPosition;
     
-    // 슬라이더 위젯 생성
-    final sliderWidget = _buildSliderWidget(timeFrames, index, timeFrameCtrl, ref);
-    
-    // 섹터 리스트 위젯 생성
-    final sectorListWidget = _buildSectorList(sectorsAsync, uiController, scrollController, timeFrames, index, context);
+    // ✅ 공통 슬라이더 위젯 - Controller 중심 설계
+    final sliderWidget = CommonSliderWidget(
+      leftText: '시간대: ${currentTimeFrame.displayName}',
+      sliderValue: currentIndex.toDouble(),
+      sliderMin: 0.0,
+      sliderMax: (availableTimeFrames.length - 1).toDouble(),
+      sliderDivisions: availableTimeFrames.length - 1,
+      sliderLabel: currentTimeFrame.displayName,
+      onSliderChanged: (value) {
+        final newIndex = value.round();
+        if (newIndex >= 0 && newIndex < availableTimeFrames.length) {
+          // 🔥 Surge/Volume과 동일하게 직접 setTimeFrame 호출
+          controller.setTimeFrame(availableTimeFrames[newIndex]);
+        }
+      },
+      // 🚀 Sector 고유: 섹터 분류 토글 버튼
+      centerWidget: CommonToggleButton(
+        text: controller.currentSectorClassificationName,
+        isActive: controller.isDetailedClassification,
+        onTap: () => controller.toggleSectorClassification(),
+        icon: controller.isDetailedClassification ? Icons.view_module : Icons.view_list,
+        fontSize: 10,
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+      ),
+      rightWidget: CommonCountdownWidget(
+        // 🔥 Controller 중심 설계 - Controller 메서드 사용
+        nextResetTime: controller.getNextResetTime(),
+      ),
+    );
 
     return PrimaryScrollController(
       controller: scrollController,
       child: Column(
         children: [
-          // 슬라이더 위치에 따른 조건부 배치
           if (sliderPosition == SliderPosition.top) sliderWidget,
-          
-          // 섹터 리스트 (항상 중간)
-          Expanded(child: sectorListWidget),
-          
-          // 슬라이더가 하단일 때
+          Expanded(child: _buildSectorList(state, controller, currentTimeFrame, context)),
           if (sliderPosition == SliderPosition.bottom) sliderWidget,
         ],
       ),
     );
   }
 
-  /// 슬라이더 위젯 생성 (시간대 선택 + 🆕 토글 + 카운트다운)
-  Widget _buildSliderWidget(List<String> timeFrames, int index, SectorTimeFrameController timeFrameCtrl, WidgetRef ref) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          // 🎯 시간대, 토글, 카운트다운을 Row로 배치 (3등분)
-          Row(
-            children: [
-              // 좌측: 시간대 (1/3 영역)
-              Expanded(
-                flex: 1,
-                child: Text(
-                  '시간대: ${AppConfig.timeFrameNames[AppConfig.timeFrames[index]] ?? timeFrames[index]}',
-                  style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ),
-              
-              // 🆕 중앙: 토글 버튼 (1/3 영역, 정중앙 정렬)
-              Expanded(
-                flex: 1,
-                child: Center(
-                  child: _buildClassificationToggle(timeFrameCtrl, ref),
-                ),
-              ),
-              
-              // 우측: 카운트다운 (1/3 영역, 우측 정렬)
-              Expanded(
-                flex: 1,
-                child: Align(
-                  alignment: Alignment.centerRight,
-                  child: _buildCountdownWidget(timeFrameCtrl),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 6),
-          Slider(
-            value: index.toDouble(),
-            min: 0,
-            max: (timeFrames.length - 1).toDouble(),
-            divisions: timeFrames.length - 1,
-            label: AppConfig.timeFrameNames[AppConfig.timeFrames[index]] ?? timeFrames[index],
-            onChanged: (v) {
-              if (ref.read(appSettingsProvider).isHapticEnabled) {
-                HapticFeedback.lightImpact();
-              }
-              final i = v.round();
-              timeFrameCtrl.updateTimeFrame(timeFrames[i], i);
-            },
-          ),
-        ],
-      ),
-    );
-  }
-
-  /// 🆕 작은 분류 토글 버튼 (상세/기본)
-  Widget _buildClassificationToggle(SectorTimeFrameController timeFrameCtrl, WidgetRef ref) {
-    final isDetailed = timeFrameCtrl.isDetailedClassification;
-    final currentName = timeFrameCtrl.currentSectorClassificationName;
-    
-    return GestureDetector(
-      onTap: () {
-        if (ref.read(appSettingsProvider).isHapticEnabled) {
-          HapticFeedback.lightImpact(); // 🎯 light haptic 추가
-        }
-        timeFrameCtrl.toggleSectorClassification();
-      },
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-        decoration: BoxDecoration(
-          color: isDetailed ? Colors.orange : Colors.transparent, // 🎯 기본일 때 투명
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(
-            color: Colors.orange, // 🎯 둘 다 주황 테두리
-            width: 1,
-          ),
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(
-              isDetailed ? Icons.view_module : Icons.view_list,
-              size: 14,
-              color: isDetailed ? Colors.white : Colors.orange, // 🎯 기본일 때 주황 아이콘
-            ),
-            const SizedBox(width: 4),
-            Text(
-              currentName,
-              style: TextStyle(
-                fontSize: 12,
-                fontWeight: FontWeight.w600,
-                color: isDetailed ? Colors.white : Colors.orange, // 🎯 기본일 때 주황 텍스트
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  /// 카운트다운 위젯 생성 - 시계 아이콘 간격 조정
-  Widget _buildCountdownWidget(SectorTimeFrameController timeFrameCtrl) {
-    final nextResetTime = timeFrameCtrl.getNextResetTime();
-    
-    if (nextResetTime == null) {
-      return Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          const Icon(Icons.access_time, size: 16, color: Colors.grey),
-          const SizedBox(width: 2), // ✅ 4 → 2로 간격 줄이기
-          Container(
-            width: 48, // 🎯 고정 폭으로 흔들림 방지
-            alignment: Alignment.center,
-            child: const Text(
-              '--:--',
-              style: TextStyle(
-                fontSize: 12, // 🎯 14 → 12로 줄이기
-                color: Colors.grey,
-                fontWeight: FontWeight.w500,
-              ),
-            ),
-          ),
-        ],
-      );
-    }
-
-    final now = DateTime.now();
-    final remaining = nextResetTime.difference(now);
-    
-    if (remaining.isNegative) {
-      return Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          const Icon(Icons.access_time, size: 16, color: Colors.orange),
-          const SizedBox(width: 2), // ✅ 4 → 2로 간격 줄이기
-          Container(
-            width: 42, // 🎯 고정 폭으로 흔들림 방지
-            alignment: Alignment.center,
-            child: const Text(
-              '00:00',
-              style: TextStyle(
-                fontSize: 13, // 🎯 14 → 13으로 줄이기
-                color: Colors.orange,
-                fontWeight: FontWeight.w500,
-              ),
-            ),
-          ),
-        ],
-      );
-    }
-
-    final minutes = remaining.inMinutes;
-    final seconds = remaining.inSeconds % 60;
-    final minutesStr = minutes.toString().padLeft(2, '0');
-    final secondsStr = seconds.toString().padLeft(2, '0');
-    
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        const Icon(Icons.access_time, size: 16, color: Colors.orange),
-        const SizedBox(width: 2), // ✅ 4 → 2로 간격 줄이기
-        Container(
-          width: 52, // 🎯 48 → 52로 4px 더 넓히기 (6자리 대응)
-          alignment: Alignment.center,
-          child: Text(
-            '$minutesStr:$secondsStr',
-            style: const TextStyle(
-              fontSize: 12, // 🎯 13 → 12로 더 줄이기
-              color: Colors.orange,
-              fontWeight: FontWeight.w500,
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-
-  /// 섹터 리스트 위젯 생성 - 스크롤바 개선 (Trade/Volume과 동일한 스타일)
+  /// ✅ 섹터 리스트 (Controller state 기반) - Controller 중심 설계
   Widget _buildSectorList(
-    AsyncValue<List<Volume>> sectorsAsync, 
-    SectorController uiController, 
-    ScrollController scrollController,
-    List<String> timeFrames,
-    int index,
+    SectorControllerState state,
+    SectorController controller,
+    TimeFrame currentTimeFrame, // 🔥 Controller에서 받은 TimeFrame
     BuildContext context,
   ) {
-    return sectorsAsync.when(
-      data: (sectorVolumes) {
-        // List<Volume>을 정렬된 리스트로 변환
-        final sortedSectors = uiController.applySorting(sectorVolumes);
-        
-        if (sortedSectors.isEmpty) {
-          return Center(
-            child: Text(
-              '섹터 거래대금 데이터가 없습니다.\n(시간대: ${AppConfig.timeFrameNames[AppConfig.timeFrames[index]] ?? timeFrames[index]})',
-              textAlign: TextAlign.center,
-              style: TextStyle(color: Theme.of(context).hintColor, fontSize: 16),
-            ),
-          );
-        }
+    // ✅ 로딩 상태
+    if (state.isLoading) {
+      return const Center(child: CircularProgressIndicator());
+    }
 
-        // 🎯 스크롤바 개선: 20% 축소 + 사용시만 표시 (Trade/Volume과 동일)
-        return RawScrollbar(
-          controller: scrollController,
-          thumbVisibility: false, // ✅ 평소엔 숨김
-          trackVisibility: false, // ✅ 트랙도 숨김
-          thickness: 6.4, // ✅ 20% 축소 (8 → 6.4)
-          radius: const Radius.circular(3.2), // ✅ 반지름도 20% 축소 (4 → 3.2)
-          thumbColor: Colors.orange.withValues(alpha: 0.5),
-          trackColor: Colors.transparent,
-          interactive: true, // 드래그 가능
-          minThumbLength: 40, // ✅ 최소 썸 길이도 20% 축소 (50 → 40)
-          child: ListView.builder(
-            controller: scrollController,
-            physics: const BouncingScrollPhysics(
-              parent: AlwaysScrollableScrollPhysics(),
-            ),
-            padding: const EdgeInsets.only(left: 16, right: 20, top: 16, bottom: 16), // ✅ 우측 패딩 조정
-            itemCount: sortedSectors.length,
-            itemBuilder: (_, i) => SectorTile(
-              sectorName: sortedSectors[i].market.replaceFirst('SECTOR-', ''),
-              totalVolume: sortedSectors[i].totalVolume,
-              rank: i + 1,
-              timeFrame: sortedSectors[i].timeFrame,
-              lastUpdated: sortedSectors[i].lastUpdated,
-            ),
-          ),
+    // ✅ 에러 상태
+    if (state.errorMessage != null) {
+      return Center(child: Text('섹터 데이터 로드 중 오류: ${state.errorMessage}'));
+    }
+
+    // ✅ 빈 데이터
+    if (state.sectorVolumes.isEmpty) {
+      return Center(
+        child: Text(
+          '섹터 거래대금 데이터가 없습니다.\n(시간대: ${currentTimeFrame.displayName})', // 🔥 enum 직접 사용
+          textAlign: TextAlign.center,
+          style: TextStyle(color: Theme.of(context).hintColor, fontSize: 16),
+        ),
+      );
+    }
+
+    // ✅ 섹터 리스트 (이미 정렬된 데이터 사용)
+    return CommonScrollableList(
+      scrollController: scrollController,
+      itemCount: state.sectorVolumes.length,
+      itemBuilder: (_, i) {
+        final volume = state.sectorVolumes[i];
+        final sectorName = volume.market.replaceFirst('SECTOR-', '');
+        final rank = i + 1;
+        
+        return SectorTile(
+          sectorName: sectorName,
+          totalVolume: volume.totalVolume,
+          rank: rank,
+          // ✅ 안전한 상태 조회 (기존 패턴 유지)
+          isHot: controller.isHot(sectorName),
+          shouldBlink: controller.shouldBlink(sectorName),
         );
       },
-      loading: () => const Center(child: CircularProgressIndicator()),
-      error: (e, _) => Center(child: Text('섹터 데이터 로드 중 오류: $e')),
     );
   }
 }\n\n// ====== lib/presentation/widgets/sector_tile.dart ======\n
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/di/app_providers.dart';
-import '../../domain/entities/app_settings.dart'; // AmountDisplayMode 추가
+import '../../domain/entities/app_settings.dart';
 import '../../shared/widgets/sector_names.dart';
-import '../../shared/widgets/sector_logo_provider.dart'; // 섹터 로고 프로바이더
-import '../../shared/widgets/amount_display_widget.dart'; // 💰 머니아이콘 위젯
-import '../../shared/utils/tile_common.dart'; // 🎯 공통 유틸리티
-import '../../shared/utils/blink_animation_mixin.dart'; // ✨ 반짝임 헬퍼
-import '../../shared/utils/amount_formatter.dart'; // 💰 포맷터 유틸리티
-
-// 🎯 순위 추적을 위한 전역 Map (섹터별 이전 순위 저장)
-final Map<String, int> _previousSectorRanks = {};
+import '../../shared/widgets/sector_logo_provider.dart';
+import '../../shared/widgets/amount_display_widget.dart';
+import '../../shared/utils/tile_common.dart';
+import '../../shared/utils/blink_animation_mixin.dart';
+import '../../shared/utils/amount_formatter.dart';
+import '../controllers/sector_controller.dart';
 
 class SectorTile extends ConsumerStatefulWidget {
   final String sectorName;
   final double totalVolume;
   final int rank;
-  final String timeFrame;
-  final DateTime lastUpdated;
-  final bool showHotIcon;
-  final bool enableBlinkAnimation;
-  
+  final bool isHot;        // ✅ Controller에서 계산된 값
+  final bool shouldBlink;  // ✅ Controller에서 계산된 값
+
   const SectorTile({
-    Key? key, 
+    Key? key,
     required this.sectorName,
     required this.totalVolume,
     required this.rank,
-    required this.timeFrame,
-    required this.lastUpdated,
-    this.showHotIcon = false,
-    this.enableBlinkAnimation = false,
+    required this.isHot,
+    required this.shouldBlink,
   }) : super(key: key);
 
   @override
   ConsumerState<SectorTile> createState() => _SectorTileState();
 }
 
-class _SectorTileState extends ConsumerState<SectorTile> 
+class _SectorTileState extends ConsumerState<SectorTile>
     with SingleTickerProviderStateMixin {
 
   late AnimationController _blinkController;
   late Animation<double> _blinkAnimation;
-  bool _shouldBlink = false;
+  bool _isBlinking = false;
 
   @override
   void initState() {
     super.initState();
-    // ✨ 반짝임 애니메이션 초기화 (기존 방식)
+    // ✅ 애니메이션 초기화 (Volume과 완전 동일)
     _blinkController = AnimationController(
       duration: const Duration(milliseconds: 600),
       vsync: this,
@@ -1563,12 +1364,9 @@ class _SectorTileState extends ConsumerState<SectorTile>
   @override
   void didUpdateWidget(SectorTile oldWidget) {
     super.didUpdateWidget(oldWidget);
-    // 🎯 순위 변화 감지 (헬퍼 클래스 사용)
-    if (BlinkAnimationHelper.checkRankChange(
-      previousRanksMap: _previousSectorRanks,
-      key: widget.sectorName,
-      currentRank: widget.rank,
-    )) {
+    
+    // ✅ shouldBlink props 변화 감지해서 애니메이션 시작 (Volume과 완전 동일)
+    if (widget.shouldBlink && !oldWidget.shouldBlink && !_isBlinking) {
       _startBlink();
     }
   }
@@ -1579,32 +1377,29 @@ class _SectorTileState extends ConsumerState<SectorTile>
     super.dispose();
   }
 
-  /// 반짝임 시작 (설정 연동 추가)
+  /// ✅ 블링크 시작 (Volume과 완전 동일한 로직)
   void _startBlink() {
     final blinkEnabled = ref.read(appSettingsProvider).blinkEnabled;
-    if (!mounted || !blinkEnabled) return; // 🎯 설정 체크 추가!
+    if (!mounted || !blinkEnabled) return;
     
-    _shouldBlink = true;
+    _isBlinking = true;
     _blinkController.forward().then((_) {
-      _blinkController.reverse().then((_) {
-        if (mounted) {
-          setState(() {
-            _shouldBlink = false;
-          });
-        }
-      });
+      if (mounted) {
+        _blinkController.reverse().then((_) {
+          if (mounted) {
+            setState(() {
+              _isBlinking = false;
+            });
+            
+            // ✅ 애니메이션 완료 후 Controller에 상태 초기화 요청 (Volume과 동일)
+            ref.read(sectorControllerProvider.notifier).clearBlinkState(widget.sectorName);
+          }
+        });
+      }
     });
   }
 
-  /// 섹터명 표시 (기존 유지 - 섹터 전용 로직)
-  String _getDisplaySectorName() {
-    final displayMode = ref.watch(appSettingsProvider).displayMode;
-    final isDetailed = ref.watch(sectorClassificationProvider).isDetailedClassification;
-    
-    return SectorNames.getDisplayName(widget.sectorName, displayMode, isDetailed: isDetailed);
-  }
-
-  /// 섹터 번호 매핑 (기존 유지 - 섹터 전용 로직)
+  /// ✅ 섹터 번호 매핑 (섹터만의 고유 로직)
   int _getSectorNumber(String sectorName) {
     const sectorNumberMap = {
       // 상세 분류 (1-28번)
@@ -1615,7 +1410,6 @@ class _SectorTileState extends ConsumerState<SectorTile>
       'AI': 17, '메타버스': 18, 'NFT/게임': 19, '미디어/스트리밍': 20,
       '광고': 21, '교육/기타 콘텐츠': 22, '소셜/DAO': 23, '팬토큰': 24,
       '밈': 25, 'DID': 26, '의료': 27, '월렛/메세징': 28,
-      
       // 기본 분류 (29-46번)
       '메이저 코인': 29, '비트코인 계열': 30, '이더리움 생태계': 31, '레이어1 블록체인': 32,
       '고 시총': 33, '중 시총': 34, '저 시총': 35, '마이너 알트코인': 36,
@@ -1623,38 +1417,47 @@ class _SectorTileState extends ConsumerState<SectorTile>
       '솔라나 생태계': 41, 'AI/기술 토큰': 42, '2023년 신규상장': 43, '2024년 상반기 신규상장': 44,
       '2024년 하반기 신규상장': 45, '2025년 상반기 신규상장': 46,
     };
-    
     return sectorNumberMap[sectorName] ?? 1;
   }
-  
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final onSurface = theme.colorScheme.onSurface;
-    final onSurface70 = onSurface.withValues(alpha: 0.7);
     
-    // 🎯 표준 카드 위젯 생성
+    // 🚀 Controller에서 직접 상태 조회 (Volume과 동일한 패턴)
+    final controller = ref.read(sectorControllerProvider.notifier);
+    final displayMode = ref.watch(appSettingsProvider).displayMode;
+    
+    // ✅ 섹터명 표시 (Controller에서 분류 상태 조회)
+    final displaySectorName = SectorNames.getDisplayName(
+      widget.sectorName, 
+      displayMode, 
+      isDetailed: controller.isDetailedClassification, // 🚀 Controller에서 조회!
+    );
+
+    // ✅ 표준 카드 위젯 생성 (Volume과 완전 동일한 구조)
     Widget cardWidget = TileCommon.buildStandardCard(
       child: TileCommon.buildFlexRow(
         children: [
-          // 🏆 순위 부분: 고정 크기
+          // 🏆 순위 부분 (Volume과 동일)
           FlexChild.fixed(
-            TileCommon.buildRankWidget(context, widget.rank), // ✅ 공통 함수
+            TileCommon.buildRankWidget(context, widget.rank),
           ),
-          
+
           const FlexChild.fixed(SizedBox(width: 12)),
-          
-          // 🎨 섹터 아이콘 부분: 고정 크기
+
+          // 🎨 섹터 아이콘 부분 (섹터만의 고유 요소)
           FlexChild.fixed(
             SectorLogoProvider.buildSectorIcon(
               sectorNumber: _getSectorNumber(widget.sectorName),
               size: 40.0,
             ),
           ),
-          
+
           const FlexChild.fixed(SizedBox(width: 12)),
-          
-          // 📱 섹터명 부분: flex 25
+
+          // 📱 섹터명 부분 (Volume과 동일한 구조)
           FlexChild.expanded(
             Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -1663,7 +1466,7 @@ class _SectorTileState extends ConsumerState<SectorTile>
                   children: [
                     Flexible(
                       child: Text(
-                        _getDisplaySectorName(), // ✅ 섹터 전용 함수
+                        displaySectorName,
                         style: TextStyle(
                           fontWeight: FontWeight.bold,
                           color: theme.colorScheme.primary,
@@ -1674,16 +1477,27 @@ class _SectorTileState extends ConsumerState<SectorTile>
                       ),
                     ),
                     const SizedBox(width: 4),
-                    // 🚀 HOT 아이콘
-                    if (TileCommon.buildHotIcon(widget.showHotIcon) case final hotIcon?) 
-                      hotIcon, // ✅ 공통 함수
+                    // 🔥 HOT 아이콘 (설정 체크 - 블링크와 동일한 패턴)
+                    Consumer(
+                      builder: (context, ref, child) {
+                        final hotEnabled = ref.watch(appSettingsProvider).hotEnabled;
+                        if (hotEnabled && widget.isHot) {
+                          return TileCommon.buildHotIcon(true) ?? const SizedBox.shrink();
+                        }
+                        return const SizedBox.shrink();
+                      },
+                    ),
                   ],
                 ),
                 const SizedBox(height: 2),
                 Text(
-                  SectorNames.getDisplayName(widget.sectorName, DisplayMode.ticker, isDetailed: ref.watch(sectorClassificationProvider).isDetailedClassification), // 실제 ticker 표시
+                  SectorNames.getDisplayName(
+                    widget.sectorName, 
+                    DisplayMode.ticker, 
+                    isDetailed: controller.isDetailedClassification, // 🚀 Controller에서 조회!
+                  ),
                   style: TextStyle(
-                    color: onSurface70,
+                    color: onSurface.withValues(alpha: 0.7),
                     fontSize: 12,
                   ),
                 ),
@@ -1691,24 +1505,24 @@ class _SectorTileState extends ConsumerState<SectorTile>
             ),
             flex: 25,
           ),
-          
-          // 💰 거래량 부분: flex 30 - 세로 가운데 정렬로 변경!
+
+          // 💰 거래량 부분 (Volume과 완전 동일)
           FlexChild.expanded(
             Align(
               alignment: Alignment.centerRight,
               child: Consumer(
                 builder: (context, ref, child) {
                   final amountDisplayMode = ref.watch(appSettingsProvider).amountDisplayMode;
-                  
+
                   return amountDisplayMode == AmountDisplayMode.icon
-                      ? AmountDisplayWidget( // ✅ 머니아이콘 모드
+                      ? AmountDisplayWidget(
                           totalAmount: widget.totalVolume,
-                          isBuy: true, // Sector도 중립적 색상
+                          isBuy: true,
                           fontSize: 15,
                           fontWeight: FontWeight.w600,
                         )
-                      : Text( // ✅ 숫자 모드 (기존 방식)
-                          AmountFormatter.formatVolume(widget.totalVolume), // ✅ 공통 포맷터
+                      : Text(
+                          AmountFormatter.formatVolume(widget.totalVolume),
                           style: TextStyle(
                             color: onSurface,
                             fontSize: 15,
@@ -1726,27 +1540,19 @@ class _SectorTileState extends ConsumerState<SectorTile>
       ),
     );
 
-    // 🎯 반짝임 애니메이션 적용 (설정 체크 추가)
+    // ✅ 블링크 애니메이션 적용 (Volume과 완전 동일)
     final blinkEnabled = ref.watch(appSettingsProvider).blinkEnabled;
-    
-    Widget finalWidget = blinkEnabled 
-        ? BlinkAnimationHelper.wrapWithBlinkEffect(
-            child: cardWidget,
-            shouldBlink: _shouldBlink,
-            blinkAnimation: _blinkAnimation,
-            blinkColor: Colors.amber, // Sector도 앰버 색상
-          )
-        : cardWidget;
-    
-    // 🎨 조건부 깜빡임 효과 (설정 확인)
-    if (!_shouldBlink && widget.enableBlinkAnimation && blinkEnabled) {
-      finalWidget = BlinkAnimationHelper.wrapWithConditionalBlink(
+
+    // ✅ 블링크 상태에 따른 애니메이션 적용 (Volume과 완전 동일)
+    if (blinkEnabled && (_isBlinking || widget.shouldBlink)) {
+      return BlinkAnimationHelper.wrapWithBlinkEffect(
         child: cardWidget,
-        enableBlinkAnimation: widget.enableBlinkAnimation,
-        theme: theme,
+        shouldBlink: _isBlinking,
+        blinkAnimation: _blinkAnimation,
+        blinkColor: Colors.amber,
       );
     }
-    
-    return finalWidget;
+
+    return cardWidget;
   }
 }

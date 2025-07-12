@@ -18,17 +18,16 @@ class VolumePage extends ConsumerWidget {
     // ✅ Controller state watch (데이터 + UI 상태)
     final state = ref.watch(volumeControllerProvider);
     final controller = ref.read(volumeControllerProvider.notifier);
-    
-    // 🔥 TimeFrame 관련 - 공통 Provider 사용
+
+    // 🔥 핵심 수정: ref.watch로 실시간 상태 감지
     final currentTimeFrame = ref.watch(volumeSelectedTimeFrameProvider);
-    final availableTimeFrames = TimeFrame.fromAppConfig();
+    final availableTimeFrames = controller.availableTimeFrames;
     final currentIndex = availableTimeFrames.indexOf(currentTimeFrame);
-    final globalController = ref.read(globalTimeFrameControllerProvider);
-    
+
     // ✅ UI 설정
     final sliderPosition = ref.watch(appSettingsProvider).sliderPosition;
-    
-    // ✅ 공통 슬라이더 위젯 - 공통 TimeFrame 시스템 연동
+
+    // ✅ 공통 슬라이더 위젯 - Controller 중심 설계
     final sliderWidget = CommonSliderWidget(
       leftText: '시간대: ${currentTimeFrame.displayName}',
       sliderValue: currentIndex.toDouble(),
@@ -39,8 +38,8 @@ class VolumePage extends ConsumerWidget {
       onSliderChanged: (value) {
         final newIndex = value.round();
         if (newIndex >= 0 && newIndex < availableTimeFrames.length) {
-          // 🔥 공통 GlobalTimeFrameController 사용
-          globalController.setVolumeTimeFrame(availableTimeFrames[newIndex]);
+          // 🔥 Surge와 동일하게 직접 setTimeFrame 호출
+          controller.setTimeFrame(availableTimeFrames[newIndex]);
         }
       },
       // 🔥 Volume 고유: 심플한 중앙 위젯 (Top 50/100 토글만)
@@ -52,8 +51,8 @@ class VolumePage extends ConsumerWidget {
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
       ),
       rightWidget: CommonCountdownWidget(
-        // 🔥 공통 GlobalTimeFrameController로 완벽한 타이머 동기화
-        nextResetTime: globalController.getNextResetTime(currentTimeFrame),
+        // 🔥 Controller 중심 설계 - Controller 메서드 사용
+        nextResetTime: controller.getNextResetTime(),
       ),
     );
 

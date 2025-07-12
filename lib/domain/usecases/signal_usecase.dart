@@ -1,12 +1,17 @@
+// lib/domain/usecases/signal_usecase.dart
+
 import '../entities/signal.dart';
 import '../repositories/signal_repository.dart';
+import '../../core/config/app_config.dart';
+import '../../core/utils/logger.dart';
 
-/// 🚀 Signal UseCase V4.1 - 온라인 지표 비즈니스 로직
+/// 🚀 Signal UseCase V4.1 - Clean Architecture + 모달 지원
 /// 
 /// 주요 개선사항:
 /// - V4.1 온라인 지표 시스템 연동
 /// - 고급 패턴 설정 비즈니스 규칙
 /// - 시스템 헬스 모니터링
+/// - 모달용 메서드 4개 추가 (정석 Repository 호출)
 /// - 백테스팅 지원
 /// - 성능 최적화된 필터링
 class SignalUseCase {
@@ -160,13 +165,190 @@ class SignalUseCase {
   }
 
   // ==========================================================================
+  // 🆕 V4.1 모달용 메서드 (Controller에서 직접 호출)
+  // ==========================================================================
+
+  /// 🆕 현재 패턴의 특정 임계값 조회 (모달에서 사용)
+  double getCurrentThresholdValue(PatternType pattern, String key) {
+    return _repository.getCurrentThresholdValue(pattern, key);
+  }
+
+  /// 🆕 패턴의 기본 임계값 조회 (모달에서 사용)
+  double getDefaultThresholdValue(PatternType pattern, String key) {
+    // 패턴별 기본값 정의 (비즈니스 로직)
+    switch (pattern) {
+      case PatternType.surge:
+        switch (key) {
+          case 'priceChangePercent': return 0.4;
+          case 'zScoreThreshold': return 2.0;
+          case 'buyRatioMin': return 0.6;
+          case 'buyRatioMax': return 0.95;
+          case 'consecutiveMin': return 3;
+          case 'timeWindowSeconds': return 300;
+          case 'cooldownSeconds': return 300;
+          case 'minVolume': return 100000;
+          default: return 0.0;
+        }
+      case PatternType.flashFire:
+        switch (key) {
+          case 'priceChangePercent': return 0.8;
+          case 'zScoreThreshold': return 3.0;
+          case 'buyRatioMin': return 0.7;
+          case 'buyRatioMax': return 0.98;
+          case 'consecutiveMin': return 5;
+          case 'timeWindowSeconds': return 180;
+          case 'cooldownSeconds': return 240;
+          case 'minVolume': return 200000;
+          default: return 0.0;
+        }
+      case PatternType.stackUp:
+        switch (key) {
+          case 'priceChangePercent': return 0.2;
+          case 'consecutiveMin': return 7;
+          case 'buyRatioMin': return 0.65;
+          case 'rSquaredMin': return 0.8;
+          case 'timeWindowSeconds': return 600;
+          case 'cooldownSeconds': return 600;
+          case 'minVolume': return 150000;
+          default: return 0.0;
+        }
+      case PatternType.stealthIn:
+        switch (key) {
+          case 'minTradeAmount': return 5000000.0; // 500만원
+          case 'priceChangePercent': return 0.15;
+          case 'cvThreshold': return 0.05;
+          case 'buyRatioMin': return 0.55;
+          case 'timeWindowSeconds': return 900;
+          case 'cooldownSeconds': return 900;
+          case 'minVolume': return 300000;
+          default: return 0.0;
+        }
+      case PatternType.blackHole:
+        switch (key) {
+          case 'cvThreshold': return 0.02;
+          case 'priceChangePercent': return 0.1;
+          case 'minTradeAmount': return 10000000.0; // 1000만원
+          case 'buyRatioMin': return 0.5;
+          case 'timeWindowSeconds': return 1200;
+          case 'cooldownSeconds': return 1200;
+          case 'minVolume': return 500000;
+          default: return 0.0;
+        }
+      case PatternType.reboundShot:
+        switch (key) {
+          case 'priceRangeMin': return 0.03; // 3% 급락
+          case 'priceChangePercent': return 0.25;
+          case 'buyRatioMin': return 0.75;
+          case 'timeWindowSeconds': return 240;
+          case 'cooldownSeconds': return 360;
+          case 'reboundStrength': return 1.5;
+          case 'minVolume': return 250000;
+          default: return 0.0;
+        }
+    }
+  }
+
+  /// 🆕 임계값 직접 업데이트 (모달에서 사용) - updateAdvancedPatternConfig 별칭
+  void updatePatternThresholdDirect(String key, double value, PatternType pattern) {
+    updateAdvancedPatternConfig(pattern, key, value);
+  }
+
+  /// 🆕 임계값 기본값으로 리셋 (모달에서 사용)
+  void resetThresholdToDefault(PatternType pattern, String key) {
+    try {
+      final defaultValue = getDefaultThresholdValue(pattern, key);
+      updateAdvancedPatternConfig(pattern, key, defaultValue);
+      
+      if (AppConfig.enableTradeLog) {
+        log.i('🔄 Threshold reset to default: ${pattern.name}.$key = $defaultValue');
+      }
+    } catch (e) {
+      if (AppConfig.enableTradeLog) {
+        log.e('❌ Reset threshold to default failed: $e');
+      }
+      rethrow;
+    }
+  }
+
+  // ==========================================================================
+  // 🆕 V4.1 시스템 제어 메서드 (Fallback 처리 포함)
+  // ==========================================================================
+
+  /// 🆕 시스템 전체 활성화/비활성화 (Controller에서 사용)
+  void setSystemActive(bool active) {
+    _repository.setSystemActive(active);
+  }
+
+  /// 🆕 시스템 상태 조회 (Controller에서 사용)
+  Map<String, dynamic> getSystemStatus() {
+    return _repository.getSystemStatus();
+  }
+
+  /// 🆕 온라인 지표 헬스 조회 (Controller에서 사용)
+  Map<String, dynamic> getOnlineMetricsHealth() {
+    return _repository.getOnlineMetricsHealth();
+  }
+
+  /// 🆕 시스템 헬스 조회 (Controller에서 사용)
+  Future<Map<String, dynamic>> getSystemHealth() async {
+    return await _repository.getSystemHealth();
+  }
+
+  /// 🆕 온라인 지표 리셋 (Controller에서 사용)
+  void resetOnlineMetrics([String? market]) {
+    _repository.resetOnlineMetrics(market);
+  }
+
+  /// 🆕 설정 내보내기 (Controller에서 사용)
+  Map<String, dynamic> exportCurrentConfiguration() {
+    return _repository.exportConfiguration();
+  }
+
+  /// 🆕 패턴의 모든 기본값 조회 (내부 헬퍼)
+  Map<String, double> _getAllDefaultValues(PatternType pattern) {
+    final commonKeys = [
+      'priceChangePercent', 'zScoreThreshold', 'buyRatioMin', 'buyRatioMax',
+      'consecutiveMin', 'timeWindowSeconds', 'cooldownSeconds', 'minVolume',
+      'cvThreshold', 'rSquaredMin', 'minTradeAmount', 'priceRangeMin', 'reboundStrength'
+    ];
+    
+    final defaults = <String, double>{};
+    for (final key in commonKeys) {
+      try {
+        final value = getDefaultThresholdValue(pattern, key);
+        if (value > 0) {
+          defaults[key] = value;
+        }
+      } catch (e) {
+        // 해당 키가 패턴에 없으면 무시
+      }
+    }
+    
+    return defaults;
+  }
+
+  /// 🆕 설정 가져오기 (Controller에서 사용)
+  void importSignalConfiguration(Map<String, dynamic> config) {
+    _repository.importConfiguration(config);
+  }
+
+  /// 🆕 시그널 초기화 (오버로드된 메서드)
+  void clearSignals([PatternType? pattern]) {
+    if (pattern != null) {
+      clearPatternSignals(pattern);
+    } else {
+      clearAllSignals();
+    }
+  }
+
+  // ==========================================================================
   // 🆕 V4.1 시스템 모니터링 및 분석
   // ==========================================================================
 
   /// 패턴별 성능 통계
   Future<PatternPerformanceStats> getPatternPerformance(PatternType pattern) async {
     final stats = await _repository.getPatternStats(pattern);
-    final systemHealth = await _repository.getSystemHealth();
+    final systemHealth = await getSystemHealth(); // UseCase의 getSystemHealth 사용
     
     return PatternPerformanceStats(
       patternType: pattern,
@@ -184,7 +366,7 @@ class SignalUseCase {
 
   /// 전체 시스템 헬스 체크
   Future<SystemHealthReport> getSystemHealthReport() async {
-    final health = await _repository.getSystemHealth();
+    final health = await getSystemHealth(); // UseCase의 getSystemHealth 사용
     final dataQuality = _repository.getMarketDataQuality();
     
     return SystemHealthReport(
@@ -341,14 +523,14 @@ class SignalUseCase {
   // ==========================================================================
 
   /// 현재 설정 백업
-  SignalConfiguration exportCurrentConfiguration() {
-    final config = _repository.exportConfiguration();
+  SignalConfiguration exportSignalConfiguration() {
+    final config = exportCurrentConfiguration();
     return SignalConfiguration.fromJson(config);
   }
 
-  /// 설정 복원
+  /// 설정 복원  
   void importConfiguration(SignalConfiguration configuration) {
-    _repository.importConfiguration(configuration.toJson());
+    importSignalConfiguration(configuration.toJson());
   }
 
   /// 설정 비교 (A/B 테스트용)
@@ -357,6 +539,213 @@ class SignalUseCase {
     SignalConfiguration configB,
   ) {
     return ConfigurationDiff.compare(configA, configB);
+  }
+
+  // ==========================================================================
+  // 🆕 V4.1 추가 유틸리티 메서드들
+  // ==========================================================================
+
+  /// 🆕 패턴별 설정 키 목록 조회
+  List<String> getPatternConfigKeys(PatternType pattern) {
+    final allKeys = _getAllDefaultValues(pattern).keys.toList();
+    return allKeys..sort();
+  }
+
+  /// 🆕 모든 패턴의 현재 상태 조회
+  Map<String, dynamic> getAllPatternStatus() {
+    final status = <String, dynamic>{};
+    
+    for (final pattern in PatternType.values) {
+      status[pattern.name] = {
+        'enabled': isPatternEnabled(pattern),
+        'threshold': getPatternThreshold(pattern),
+        'displayName': pattern.displayName,
+        'description': pattern.description,
+        'defaultThreshold': pattern.defaultThreshold,
+        'timeWindowMinutes': pattern.timeWindowMinutes,
+        'defaultConfidence': pattern.defaultConfidence,
+        'defaultCooldownSeconds': pattern.defaultCooldownSeconds,
+        'availableKeys': getPatternConfigKeys(pattern),
+      };
+    }
+    
+    return {
+      'timestamp': DateTime.now().toIso8601String(),
+      'version': 'V4.1-Complete',
+      'patterns': status,
+      'systemStatus': getSystemStatus(),
+    };
+  }
+
+  /// 🆕 설정 검증
+  Map<String, dynamic> validateConfiguration(Map<String, dynamic> config) {
+    final errors = <String>[];
+    final warnings = <String>[];
+    
+    try {
+      // 버전 확인
+      final version = config['version'] as String?;
+      if (version == null) {
+        warnings.add('Configuration version not specified');
+      }
+      
+      // 패턴 설정 검증
+      final patternEnabled = config['patternEnabled'] as Map<String, dynamic>?;
+      if (patternEnabled != null) {
+        for (final patternName in patternEnabled.keys) {
+          final found = PatternType.values.any((p) => p.name == patternName);
+          if (!found) {
+            warnings.add('Unknown pattern: $patternName');
+          }
+        }
+      }
+      
+      // 임계값 검증
+      final patternConfig = config['patternConfig'] as Map<String, dynamic>?;
+      if (patternConfig != null) {
+        for (final entry in patternConfig.entries) {
+          final patternName = entry.key;
+          final settings = entry.value as Map<String, dynamic>?;
+          
+          if (settings != null && settings.containsKey('threshold')) {
+            try {
+              final pattern = PatternType.values.firstWhere(
+                (p) => p.name == patternName,
+              );
+              final threshold = settings['threshold'] as double;
+              
+              // 임계값 범위 검증 (updatePatternThreshold 로직 재사용)
+              try {
+                updatePatternThreshold(pattern, threshold);
+              } catch (e) {
+                errors.add('Invalid threshold for $patternName: $e');
+              }
+            } catch (e) {
+              warnings.add('Unknown pattern in config: $patternName');
+            }
+          }
+        }
+      }
+      
+      return {
+        'valid': errors.isEmpty,
+        'errors': errors,
+        'warnings': warnings,
+        'timestamp': DateTime.now().toIso8601String(),
+      };
+    } catch (e) {
+      return {
+        'valid': false,
+        'errors': ['Configuration validation failed: $e'],
+        'warnings': warnings,
+        'timestamp': DateTime.now().toIso8601String(),
+      };
+    }
+  }
+
+  /// 🆕 성능 최적화된 패턴 활성화 상태 체크
+  bool isAnyPatternEnabled() {
+    return PatternType.values.any((pattern) => isPatternEnabled(pattern));
+  }
+
+  /// 🆕 활성화된 패턴 목록 조회
+  List<PatternType> getEnabledPatterns() {
+    return PatternType.values
+        .where((pattern) => isPatternEnabled(pattern))
+        .toList();
+  }
+
+  /// 🆕 비활성화된 패턴 목록 조회
+  List<PatternType> getDisabledPatterns() {
+    return PatternType.values
+        .where((pattern) => !isPatternEnabled(pattern))
+        .toList();
+  }
+
+  /// 🆕 패턴별 권장 설정 조회
+  Map<String, dynamic> getRecommendedSettings(PatternType pattern) {
+    final defaultValues = _getAllDefaultValues(pattern);
+    
+    return {
+      'pattern': pattern.name,
+      'displayName': pattern.displayName,
+      'description': pattern.description,
+      'defaultValues': defaultValues,
+      'currentThreshold': getPatternThreshold(pattern),
+      'isEnabled': isPatternEnabled(pattern),
+      'recommendations': {
+        'conservative': _getConservativeSettings(pattern),
+        'balanced': _getBalancedSettings(pattern),
+        'aggressive': _getAggressiveSettings(pattern),
+      },
+    };
+  }
+
+  /// 🆕 보수적 설정 조회
+  Map<String, double> _getConservativeSettings(PatternType pattern) {
+    final defaults = _getAllDefaultValues(pattern);
+    final conservative = <String, double>{};
+    
+    for (final entry in defaults.entries) {
+      final key = entry.key;
+      final value = entry.value;
+      
+      // 보수적 설정: 더 높은 임계값, 더 엄격한 조건
+      switch (key) {
+        case 'priceChangePercent':
+          conservative[key] = value * 1.5; // 50% 더 높은 임계값
+          break;
+        case 'zScoreThreshold':
+          conservative[key] = value * 1.3; // 30% 더 높은 Z-Score
+          break;
+        case 'buyRatioMin':
+          conservative[key] = (value * 1.1).clamp(0.0, 1.0); // 10% 더 높은 매수비율
+          break;
+        case 'cooldownSeconds':
+          conservative[key] = value * 2.0; // 2배 더 긴 쿨다운
+          break;
+        default:
+          conservative[key] = value;
+      }
+    }
+    
+    return conservative;
+  }
+
+  /// 🆕 균형 설정 조회 (기본값)
+  Map<String, double> _getBalancedSettings(PatternType pattern) {
+    return _getAllDefaultValues(pattern);
+  }
+
+  /// 🆕 공격적 설정 조회
+  Map<String, double> _getAggressiveSettings(PatternType pattern) {
+    final defaults = _getAllDefaultValues(pattern);
+    final aggressive = <String, double>{};
+    
+    for (final entry in defaults.entries) {
+      final key = entry.key;
+      final value = entry.value;
+      
+      // 공격적 설정: 더 낮은 임계값, 더 느슨한 조건
+      switch (key) {
+        case 'priceChangePercent':
+          aggressive[key] = value * 0.7; // 30% 더 낮은 임계값
+          break;
+        case 'zScoreThreshold':
+          aggressive[key] = value * 0.8; // 20% 더 낮은 Z-Score
+          break;
+        case 'buyRatioMin':
+          aggressive[key] = (value * 0.9).clamp(0.0, 1.0); // 10% 더 낮은 매수비율
+          break;
+        case 'cooldownSeconds':
+          aggressive[key] = value * 0.5; // 절반으로 줄인 쿨다운
+          break;
+        default:
+          aggressive[key] = value;
+      }
+    }
+    
+    return aggressive;
   }
 
   // ==========================================================================
@@ -547,11 +936,49 @@ class ConfigurationDiff {
     SignalConfiguration configA,
     SignalConfiguration configB,
   ) {
-    // 간단한 비교 로직 (실제로는 더 정교하게 구현)
-    return const ConfigurationDiff(
-      changedPatterns: [],
-      changedSettings: [],
-      differences: {},
+    final changedPatterns = <String>[];
+    final changedSettings = <String>[];
+    final differences = <String, dynamic>{};
+    
+    // 패턴 활성화 상태 비교
+    for (final pattern in configA.patternEnabled.keys) {
+      final aEnabled = configA.patternEnabled[pattern] ?? false;
+      final bEnabled = configB.patternEnabled[pattern] ?? false;
+      
+      if (aEnabled != bEnabled) {
+        changedPatterns.add(pattern);
+        differences['patternEnabled_$pattern'] = {
+          'from': aEnabled,
+          'to': bEnabled,
+        };
+      }
+    }
+    
+    // 패턴 설정 비교
+    for (final pattern in configA.patternConfig.keys) {
+      final aConfig = configA.patternConfig[pattern] as Map<String, dynamic>?;
+      final bConfig = configB.patternConfig[pattern] as Map<String, dynamic>?;
+      
+      if (aConfig != null && bConfig != null) {
+        for (final key in aConfig.keys) {
+          final aValue = aConfig[key];
+          final bValue = bConfig[key];
+          
+          if (aValue != bValue) {
+            changedSettings.add('${pattern}_$key');
+            differences['config_${pattern}_$key'] = {
+              'from': aValue,
+              'to': bValue,
+            };
+          }
+        }
+      }
+    }
+    
+    return ConfigurationDiff(
+      changedPatterns: changedPatterns,
+      changedSettings: changedSettings,
+      differences: differences,
     );
   }
 

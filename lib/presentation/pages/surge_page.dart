@@ -19,11 +19,10 @@ class SurgePage extends ConsumerWidget {
     final state = ref.watch(surgeControllerProvider);
     final controller = ref.read(surgeControllerProvider.notifier);
     
-    // 🔥 TimeFrame 관련 - 공통 Provider 사용
+    // 🔥 핵심 수정: ref.watch로 실시간 상태 감지
     final currentTimeFrame = ref.watch(surgeSelectedTimeFrameProvider);
-    final availableTimeFrames = TimeFrame.fromAppConfig();
+    final availableTimeFrames = controller.availableTimeFrames;
     final currentIndex = availableTimeFrames.indexOf(currentTimeFrame);
-    final globalController = ref.read(globalTimeFrameControllerProvider);
     
     // ✅ UI 설정
     final sliderPosition = ref.watch(appSettingsProvider).sliderPosition;
@@ -39,8 +38,8 @@ class SurgePage extends ConsumerWidget {
       onSliderChanged: (value) {
         final newIndex = value.round();
         if (newIndex >= 0 && newIndex < availableTimeFrames.length) {
-          // 🔥 공통 GlobalTimeFrameController 사용
-          globalController.setSurgeTimeFrame(availableTimeFrames[newIndex]);
+          // 🔥 간소화된 Controller 직접 호출
+          controller.setTimeFrame(availableTimeFrames[newIndex]);
         }
       },
       // 🔥 Surge 고유: 복잡한 5분할 레이아웃 (12-6-10-10-11)
@@ -97,8 +96,8 @@ class SurgePage extends ConsumerWidget {
         ),
       ],
       rightWidget: CommonCountdownWidget(
-        // 🔥 공통 GlobalTimeFrameController로 완벽한 타이머 동기화
-        nextResetTime: globalController.getNextResetTime(currentTimeFrame),
+        // 🔥 간소화된 Controller에서 타이머 정보 조회
+        nextResetTime: controller.getNextResetTime(),
       ),
     );
 

@@ -1,4 +1,3 @@
-// lib/shared/widgets/sector_logo_provider.dart
 // 🚀 캐시 시스템이 적용된 섹터 로고 프로바이더
 
 import 'package:flutter/material.dart';
@@ -85,9 +84,10 @@ class SectorLogoProvider {
     return _widgetCache.length;
   }
 
-  /// 🎯 섹터 번호 유효성 검사
+  /// 🎯 섹터 번호 유효성 검사 (✅ 수정된 부분)
   static bool isValidSectorNumber(int sectorNumber) {
-    return sectorNumber >= 1 && sectorNumber <= 46;
+    // 46을 47로 변경하여 새로운 섹터 번호를 유효한 범위에 포함시킵니다.
+    return sectorNumber >= 1 && sectorNumber <= 47;
   }
 
   /// 🔧 디버깅용: 캐시 상태 정보
